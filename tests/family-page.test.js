@@ -54,3 +54,40 @@ test('family page reports initialization instead of throwing when saving without
   global.getApp = originalGetApp;
   global.wx = originalWx;
 });
+
+test('family inputs keep in-progress text when a store refresh arrives', () => {
+  const originalGetApp = global.getApp;
+  const refreshListeners = [];
+  const state = { currentMemberId: 'member-1' };
+  const summary = {
+    id: 'family-1',
+    name: '我们的家',
+    memberCount: 1,
+    members: [{ id: 'member-1', displayName: '我' }],
+    inviteCode: 'family-1',
+    syncStatus: 'ready',
+  };
+  const store = {
+    subscribe(listener) {
+      refreshListeners.push(listener);
+      return () => {};
+    },
+    getState() {
+      return state;
+    },
+    getFamilySummary() {
+      return summary;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  const page = createPageInstance(loadFamilyPage());
+
+  page.onLoad();
+  page.onNameInput({ detail: { value: '周末饭桌' } });
+  page.onMemberNameInput({ detail: { value: '小明' } });
+  refreshListeners[0]();
+
+  assert.equal(page.data.name, '周末饭桌');
+  assert.equal(page.data.memberName, '小明');
+  global.getApp = originalGetApp;
+});

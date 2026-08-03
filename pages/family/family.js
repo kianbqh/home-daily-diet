@@ -48,9 +48,12 @@ Page({
     const model = store
       ? buildFamilyViewModel(store.getState(), store.getFamilySummary())
       : buildFamilyViewModel(null, null);
+    if (this.nameDraftDirty) model.name = this.data.name;
+    if (this.memberNameDraftDirty) model.memberName = this.data.memberName;
     this.setData(model);
   },
   onNameInput(event) {
+    this.nameDraftDirty = true;
     this.setData({ name: event.detail.value });
   },
   saveName() {
@@ -61,11 +64,13 @@ Page({
     }
     const store = this.requireStore();
     if (!store) return;
+    this.nameDraftDirty = false;
     store.updateFamily({ name });
     wx.showToast({ title: '已保存', icon: 'success' });
     this.refresh();
   },
   onMemberNameInput(event) {
+    this.memberNameDraftDirty = true;
     this.setData({ memberName: event.detail.value });
   },
   saveMemberName() {
@@ -76,6 +81,7 @@ Page({
     }
     const store = this.requireStore();
     if (!store) return;
+    this.memberNameDraftDirty = false;
     store.updateMember({ displayName });
     wx.showToast({ title: '称呼已保存', icon: 'success' });
     this.refresh();

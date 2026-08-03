@@ -4,7 +4,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const appConfig = JSON.parse(fs.readFileSync(path.join(root, 'app.json'), 'utf8'));
 const projectConfig = JSON.parse(fs.readFileSync(path.join(root, 'project.config.json'), 'utf8'));
-const cloudConfig = JSON.parse(fs.readFileSync(path.join(root, 'cloudbase.example.json'), 'utf8'));
+const cloudConfig = JSON.parse(fs.readFileSync(path.join(root, 'cloudbase.config.json'), 'utf8'));
 const requiredFiles = [
   'app.js',
   'app.json',

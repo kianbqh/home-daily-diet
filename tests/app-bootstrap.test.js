@@ -34,9 +34,12 @@ test('creates a usable local store when wx.cloud.init throws', () => {
 test('uses a pack-safe runtime CloudBase config filename', () => {
   const root = path.resolve(__dirname, '..');
   const appSource = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+  const runtimeConfig = require(path.join(root, 'cloudbase.config.js'));
 
-  assert.equal(fs.existsSync(path.join(root, 'cloudbase.config.json')), true);
-  assert.match(appSource, /cloudbase\.config\.json/);
+  assert.equal(fs.existsSync(path.join(root, 'cloudbase.config.js')), true);
+  assert.equal(runtimeConfig.envId, 'home-daily-diet-d8f5e7d6907dd53a');
+  assert.match(appSource, /cloudbase\.config\.js/);
+  assert.doesNotMatch(appSource, /cloudbase\.config\.json/);
   assert.doesNotMatch(appSource, /cloudbase\.example\.json/);
 });
 

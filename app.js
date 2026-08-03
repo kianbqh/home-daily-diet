@@ -1,5 +1,5 @@
 const { createApplicationStore } = require('./services/app-bootstrap');
-const cloudbaseConfig = require('./cloudbase.config.json');
+const cloudbaseConfig = require('./cloudbase.config.js');
 
 App({
   globalData: {

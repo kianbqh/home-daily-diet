@@ -4,7 +4,7 @@
 .wechat-devtools-data/
 .wechat-devtools-profile/
 project.private.config.json
-docs/superpowers/
+docs/superpowers/plans/
 
 # Generated and machine-specific files
 node_modules/

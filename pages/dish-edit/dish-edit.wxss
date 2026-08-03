@@ -1,0 +1,104 @@
+.required {
+  color: #b85c45;
+}
+
+.optional {
+  color: #a4a79e;
+  font-size: 22rpx;
+  font-weight: 400;
+}
+
+.readonly {
+  color: #73786f;
+  opacity: .8;
+}
+
+.sub-label {
+  margin-top: 28rpx;
+}
+
+.sub-input {
+  margin-top: 20rpx;
+}
+
+.profile-edit-hint {
+  margin-bottom: 20rpx;
+  padding: 20rpx 24rpx;
+  border-radius: 18rpx;
+  background: #f3eee5;
+  color: #6f756b;
+  font-size: 24rpx;
+  line-height: 1.6;
+}
+
+.inline-action {
+  display: block;
+  margin: 16rpx 0 0;
+  padding: 0;
+  text-align: left;
+}
+
+.date-field {
+  color: #4e554d;
+}
+
+.history-section {
+  margin-bottom: 20rpx;
+}
+
+.history-item {
+  padding-top: 22rpx;
+}
+
+.history-item + .history-item {
+  margin-top: 20rpx;
+  border-top: 1rpx solid #eee9df;
+}
+
+.history-top {
+  display: flex;
+  justify-content: space-between;
+  color: #7d8279;
+  font-size: 22rpx;
+}
+
+.history-body {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-top: 14rpx;
+}
+
+.history-image,
+.history-placeholder {
+  flex: 0 0 88rpx;
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 16rpx;
+}
+
+.history-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e8eee8;
+  font-size: 32rpx;
+}
+
+.history-note {
+  flex: 1;
+  color: #525950;
+  font-size: 25rpx;
+  line-height: 1.5;
+}
+
+.picker-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.picker-arrow {
+  color: #9a9d95;
+  font-size: 34rpx;
+}

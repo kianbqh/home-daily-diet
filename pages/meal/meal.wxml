@@ -1,0 +1,61 @@
+<view class="page meal-page">
+  <view class="eyebrow">DINNER PICK</view>
+  <view class="page-title">今天吃什么？</view>
+  <view class="page-subtitle">从菜品库里挑想吃的菜，吃饭的人都可以选。</view>
+
+  <view wx:if="{{joining}}" class="empty-card">
+    <view class="empty-icon">🍽️</view>
+    <view class="empty-title">正在打开家庭晚餐</view>
+    <view class="empty-description">需要先加入分享这顿饭的家庭空间。</view>
+  </view>
+
+  <view wx:elif="{{model.emptyLibrary}}" class="empty-card">
+    <view class="empty-icon">🍽️</view>
+    <view class="empty-title">菜品库还没有内容</view>
+    <view class="empty-description">先记录一道家里的菜，它才会出现在今天的选择里。</view>
+    <button class="primary-button" bindtap="goRecordFirst">记录第一道菜</button>
+  </view>
+
+  <block wx:else>
+    <view class="meal-summary card-surface">
+      <view>
+        <view class="summary-label">{{model.confirmed ? '已确认的晚餐' : '正在收集大家的想法'}}</view>
+      <view class="summary-count">{{model.confirmed ? model.finalDishes.length : model.finalDishCount}} <text>{{model.confirmed ? '道最终菜' : '道待定菜'}}</text></view>
+      </view>
+      <view class="summary-date">{{date}}</view>
+    </view>
+
+    <view class="selection-tip {{model.confirmed ? 'confirmed-tip' : ''}}">
+      {{model.confirmed ? '菜单已经确认，吃完后可以为每道菜追加一条制作记录。' : '点一下想吃的菜，再点一次可以取消自己的选择；被选中的菜还能单独设为最终菜单。'}}
+    </view>
+
+    <view wx:if="{{!model.confirmed}}" class="meal-grid">
+      <view wx:for="{{model.dishes}}" wx:key="id" class="meal-dish-wrap" data-id="{{item.id}}" bindtap="toggleDish">
+        <dish-card dish="{{item}}" selected="{{item.selectedByMe}}" />
+        <view wx:if="{{item.submissionCount}}" class="vote-count">{{item.submissionCount}} 人想吃</view>
+        <view wx:if="{{item.selected}}" class="final-toggle {{item.finalSelected ? 'active' : ''}}" data-id="{{item.id}}" catchtap="toggleFinalDish">{{item.finalSelected ? '保留进最终菜单' : '不做这道'}}</view>
+      </view>
+    </view>
+
+    <view wx:else class="final-menu">
+      <view class="final-menu-heading">已确认的菜</view>
+      <view wx:for="{{model.finalDishes}}" wx:key="id" class="final-dish-row">
+        <dish-card dish="{{item}}" />
+        <button class="record-small-button" data-id="{{item.id}}" bindtap="recordDish">追加制作记录</button>
+      </view>
+    </view>
+
+    <view class="sticky-action">
+      <block wx:if="{{model.canEdit}}">
+        <button class="primary-button" bindtap="confirmMeal">确定今天菜单</button>
+        <button class="secondary-button" open-type="share">分享当前候选</button>
+      </block>
+      <button wx:else class="secondary-button" open-type="share">分享今天的菜单</button>
+    </view>
+
+    <view wx:if="{{model.confirmed}}" class="after-meal card-surface">
+      <view class="after-meal-title">吃完以后</view>
+      <view class="after-meal-copy">给上面的每道菜补一张照片、一个评价或一句备注，菜品库会越来越完整。</view>
+    </view>
+  </block>
+</view>

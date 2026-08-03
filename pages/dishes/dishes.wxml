@@ -1,0 +1,35 @@
+<view class="page dishes-page">
+  <view class="page-header">
+    <view>
+      <view class="eyebrow">THE DISH LIBRARY</view>
+      <view class="page-title">菜品库</view>
+    </view>
+    <button class="header-add" bindtap="goAdd">＋ 记录</button>
+  </view>
+  <view class="page-subtitle">先把做过的菜留下来，之后每一次选择都会更容易。</view>
+
+  <view class="search-box">
+    <text class="search-icon">⌕</text>
+    <input value="{{query}}" placeholder="搜索菜名" confirm-type="search" bindinput="onSearch" />
+    <text wx:if="{{query}}" class="search-clear" bindtap="clearSearch">清除</text>
+  </view>
+
+  <scroll-view scroll-x class="tag-scroll" enable-flex>
+    <view class="tag-row">
+      <view wx:for="{{tags}}" wx:key="key" class="tag {{activeTag === item.key ? 'active' : ''}}" data-tag="{{item.key}}" bindtap="chooseTag">{{item.label}}</view>
+    </view>
+  </scroll-view>
+
+  <view wx:if="{{!dishes.length}}" class="empty-card library-empty">
+    <view class="empty-icon">🥢</view>
+    <view class="empty-title">{{emptyTitle}}</view>
+    <view class="empty-description">{{emptyDescription}}</view>
+    <button class="primary-button" bindtap="goAdd">记录一道菜</button>
+  </view>
+
+  <view wx:else class="library-grid">
+    <dish-card wx:for="{{dishes}}" wx:key="id" dish="{{item}}" bind:dishTap="onDishTap" />
+  </view>
+
+  <button class="ghost-button back-button" bindtap="goHome">返回首页</button>
+</view>

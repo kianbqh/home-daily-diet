@@ -1,0 +1,115 @@
+.meal-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 38rpx;
+  padding: 28rpx;
+}
+
+.summary-label {
+  color: #8b8f86;
+  font-size: 23rpx;
+}
+
+.summary-count {
+  margin-top: 8rpx;
+  color: #315b49;
+  font-size: 48rpx;
+  font-weight: 700;
+}
+
+.summary-count text {
+  font-size: 24rpx;
+  font-weight: 400;
+}
+
+.summary-date {
+  color: #999d94;
+  font-size: 23rpx;
+}
+
+.selection-tip {
+  margin: 24rpx 4rpx 0;
+  color: #7b8178;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.confirmed-tip {
+  color: #9b6c4a;
+}
+
+.meal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 28rpx 22rpx;
+  margin-top: 28rpx;
+}
+
+.meal-dish-wrap {
+  position: relative;
+}
+
+.vote-count {
+  margin-top: 10rpx;
+  color: #8f948b;
+  font-size: 21rpx;
+  text-align: center;
+}
+
+.final-toggle {
+  margin-top: 12rpx;
+  padding: 12rpx 16rpx;
+  border-radius: 14rpx;
+  background: #f0ede6;
+  color: #777d74;
+  font-size: 22rpx;
+  text-align: center;
+}
+
+.final-toggle.active {
+  background: #e6f0ea;
+  color: #315b49;
+}
+
+.after-meal {
+  margin-top: 30rpx;
+  padding: 28rpx;
+}
+
+.final-menu {
+  margin-top: 30rpx;
+}
+
+.final-menu-heading {
+  margin-bottom: 18rpx;
+  color: #30352f;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.final-dish-row {
+  margin-bottom: 24rpx;
+}
+
+.record-small-button {
+  width: 100%;
+  margin-top: 12rpx;
+  padding: 18rpx;
+  background: #e6f0ea;
+  color: #315b49;
+  font-size: 24rpx;
+}
+
+.after-meal-title {
+  color: #30352f;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.after-meal-copy {
+  margin: 12rpx 0 22rpx;
+  color: #7c8178;
+  font-size: 24rpx;
+  line-height: 1.6;
+}

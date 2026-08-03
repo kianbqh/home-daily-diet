@@ -1,0 +1,46 @@
+<view class="page family-page">
+  <view class="eyebrow">OUR FAMILY SPACE</view>
+  <view class="page-title">家庭空间</view>
+  <view class="page-subtitle">家里的菜、照片和选择，都只留在这个家庭里。</view>
+
+  <view class="family-hero card-surface">
+    <view class="family-avatar">家</view>
+    <view class="family-name">{{family.name}}</view>
+    <view class="family-members">{{family.memberCount}} 位家庭成员</view>
+  </view>
+
+  <view class="sync-note sync-{{family.syncStatus}}">
+    {{family.syncText}}
+  </view>
+
+  <view class="card-surface form-section">
+    <text class="form-label">家庭名称</text>
+    <input class="text-input" value="{{name}}" maxlength="20" bindinput="onNameInput" />
+    <button class="secondary-button save-name" bindtap="saveName">保存名称</button>
+  </view>
+
+  <view class="card-surface form-section">
+    <text class="form-label">你的称呼</text>
+    <input class="text-input" value="{{memberName}}" maxlength="12" placeholder="例如：爸爸、小明" bindinput="onMemberNameInput" />
+    <button class="secondary-button save-name" bindtap="saveMemberName">保存称呼</button>
+  </view>
+
+  <view class="card-surface invite-card">
+    <view class="invite-label">邀请家人加入</view>
+    <view class="invite-code">{{family.inviteCode}}</view>
+    <view class="invite-copy">分享小程序给家人后，大家可以在同一个家庭空间里记录和选餐。</view>
+    <view class="invite-actions">
+      <button class="secondary-button" bindtap="copyInvite">复制邀请码</button>
+      <button class="primary-button" open-type="share">分享邀请</button>
+    </view>
+  </view>
+
+  <view class="card-surface members-card">
+    <view class="section-title">家庭成员</view>
+    <view wx:for="{{family.members}}" wx:key="id" class="member-row">
+      <view class="member-dot">{{item.initial}}</view>
+      <text>{{item.displayName}}</text>
+      <text wx:if="{{item.isCurrent}}" class="member-you">我</text>
+    </view>
+  </view>
+</view>

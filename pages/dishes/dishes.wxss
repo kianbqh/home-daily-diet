@@ -1,0 +1,79 @@
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.header-add {
+  margin-top: 4rpx;
+  padding: 18rpx 20rpx;
+  background: #315b49;
+  color: #fff;
+  font-size: 24rpx;
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-top: 34rpx;
+  padding: 0 24rpx;
+  border-radius: 18rpx;
+  background: #f0ede6;
+}
+
+.search-icon {
+  color: #8a8e84;
+  font-size: 38rpx;
+}
+
+.search-box input {
+  flex: 1;
+  height: 84rpx;
+  color: #353a34;
+  font-size: 27rpx;
+}
+
+.search-clear {
+  color: #315b49;
+  font-size: 22rpx;
+  white-space: nowrap;
+}
+
+.tag-scroll {
+  margin-top: 22rpx;
+  white-space: nowrap;
+}
+
+.tag-row {
+  display: inline-flex;
+  gap: 14rpx;
+}
+
+.tag {
+  padding: 14rpx 22rpx;
+  border-radius: 99rpx;
+  background: #f0ede6;
+  color: #777d74;
+  font-size: 23rpx;
+}
+
+.tag.active {
+  background: #315b49;
+  color: #fff;
+}
+
+.library-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 22rpx;
+  margin-top: 34rpx;
+}
+
+.library-empty {
+  margin-top: 38rpx;
+}
+
+.back-button {
+  margin: 28rpx auto 0;
+}

@@ -1,0 +1,66 @@
+<view class="page edit-page">
+  <view class="eyebrow">KEEP THE MEMORY</view>
+  <view class="page-title">{{isEditingProfile ? '编辑菜品信息' : (isExisting ? '再记录一次' : '记录一道菜')}}</view>
+  <view class="page-subtitle">{{isEditingProfile ? '修改菜名、标签或封面，不会影响之前的制作记录。' : '菜名必填，图片和餐次可以慢慢补充。'}}</view>
+
+  <view wx:if="{{isExisting && !isEditingProfile}}" class="profile-edit-hint">
+    菜品名称和历史记录分开保存；如果只是想改名称或标签，请先编辑菜品信息。
+    <button class="ghost-button inline-action" bindtap="startProfileEdit">编辑菜品信息</button>
+  </view>
+
+  <view wx:if="{{isExisting && history.length}}" class="card-surface history-section">
+    <view class="section-title">制作记录（{{history.length}} 次）</view>
+    <view wx:for="{{history}}" wx:key="id" class="history-item">
+      <view class="history-top">
+        <text>{{item.recordDateLabel}}</text>
+        <text>{{item.mealLabel}}</text>
+        <text>{{item.ratingLabel}}</text>
+      </view>
+      <view class="history-body">
+        <image wx:if="{{item.image}}" class="history-image" src="{{item.image}}" mode="aspectFill" />
+        <view wx:else class="history-placeholder">🥢</view>
+        <text class="history-note">{{item.noteLabel}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="card-surface form-section">
+    <text class="form-label">菜名 <text class="required">*</text></text>
+    <input class="text-input {{isExisting && !isEditingProfile ? 'readonly' : ''}}" value="{{name}}" disabled="{{isExisting && !isEditingProfile}}" placeholder="例如：番茄炒蛋" bindinput="onNameInput" />
+  </view>
+
+  <view class="card-surface form-section">
+    <text class="form-label">{{isEditingProfile ? '菜品封面' : '这次的照片'}} <text class="optional">可选</text></text>
+    <view class="image-picker" bindtap="chooseImage">
+      <image wx:if="{{displayImage}}" src="{{displayImage}}" mode="aspectFill" />
+      <view wx:else class="image-picker-placeholder">
+        <text class="image-picker-icon">📷</text>
+        <text>{{isEditingProfile ? '补一张代表这道菜的照片' : '拍一张或从相册选择'}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{!isExisting || isEditingProfile}}" class="card-surface form-section">
+    <text class="form-label">标签 <text class="optional">可选</text></text>
+    <input class="text-input" value="{{tags}}" placeholder="例如：家常、素菜、下饭" bindinput="onTagsInput" />
+  </view>
+
+  <block wx:if="{{!isEditingProfile}}">
+    <view class="card-surface form-section">
+      <text class="form-label">记录日期</text>
+      <picker mode="date" value="{{recordDate}}" bindchange="onRecordDateChange">
+        <view class="picker-field date-field">{{recordDate}} <text class="picker-arrow">⌄</text></view>
+      </picker>
+      <text class="form-label sub-label">餐次 <text class="optional">可选</text></text>
+      <picker mode="selector" range="{{mealTypes}}" range-key="label" bindchange="chooseMealType">
+        <view class="picker-field">{{mealTypeLabel}} <text class="picker-arrow">⌄</text></view>
+      </picker>
+      <input wx:if="{{mealType === 'custom'}}" class="text-input sub-input" value="{{customMealType}}" placeholder="例如：周末聚餐" bindinput="onCustomMealTypeInput" />
+    </view>
+
+  </block>
+
+  <view class="sticky-action">
+    <button class="primary-button" bindtap="save">{{isEditingProfile ? '保存菜品信息' : (isExisting ? '保存这次记录' : '保存并继续')}}</button>
+  </view>
+</view>

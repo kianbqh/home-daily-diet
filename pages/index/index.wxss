@@ -1,0 +1,75 @@
+.dinner-card {
+  margin-top: 42rpx;
+  padding: 30rpx;
+  background: #315b49;
+  color: #fff;
+}
+
+.home-brand-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.family-chip {
+  max-width: 190rpx;
+  margin-top: 10rpx;
+  padding: 14rpx 16rpx;
+  overflow: hidden;
+  border-radius: 99rpx;
+  background: #efe8dd;
+  color: #6e715f;
+  font-size: 21rpx;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dinner-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.dinner-kicker {
+  color: #c8ddcf;
+  font-size: 23rpx;
+}
+
+.dinner-title {
+  margin-top: 12rpx;
+  font-size: 36rpx;
+  font-weight: 700;
+}
+
+.dinner-status {
+  padding: 12rpx 16rpx;
+  border-radius: 99rpx;
+  background: rgba(255, 255, 255, .14);
+  color: #eef7f0;
+  font-size: 22rpx;
+}
+
+.dinner-hint {
+  margin: 22rpx 0 28rpx;
+  color: #d9e6dd;
+  font-size: 25rpx;
+  line-height: 1.55;
+}
+
+.dinner-card .primary-button {
+  background: #f2c982;
+  color: #3a3a2d;
+}
+
+.share-link {
+  margin-top: 14rpx;
+  background: transparent;
+  color: #e6f0ea;
+  font-size: 25rpx;
+}
+
+.dish-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 22rpx;
+}

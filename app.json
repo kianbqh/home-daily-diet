@@ -1,0 +1,18 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/dishes/dishes",
+    "pages/dish-edit/dish-edit",
+    "pages/meal/meal",
+    "pages/family/family"
+  ],
+  "window": {
+    "navigationBarTitleText": "今天想吃啥",
+    "navigationBarBackgroundColor": "#fbfaf7",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#fbfaf7",
+    "backgroundTextStyle": "dark"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

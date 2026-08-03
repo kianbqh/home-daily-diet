@@ -1,0 +1,8 @@
+{
+  "name": "family-meal-mini-program",
+  "version": "0.1.1",
+  "private": true,
+  "scripts": {
+    "test": "node --test --test-isolation=none tests/*.test.js"
+  }
+}

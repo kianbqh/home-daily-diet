@@ -1,0 +1,19 @@
+# Local development state
+.agents/
+.codex-downloads/
+.wechat-devtools-data/
+.wechat-devtools-profile/
+project.private.config.json
+docs/superpowers/
+
+# Generated and machine-specific files
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local environment and credential files
+.env
+.env.*
+!.env.example
+*.local

@@ -1,0 +1,46 @@
+<view class="page home-page">
+  <view class="home-brand-row">
+    <view>
+      <view class="eyebrow">OUR FAMILY TABLE</view>
+      <view class="page-title">家常菜记</view>
+    </view>
+    <view class="family-chip" bindtap="goFamily">{{model.familyName}} · {{model.memberCount}}人</view>
+  </view>
+  <view class="page-subtitle">把做过的好菜记下来，今天吃什么就不用再从头想。</view>
+
+  <view wx:if="{{model.isEmpty}}" class="empty-card">
+    <view class="empty-icon">🍲</view>
+    <view class="empty-title">{{model.emptyTitle}}</view>
+    <view class="empty-description">{{model.emptyDescription}}</view>
+    <button class="primary-button" bindtap="goRecord">记录第一道菜</button>
+    <button class="ghost-button" bindtap="goDishes">稍后再说</button>
+  </view>
+
+  <view wx:else class="dinner-card card-surface">
+    <view class="dinner-card-top">
+      <view>
+        <view class="dinner-kicker">今天的晚餐</view>
+        <view class="dinner-title">{{model.mealTitle}}</view>
+      </view>
+      <view class="dinner-status {{model.mealStatus}}">
+        {{model.confirmed ? '已确认' : (model.selectedCount ? '有人提交了' : '还没开始')}}
+      </view>
+    </view>
+    <view class="dinner-hint">{{model.mealHint}}</view>
+    <button class="primary-button" bindtap="goMeal">去选今天吃什么</button>
+    <button class="share-link" open-type="share">分享给家人</button>
+  </view>
+
+  <view class="section-heading">
+    <text class="section-title">最近的家常菜</text>
+    <text class="section-action" bindtap="goDishes">查看全部 {{model.dishCount}}</text>
+  </view>
+  <view class="dish-grid">
+    <dish-card wx:for="{{model.dishes}}" wx:key="id" dish="{{item}}" />
+  </view>
+
+  <view class="bottom-nav">
+    <button class="secondary-button" bindtap="goRecord">记录一道菜</button>
+    <button class="secondary-button" bindtap="goDishes">浏览菜品库</button>
+  </view>
+</view>

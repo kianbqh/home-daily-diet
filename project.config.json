@@ -1,0 +1,85 @@
+{
+    "description": "今天想吃啥微信小程序",
+    "packOptions": {
+        "ignore": [
+            {
+                "value": ".agents",
+                "type": "folder"
+            },
+            {
+                "value": ".codex-downloads",
+                "type": "folder"
+            },
+            {
+                "value": ".wechat-devtools-data",
+                "type": "folder"
+            },
+            {
+                "value": ".wechat-devtools-profile",
+                "type": "folder"
+            },
+            {
+                "value": ".git",
+                "type": "folder"
+            },
+            {
+                "value": "docs",
+                "type": "folder"
+            },
+            {
+                "value": "scripts",
+                "type": "folder"
+            },
+            {
+                "value": "tests",
+                "type": "folder"
+            },
+            {
+                "value": "README.md",
+                "type": "file"
+            },
+            {
+                "value": "SPEC.md",
+                "type": "file"
+            },
+            {
+                "value": "package.json",
+                "type": "file"
+            },
+            {
+                "value": "project.private.config.json",
+                "type": "file"
+            },
+            {
+                "value": "assets/app-avatar.svg",
+                "type": "file"
+            }
+        ],
+        "include": []
+    },
+    "setting": {
+        "compileHotReLoad": true,
+        "coverView": true,
+        "es6": true,
+        "enhance": true,
+        "minified": true,
+        "postcss": true,
+        "urlCheck": false,
+        "babelSetting": {
+            "ignore": [],
+            "disablePlugins": [],
+            "outputPath": ""
+        }
+    },
+    "compileType": "miniprogram",
+    "libVersion": "3.7.12",
+    "appid": "wx6e247df29f902c68",
+    "projectname": "today-what-to-eat",
+    "miniprogramRoot": "",
+    "cloudfunctionRoot": "cloudfunctions/",
+    "condition": {},
+    "editorSetting": {
+        "tabIndent": "insertSpaces",
+        "tabSize": 4
+    }
+}

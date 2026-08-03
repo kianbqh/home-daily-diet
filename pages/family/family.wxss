@@ -1,0 +1,142 @@
+.home-brand-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.family-chip {
+  max-width: 190rpx;
+  margin-top: 10rpx;
+  padding: 14rpx 16rpx;
+  overflow: hidden;
+  border-radius: 99rpx;
+  background: #efe8dd;
+  color: #6e715f;
+  font-size: 21rpx;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.family-hero {
+  margin-top: 38rpx;
+  padding: 38rpx;
+  text-align: center;
+}
+
+.family-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 98rpx;
+  height: 98rpx;
+  margin: 0 auto 18rpx;
+  border-radius: 32rpx;
+  background: #e6d5c3;
+  color: #9b6c4a;
+  font-size: 42rpx;
+  font-weight: 700;
+}
+
+.family-name {
+  color: #30352f;
+  font-size: 34rpx;
+  font-weight: 700;
+}
+
+.family-members {
+  margin-top: 10rpx;
+  color: #858a82;
+  font-size: 24rpx;
+}
+
+.sync-note {
+  margin-top: 18rpx;
+  padding: 16rpx 20rpx;
+  border-radius: 16rpx;
+  background: #fff3df;
+  color: #8b6a42;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+
+.sync-note.sync-ready {
+  background: #eaf4ed;
+  color: #315b49;
+}
+
+.sync-note.sync-connecting {
+  background: #eef2f7;
+  color: #516172;
+}
+
+.sync-note.sync-error {
+  background: #fff0eb;
+  color: #8a4b3a;
+}
+
+.save-name {
+  margin-top: 18rpx;
+}
+
+.invite-card,
+.members-card {
+  margin-top: 24rpx;
+  padding: 30rpx;
+}
+
+.invite-label {
+  color: #7c8178;
+  font-size: 24rpx;
+}
+
+.invite-code {
+  margin-top: 14rpx;
+  color: #315b49;
+  font-size: 48rpx;
+  font-weight: 700;
+  letter-spacing: 6rpx;
+}
+
+.invite-copy {
+  margin-top: 10rpx;
+  color: #858a82;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 24rpx;
+}
+
+.invite-actions button {
+  flex: 1;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding-top: 22rpx;
+  color: #454a43;
+  font-size: 27rpx;
+}
+
+.member-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 54rpx;
+  height: 54rpx;
+  border-radius: 50%;
+  background: #e6f0ea;
+  color: #315b49;
+  font-size: 23rpx;
+}
+
+.member-you {
+  margin-left: auto;
+  color: #9b6c4a;
+  font-size: 22rpx;
+}

@@ -16,36 +16,35 @@ Page({
     tags: '',
     recordDate: todayString(),
     mealType: '',
-    mealTypeLabel: '不指定餐次',
+    mealTypeLabel: '未指定餐次',
     customMealType: '',
     history: [],
     mealTypes: [
-      { key: '', label: '不指定餐次' },
+      { key: '', label: '未指定餐次' },
       { key: 'breakfast', label: '早餐' },
       { key: 'lunch', label: '午餐' },
       { key: 'dinner', label: '晚餐' },
       { key: 'custom', label: '其他餐次' },
     ],
   },
-  onLoad(options) {
+  onLoad(options = {}) {
     const store = getApp().globalData.store;
     const dish = options.dishId && store.getState().dishes.find((item) => item.id === options.dishId);
-    if (dish) {
-      const editProfile = options.mode === 'edit';
-      const detail = buildDishDetailViewModel(store.getState(), dish.id);
-      this.setData({
-        isExisting: true,
-        isEditingProfile: editProfile,
-        dishId: dish.id,
-        name: dish.name,
-        tags: editProfile ? (dish.tags || []).join('、') : '',
-        image: editProfile ? dish.coverImage : '',
-        displayImage: editProfile ? dish.coverImage : '',
-        history: detail.history,
-      });
-      this.resolveCloudImage(dish.coverImage, 'displayImage');
-      this.resolveHistoryImages(detail.history);
-    }
+    if (!dish) return;
+    const editProfile = options.mode === 'edit';
+    const detail = buildDishDetailViewModel(store.getState(), dish.id);
+    this.setData({
+      isExisting: true,
+      isEditingProfile: editProfile,
+      dishId: dish.id,
+      name: dish.name,
+      tags: editProfile ? (dish.tags || []).join('、') : '',
+      image: editProfile ? dish.coverImage : '',
+      displayImage: editProfile ? dish.coverImage : '',
+      history: detail.history,
+    });
+    this.resolveCloudImage(dish.coverImage, 'displayImage');
+    this.resolveHistoryImages(detail.history);
   },
   onNameInput(event) {
     this.setData({ name: event.detail.value });
@@ -144,27 +143,22 @@ Page({
       return;
     }
     const store = getApp().globalData.store;
-    const tags = this.data.tags.split(/[，,、\s]+/).filter(Boolean);
+    const tags = this.data.tags.split(/[，、\s]+/).filter(Boolean);
     let image = this.data.image;
     if (image && typeof store.uploadImage === 'function') {
       if (typeof wx.showLoading === 'function') wx.showLoading({ title: '正在保存图片' });
       try {
         image = await store.uploadImage(image);
       } catch (error) {
-        wx.showToast({ title: '图片保存失败，请重试', icon: 'none' });
-        return;
+        image = '';
+        wx.showToast({ title: '图片未上传，菜名已保存', icon: 'none' });
       } finally {
         if (typeof wx.hideLoading === 'function') wx.hideLoading();
       }
     }
 
     if (this.data.isExisting && this.data.isEditingProfile) {
-      store.updateDish({
-        dishId: this.data.dishId,
-        name,
-        tags,
-        image,
-      });
+      store.updateDish({ dishId: this.data.dishId, name, tags, image });
       this.finishAndGoBack('菜品信息已更新');
       return;
     }
@@ -213,9 +207,7 @@ Page({
         cancelText: '仍然新建',
         success: (result) => {
           if (result.confirm) {
-            wx.navigateTo({
-              url: `/pages/dishes/dishes?query=${encodeURIComponent(similar[0].name)}`,
-            });
+            wx.navigateTo({ url: `/pages/dishes/dishes?query=${encodeURIComponent(similar[0].name)}` });
             return;
           }
           store.addDish(payload);
@@ -230,13 +222,12 @@ Page({
   },
   guideAfterFirstDish() {
     wx.showActionSheet({
-      itemList: ['去选晚餐', '继续记录下一道', '看菜品库', '分享给家人'],
+      itemList: ['去选今天吃什么', '继续记录下一道', '看看菜品库'],
       success: (result) => {
         const urls = [
           '/pages/meal/meal',
           '/pages/dish-edit/dish-edit',
           '/pages/dishes/dishes',
-          '/pages/family/family',
         ];
         wx.redirectTo({ url: urls[result.tapIndex] });
       },

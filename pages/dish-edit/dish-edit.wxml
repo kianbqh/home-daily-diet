@@ -3,23 +3,16 @@
   <view class="page-title">{{isEditingProfile ? '编辑菜品信息' : (isExisting ? '再记录一次' : '记录一道菜')}}</view>
   <view class="page-subtitle">{{isEditingProfile ? '修改菜名、标签或封面，不会影响之前的制作记录。' : '菜名必填，图片和餐次可以慢慢补充。'}}</view>
 
-  <view wx:if="{{isExisting && !isEditingProfile}}" class="profile-edit-hint">
-    菜品名称和历史记录分开保存；如果只是想改名称或标签，请先编辑菜品信息。
-    <button class="ghost-button inline-action" bindtap="startProfileEdit">编辑菜品信息</button>
-  </view>
-
   <view wx:if="{{isExisting && history.length}}" class="card-surface history-section">
     <view class="section-title">制作记录（{{history.length}} 次）</view>
     <view wx:for="{{history}}" wx:key="id" class="history-item">
       <view class="history-top">
         <text>{{item.recordDateLabel}}</text>
         <text>{{item.mealLabel}}</text>
-        <text>{{item.ratingLabel}}</text>
       </view>
       <view class="history-body">
         <image wx:if="{{item.image}}" class="history-image" src="{{item.image}}" mode="aspectFill" />
-        <view wx:else class="history-placeholder">🥢</view>
-        <text class="history-note">{{item.noteLabel}}</text>
+        <view wx:else class="history-placeholder">🍽</view>
       </view>
     </view>
   </view>
@@ -57,10 +50,9 @@
       </picker>
       <input wx:if="{{mealType === 'custom'}}" class="text-input sub-input" value="{{customMealType}}" placeholder="例如：周末聚餐" bindinput="onCustomMealTypeInput" />
     </view>
-
   </block>
 
   <view class="sticky-action">
-    <button class="primary-button" bindtap="save">{{isEditingProfile ? '保存菜品信息' : (isExisting ? '保存这次记录' : '保存并继续')}}</button>
+    <button class="primary-button" bindtap="save">{{isEditingProfile ? '保存菜品信息' : (isExisting ? '保存这次记录' : '保存这道菜')}}</button>
   </view>
 </view>

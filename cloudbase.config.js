@@ -4,5 +4,8 @@ module.exports = {
   mode: 'local-storage-first',
   stateCollection: 'family_states',
   eventCollection: 'family_states_events',
+  memberCollection: 'family_members',
+  inviteCollection: 'family_invites',
+  accessFunction: 'family-access',
   fileStoragePrefix: 'family-meals/',
 };

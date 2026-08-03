@@ -51,63 +51,83 @@ function removeLocalIdentity(state) {
   return shared;
 }
 
-function mergeEventSnapshots(baseState, events = []) {
-  return events
-    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
-    .reduce((current, event) => mergeFamilyStates(current, event.state), baseState);
+function createCloudError(body) {
+  const error = new Error(
+    body && body.error && body.error.message
+      ? body.error.message
+      : '家庭云端暂时不可用'
+  );
+  error.code = body && body.error && body.error.code
+    ? body.error.code
+    : 'CLOUD_FUNCTION_ERROR';
+  return error;
+}
+
+function unwrapFunctionResult(result) {
+  const body = result && result.result ? result.result : result;
+  if (!body || body.ok !== true) throw createCloudError(body);
+  return body.data || {};
 }
 
 function createCloudBaseSync(api, options = {}) {
   const envId = String(options.envId || '').trim();
-  if (!api || !api.cloud || !envId) {
+  if (!api || !api.cloud || !envId || typeof api.cloud.callFunction !== 'function') {
     return null;
   }
   api.cloud.init({ env: envId, traceUser: true });
-  const database = api.cloud.database();
-  const collectionName = options.collection || options.stateCollection || 'family_states';
-  const collection = database.collection(collectionName);
-  const eventCollection = database.collection(options.eventCollection || `${collectionName}_events`);
+  const accessFunction = options.accessFunction || 'family-access';
+
+  async function callFunction(action, payload = {}) {
+    const result = await api.cloud.callFunction({
+      name: accessFunction,
+      data: { action, ...payload },
+    });
+    return unwrapFunctionResult(result);
+  }
 
   return {
+    async bootstrap(state) {
+      if (!state || !state.family || !state.family.id) return null;
+      const member = state.members.find((item) => item.id === state.currentMemberId);
+      return callFunction('bootstrap', {
+        familyId: state.family.id,
+        memberId: state.currentMemberId,
+        displayName: member ? member.displayName : '家庭成员',
+      });
+    },
     async load(familyId) {
       if (!familyId) return null;
-      let state = null;
-      try {
-        const result = await collection.doc(familyId).get();
-        state = result && result.data ? result.data : null;
-      } catch (error) {
-        const isMissingDocument = error && (
-          error.errCode === -1
-          || String(error.errMsg || error.message || '').includes('document not found')
-        );
-        if (!isMissingDocument) {
-          throw error;
-        }
-      }
-      if (eventCollection && typeof eventCollection.where === 'function') {
-        const eventResult = await eventCollection.where({ familyId }).get();
-        state = mergeEventSnapshots(state, eventResult && eventResult.data ? eventResult.data : []);
-      }
-      return state;
+      const data = await callFunction('load', { familyId });
+      return data.state || null;
     },
     async save(state) {
       if (!state || !state.family || !state.family.id) {
         throw new Error('家庭状态缺少 family.id');
       }
-      const remote = await this.load(state.family.id);
-      const merged = mergeFamilyStates(remote, state);
-      const sharedSnapshot = removeLocalIdentity(merged);
-      if (eventCollection && typeof eventCollection.add === 'function') {
-        await eventCollection.add({
-          data: {
-            familyId: state.family.id,
-            state: sharedSnapshot,
-            createdAt: new Date().toISOString(),
-          },
-        });
-      }
-      await collection.doc(state.family.id).set({ data: sharedSnapshot });
-      return merged;
+      const data = await callFunction('save', {
+        familyId: state.family.id,
+        state: removeLocalIdentity(state),
+      });
+      return data.state || state;
+    },
+    async createInvite(familyId) {
+      const data = await callFunction('createInvite', { familyId });
+      return data.invite || null;
+    },
+    async getInvite(familyId) {
+      const data = await callFunction('getInvite', { familyId });
+      return data.invite || null;
+    },
+    async revokeInvite(familyId) {
+      const data = await callFunction('revokeInvite', { familyId });
+      return data;
+    },
+    async acceptInvite(code, member = {}) {
+      return callFunction('acceptInvite', {
+        code,
+        memberId: member.id,
+        displayName: member.displayName,
+      });
     },
     async uploadImage(filePath, familyId = 'family-local') {
       if (!filePath || !api.cloud.uploadFile) return filePath || '';

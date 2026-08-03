@@ -2,12 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { addDish, createInitialState } = require('../services/domain');
-const { createCloudBaseSync } = require('../services/cloudbase-sync');
+const { createCloudBaseSync, mergeFamilyStates } = require('../services/cloudbase-sync');
 
 function createFakeCloudApi(options = {}) {
   const documents = new Map();
   const events = [];
-  const calls = { init: null, collection: null };
+  const calls = { init: null, collection: null, functions: [] };
   const api = {
     cloud: {
       init(options) {
@@ -58,6 +58,58 @@ function createFakeCloudApi(options = {}) {
       async uploadFile({ cloudPath }) {
         return { fileID: `cloud://${cloudPath}` };
       },
+      async callFunction({ name, data }) {
+        calls.functions.push({ name, data });
+        if (data.action === 'bootstrap') {
+          return { result: { ok: true, data: { member: { memberId: data.memberId } } } };
+        }
+        if (data.action === 'load') {
+          let state = documents.get(data.familyId) || null;
+          events
+            .filter((event) => event.familyId === data.familyId)
+            .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+            .forEach((event) => {
+              state = mergeFamilyStates(state, event.state);
+            });
+          return { result: { ok: true, data: { state } } };
+        }
+        if (data.action === 'save') {
+          const state = mergeFamilyStates(documents.get(data.familyId) || null, data.state);
+          events.push({
+            familyId: data.familyId,
+            state,
+            createdAt: '2026-08-04T10:00:00.000Z',
+          });
+          documents.set(data.familyId, state);
+          return { result: { ok: true, data: { state } } };
+        }
+        if (data.action === 'acceptInvite') {
+          return {
+            result: {
+              ok: true,
+              data: {
+                state: documents.get('family-joined') || null,
+                member: { memberId: data.memberId, displayName: data.displayName },
+              },
+            },
+          };
+        }
+        if (['createInvite', 'getInvite', 'revokeInvite'].includes(data.action)) {
+          return {
+            result: {
+              ok: true,
+              data: {
+                invite: {
+                  code: 'A7K9Q2',
+                  expiresAt: '2026-09-03T10:00:00.000Z',
+                  status: 'active',
+                },
+              },
+            },
+          };
+        }
+        return { result: { ok: true, data: {} } };
+      },
     },
   };
   return { api, calls, documents, events };
@@ -72,8 +124,8 @@ test('cloudbase sync saves and loads a family state through the configured colle
   const loaded = await sync.load('family-1');
 
   assert.deepEqual(fake.calls.init, { env: 'env-test', traceUser: true });
-  assert.equal(fake.calls.collection, 'family_states');
-  assert.deepEqual(fake.calls.collections, ['family_states', 'family_states_events']);
+  assert.equal(fake.calls.collection, null);
+  assert.deepEqual(fake.calls.collections || [], []);
   assert.equal(loaded.family.name, '测试家庭');
   assert.equal(Object.prototype.hasOwnProperty.call(loaded, 'currentMemberId'), false);
 });
@@ -109,6 +161,37 @@ test('cloudbase sync merges append-only family changes before saving', async () 
 
   assert.deepEqual(merged.dishes.map((dish) => dish.name).sort(), ['番茄炒蛋', '红烧肉']);
   assert.equal(merged.cookingRecords.length, 2);
+});
+
+test('cloudbase sync uses family-access for load and never reads the state collection directly', async () => {
+  const fake = createFakeCloudApi();
+  const sync = createCloudBaseSync(fake.api, { envId: 'env-test', accessFunction: 'family-access' });
+
+  await sync.load('family-1');
+
+  assert.deepEqual(fake.calls.functions[0], {
+    name: 'family-access',
+    data: { action: 'load', familyId: 'family-1' },
+  });
+  assert.equal((fake.calls.collections || []).length, 0);
+});
+
+test('acceptInvite sends only the short code and member profile', async () => {
+  const fake = createFakeCloudApi();
+  const sync = createCloudBaseSync(fake.api, { envId: 'env-test' });
+
+  await sync.acceptInvite('A7K9Q2', { id: 'member-2', displayName: 'Xiaoming' });
+
+  assert.deepEqual(fake.calls.functions[0], {
+    name: 'family-access',
+    data: {
+      action: 'acceptInvite',
+      code: 'A7K9Q2',
+      memberId: 'member-2',
+      displayName: 'Xiaoming',
+    },
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(fake.calls.functions[0].data, 'familyId'), false);
 });
 
 test('cloudbase sync uploads an image and returns a family-scoped file id', async () => {

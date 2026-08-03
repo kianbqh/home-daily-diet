@@ -8,7 +8,7 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function createMemoryDatabase(seed = {}) {
+function createMemoryDatabase(seed = {}, options = {}) {
   const collections = new Map();
   Object.entries(seed).forEach(([name, value]) => {
     collections.set(name, new Map(Object.entries(value).map(([id, data]) => [id, clone(data)])));
@@ -22,6 +22,11 @@ function createMemoryDatabase(seed = {}) {
         return {
           async get() {
             const data = records.get(id);
+            if (!data && options.throwOnMissing && name === 'family_states') {
+              const error = new Error('document not found');
+              error.errCode = -1;
+              throw error;
+            }
             return { data: data ? clone(data) : null };
           },
           async set({ data }) {
@@ -97,6 +102,26 @@ test('bootstrap binds the first caller and does not return openid', async () => 
     status: 'active',
   });
   assert.equal(result.data.member.openid, undefined);
+});
+
+test('first cloud save treats a missing family state document as an empty state', async () => {
+  const db = createMemoryDatabase({}, { throwOnMissing: true });
+  const state = familyState('family-new');
+
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-new',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const result = await invoke(db, {
+    action: 'save',
+    familyId: 'family-new',
+    state,
+  }, 'openid-1');
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.state.family.id, 'family-new');
 });
 
 test('createInvite and acceptInvite create a shared member', async () => {

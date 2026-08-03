@@ -13,6 +13,8 @@ function inviteErrorMessage(error) {
 Page({
   data: {
     ...buildFamilyViewModel(null, null),
+    nameDraft: '',
+    memberNameDraft: '',
     joinCode: '',
   },
   getStore() {
@@ -66,39 +68,61 @@ Page({
     const model = store
       ? buildFamilyViewModel(store.getState(), store.getFamilySummary())
       : buildFamilyViewModel(null, null);
-    if (this.nameDraftDirty) model.name = this.data.name;
-    if (this.memberNameDraftDirty) model.memberName = this.data.memberName;
+    if (this.nameDraftDirty) {
+      model.name = this.nameDraft;
+      model.nameDraft = this.nameDraft;
+    } else {
+      this.nameDraft = model.name;
+      model.nameDraft = model.name;
+    }
+    if (this.memberNameDraftDirty) {
+      model.memberName = this.memberNameDraft;
+      model.memberNameDraft = this.memberNameDraft;
+    } else {
+      this.memberNameDraft = model.memberName;
+      model.memberNameDraft = model.memberName;
+    }
     this.setData(model);
   },
   onNameInput(event) {
+    this.nameDraft = String(event.detail.value || '');
     this.nameDraftDirty = true;
-    this.setData({ name: event.detail.value });
+    this.setData({ name: this.nameDraft, nameDraft: this.nameDraft });
   },
   saveName() {
-    const name = this.data.name.trim();
+    const name = String(
+      this.nameDraftDirty ? this.nameDraft : (this.data.nameDraft || this.data.name || '')
+    ).trim();
     if (!name) {
       wx.showToast({ title: '家庭名称不能为空', icon: 'none' });
       return;
     }
     const store = this.requireStore();
     if (!store) return;
+    this.nameDraft = name;
     this.nameDraftDirty = false;
     store.updateFamily({ name });
     wx.showToast({ title: '已保存', icon: 'success' });
     this.refresh();
   },
   onMemberNameInput(event) {
+    this.memberNameDraft = String(event.detail.value || '');
     this.memberNameDraftDirty = true;
-    this.setData({ memberName: event.detail.value });
+    this.setData({ memberName: this.memberNameDraft, memberNameDraft: this.memberNameDraft });
   },
   saveMemberName() {
-    const displayName = this.data.memberName.trim();
+    const displayName = String(
+      this.memberNameDraftDirty
+        ? this.memberNameDraft
+        : (this.data.memberNameDraft || this.data.memberName || '')
+    ).trim();
     if (!displayName) {
       wx.showToast({ title: '请写下你的称呼', icon: 'none' });
       return;
     }
     const store = this.requireStore();
     if (!store) return;
+    this.memberNameDraft = displayName;
     this.memberNameDraftDirty = false;
     store.updateMember({ displayName });
     wx.showToast({ title: '称呼已保存', icon: 'success' });

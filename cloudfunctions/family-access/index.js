@@ -62,8 +62,19 @@ async function query(db, name, filter, limit = 100) {
 }
 
 async function getDocument(db, name, id) {
-  const result = await collection(db, name).doc(id).get();
-  return result && result.data ? result.data : null;
+  try {
+    const result = await collection(db, name).doc(id).get();
+    return result && result.data ? result.data : null;
+  } catch (error) {
+    const code = error && (error.errCode || error.code);
+    const message = String(error && (error.errMsg || error.message) || '').toLowerCase();
+    const missing = code === -1
+      || code === 'DOCUMENT_NOT_FOUND'
+      || message.includes('not found')
+      || message.includes('不存在');
+    if (missing) return null;
+    throw error;
+  }
 }
 
 async function setDocument(db, name, id, data) {

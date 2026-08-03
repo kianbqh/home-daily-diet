@@ -63,6 +63,20 @@ function createCloudError(body) {
   return error;
 }
 
+function normalizeCallError(error, action) {
+  const code = error && typeof error.code === 'string' && error.code
+    ? error.code
+    : 'CLOUD_CALL_FAILED';
+  const normalized = new Error(
+    error && (error.errMsg || error.message)
+      ? (error.errMsg || error.message)
+      : 'cloud function call failed'
+  );
+  normalized.code = code;
+  normalized.action = action;
+  return normalized;
+}
+
 function unwrapFunctionResult(result) {
   const body = result && result.result ? result.result : result;
   if (!body || body.ok !== true) throw createCloudError(body);
@@ -79,11 +93,19 @@ function createCloudBaseSync(api, options = {}) {
   const accessFunction = options.accessFunction || 'family-access';
 
   async function callFunction(action, payload = {}) {
-    const result = await api.cloud.callFunction({
-      name: accessFunction,
-      data: { action, ...payload },
-    });
-    return unwrapFunctionResult(result);
+    try {
+      const result = await api.cloud.callFunction({
+        name: accessFunction,
+        data: { action, ...payload },
+      });
+      return unwrapFunctionResult(result);
+    } catch (error) {
+      const normalized = normalizeCallError(error, action);
+      if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn('[CloudBase]', action, normalized.code);
+      }
+      throw normalized;
+    }
   }
 
   return {

@@ -122,6 +122,26 @@ test('keeps local family data usable when cloud hydration fails', async () => {
   assert.match(store.getSyncStatus().message, /本地数据/);
 });
 
+test('explains a cloud function call failure without exposing backend details', async () => {
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState(),
+    cloudSync: {
+      async load() {
+        const error = new Error('request timeout');
+        error.code = 'CLOUD_CALL_FAILED';
+        throw error;
+      },
+      async save() {},
+    },
+  });
+
+  await store.hydrateFromCloud();
+
+  assert.match(store.getSyncStatus().message, /family-access/);
+  assert.doesNotMatch(store.getSyncStatus().message, /request timeout/);
+});
+
 test('keeps local family identity while normalizing an incomplete cloud snapshot', async () => {
   const store = createStore({
     storage: createMemoryStorage(),

@@ -176,6 +176,26 @@ test('cloudbase sync uses family-access for load and never reads the state colle
   assert.equal((fake.calls.collections || []).length, 0);
 });
 
+test('cloudbase sync labels transport failures with the action that failed', async () => {
+  const api = {
+    cloud: {
+      init() {},
+      async callFunction() {
+        const error = new Error('request timeout');
+        error.errCode = -1;
+        error.errMsg = 'request timeout';
+        throw error;
+      },
+    },
+  };
+  const sync = createCloudBaseSync(api, { envId: 'env-test' });
+
+  await assert.rejects(
+    sync.load('family-1'),
+    (error) => error.code === 'CLOUD_CALL_FAILED' && error.action === 'load'
+  );
+});
+
 test('acceptInvite sends only the short code and member profile', async () => {
   const fake = createFakeCloudApi();
   const sync = createCloudBaseSync(fake.api, { envId: 'env-test' });

@@ -91,3 +91,44 @@ test('family inputs keep in-progress text when a store refresh arrives', () => {
   assert.equal(page.data.memberName, '小明');
   global.getApp = originalGetApp;
 });
+
+test('family inputs keep the latest native input value when a stale refresh races the input event', () => {
+  const originalGetApp = global.getApp;
+  const refreshListeners = [];
+  const state = { currentMemberId: 'member-1' };
+  const summary = {
+    id: 'family-1',
+    name: '旧家庭名',
+    memberCount: 1,
+    members: [{ id: 'member-1', displayName: '我' }],
+    inviteCode: 'A7K9Q2',
+    syncStatus: 'ready',
+  };
+  const store = {
+    subscribe(listener) {
+      refreshListeners.push(listener);
+      return () => {};
+    },
+    getState() {
+      return state;
+    },
+    getFamilySummary() {
+      return summary;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  const page = createPageInstance(loadFamilyPage());
+
+  page.onLoad();
+  page.onNameInput({ detail: { value: '我也' } });
+  page.onMemberNameInput({ detail: { value: '小明' } });
+
+  // Simulate a stale native setData completion arriving after the input event.
+  page.data.name = '旧家庭名';
+  page.data.memberName = '我';
+  refreshListeners[0]();
+
+  assert.equal(page.data.name, '我也');
+  assert.equal(page.data.memberName, '小明');
+  global.getApp = originalGetApp;
+});

@@ -23,6 +23,23 @@ const { mergeFamilyStates } = require('./cloudbase-sync');
 
 const CLOUD_FALLBACK_MESSAGE = '云端连接失败，当前继续使用本地数据。';
 
+function cloudErrorMessage(error) {
+  switch (error && error.code) {
+    case 'CLOUD_CALL_FAILED':
+      return '云函数调用失败，请检查 family-access 云函数。';
+    case 'DATABASE_UNAVAILABLE':
+      return '家庭云端数据库不可用，请检查集合配置。';
+    case 'AUTH_REQUIRED':
+      return '微信身份认证未完成，请重新打开小程序。';
+    case 'NOT_MEMBER':
+      return '当前微信用户尚未加入这个家庭。';
+    case 'INTERNAL_ERROR':
+      return 'family-access 云函数执行失败，请查看云函数日志。';
+    default:
+      return CLOUD_FALLBACK_MESSAGE;
+  }
+}
+
 function normalizePersistedState(candidate, fallbackState) {
   const fallback = fallbackState || createInitialState();
   if (!candidate || typeof candidate !== 'object') return fallback;
@@ -99,7 +116,7 @@ function createStore(options = {}) {
         return saved;
       })
       .catch((error) => {
-        updateSyncStatus('error', CLOUD_FALLBACK_MESSAGE);
+        updateSyncStatus('error', cloudErrorMessage(error));
         throw error;
       });
   }
@@ -148,7 +165,7 @@ function createStore(options = {}) {
         // Keep the newest local state, including edits made while the request was in flight.
         state = state || localStateAtStart;
         storage.saveState(state);
-        updateSyncStatus('error', CLOUD_FALLBACK_MESSAGE);
+        updateSyncStatus('error', cloudErrorMessage(error));
       }
       return state;
     },

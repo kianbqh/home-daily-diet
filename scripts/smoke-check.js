@@ -15,6 +15,9 @@ const requiredFiles = [
   'services/cloudbase-sync.js',
   'services/app-bootstrap.js',
   'services/app-store.js',
+  'cloudfunctions/family-access/index.js',
+  'cloudfunctions/family-access/logic.js',
+  'cloudfunctions/family-access/package.json',
   'utils/format.js',
   'utils/view-model.js',
   'components/dish-card/dish-card.js',
@@ -61,12 +64,18 @@ const expectedReleaseConfig = {
   envId: 'home-daily-diet-d8f5e7d6907dd53a',
   stateCollection: 'family_states',
   eventCollection: 'family_states_events',
+  memberCollection: 'family_members',
+  inviteCollection: 'family_invites',
+  accessFunction: 'family-access',
 };
 const actualReleaseConfig = {
   appid: projectConfig.appid,
   envId: cloudConfig.envId,
   stateCollection: cloudConfig.stateCollection,
   eventCollection: cloudConfig.eventCollection,
+  memberCollection: cloudConfig.memberCollection,
+  inviteCollection: cloudConfig.inviteCollection,
+  accessFunction: cloudConfig.accessFunction,
 };
 const configMismatches = Object.keys(expectedReleaseConfig).filter(
   (key) => actualReleaseConfig[key] !== expectedReleaseConfig[key]
@@ -75,6 +84,20 @@ if (configMismatches.length) {
   console.error(`SMOKE FAIL: release configuration mismatch\n${configMismatches.map((key) => (
     `${key}: expected ${expectedReleaseConfig[key]}, received ${actualReleaseConfig[key]}`
   )).join('\n')}`);
+  process.exit(1);
+}
+
+const shareSourceFiles = [
+  'pages/index/index.js',
+  'pages/meal/meal.js',
+  'pages/family/family.js',
+];
+const shareLeaks = shareSourceFiles.filter((file) => {
+  const source = fs.readFileSync(path.join(root, file), 'utf8');
+  return /familyId=/.test(source);
+});
+if (shareLeaks.length) {
+  console.error(`SMOKE FAIL: raw family id remains in share paths\n${shareLeaks.join('\n')}`);
   process.exit(1);
 }
 

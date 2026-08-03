@@ -97,6 +97,13 @@
   letter-spacing: 6rpx;
 }
 
+.invite-unavailable {
+  margin-top: 14rpx;
+  color: #858a82;
+  font-size: 28rpx;
+  line-height: 1.5;
+}
+
 .invite-copy {
   margin-top: 10rpx;
   color: #858a82;
@@ -112,6 +119,25 @@
 
 .invite-actions button {
   flex: 1;
+}
+
+.text-button {
+  display: block;
+  margin: 18rpx auto 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #315b49;
+  font-size: 23rpx;
+  line-height: 1.4;
+}
+
+.text-button::after {
+  border: 0;
+}
+
+.danger-button {
+  color: #a45843;
 }
 
 .member-row {

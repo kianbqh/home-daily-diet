@@ -6,7 +6,7 @@
   <view class="family-hero card-surface">
     <view class="family-avatar">家</view>
     <view class="family-name">{{family.name}}</view>
-    <view class="family-members">{{family.memberCount}} 位家庭成员</view>
+    <view class="family-members">共 {{family.memberCount}} 位家庭成员</view>
   </view>
 
   <view class="sync-note sync-{{family.syncStatus}}">
@@ -27,12 +27,19 @@
 
   <view class="card-surface invite-card">
     <view class="invite-label">邀请家人加入</view>
-    <view class="invite-code">{{family.inviteCode}}</view>
-    <view class="invite-copy">分享小程序给家人后，大家可以在同一个家庭空间里记录和选餐。</view>
-    <view class="invite-actions">
-      <button class="secondary-button" bindtap="copyInvite">复制邀请码</button>
-      <button class="primary-button" open-type="share">分享邀请</button>
+    <view wx:if="{{family.canInvite}}">
+      <view wx:if="{{family.hasInvite}}" class="invite-code">{{family.inviteCode}}</view>
+      <view wx:else class="invite-unavailable">生成一个短邀请码，家人即可加入</view>
+      <view class="invite-copy">把邀请码发给家人，他们就能进入同一个家庭空间。</view>
+      <view class="invite-actions">
+        <button wx:if="{{family.hasInvite}}" class="secondary-button" bindtap="copyInvite">复制邀请码</button>
+        <button wx:else class="secondary-button" bindtap="createInvite">生成邀请码</button>
+        <button wx:if="{{family.hasInvite}}" class="primary-button" open-type="share">分享邀请</button>
+      </view>
+      <button wx:if="{{family.hasInvite}}" class="text-button" bindtap="createInvite">重新生成邀请码</button>
+      <button wx:if="{{family.hasInvite}}" class="text-button danger-button" bindtap="revokeInvite">撤销邀请码</button>
     </view>
+    <view wx:else class="invite-unavailable">连接云端后可邀请家人</view>
   </view>
 
   <view class="card-surface members-card">

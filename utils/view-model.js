@@ -27,11 +27,14 @@ function syncTextFor(summary) {
 function buildFamilyViewModel(state, summary) {
   if (!state || !summary) {
     const fallback = {
-      id: '',
       name: DEFAULT_FAMILY_NAME,
       memberCount: 1,
       members: [],
       inviteCode: '',
+      inviteExpiresAt: '',
+      inviteStatus: 'unavailable',
+      hasInvite: false,
+      canInvite: false,
       syncStatus: 'error',
       syncMessage: '应用初始化未完成，当前继续使用本地数据。',
     };
@@ -53,12 +56,17 @@ function buildFamilyViewModel(state, summary) {
     };
   });
   const currentMember = members.find((member) => member.id === currentMemberId);
+  const safeSummary = { ...summary };
+  delete safeSummary.id;
   const family = {
-    ...summary,
+    ...safeSummary,
     name: summary.name || DEFAULT_FAMILY_NAME,
     memberCount: Number.isFinite(summary.memberCount) ? summary.memberCount : members.length,
     members,
   };
+  delete family.familyId;
+  family.hasInvite = Boolean(family.inviteCode);
+  family.canInvite = family.syncStatus === 'ready';
   family.syncText = syncTextFor(family);
 
   return {

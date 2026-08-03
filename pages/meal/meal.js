@@ -1,6 +1,15 @@
 const { buildMealViewModel } = require('../../utils/view-model');
 const { todayString } = require('../../utils/format');
 
+function joinErrorMessage(error) {
+  switch (error && error.code) {
+    case 'INVITE_INVALID': return '邀请码无效，请核对后再试。';
+    case 'INVITE_REVOKED': return '邀请码已撤销，请让家人重新生成。';
+    case 'INVITE_EXPIRED': return '邀请码已过期，请让家人重新生成。';
+    default: return '请先加入家庭云端空间，再打开这条选餐链接。';
+  }
+}
+
 Page({
   data: {
     date: '',
@@ -10,15 +19,23 @@ Page({
     joining: false,
     model: {},
   },
-  onLoad(options) {
-    const store = getApp().globalData.store;
+  getStore() {
+    const app = typeof getApp === 'function' ? getApp() : null;
+    return app && app.globalData ? app.globalData.store : null;
+  },
+  onLoad(options = {}) {
+    const store = this.getStore();
+    if (store && typeof store.subscribe === 'function') {
+      this.unsubscribe = store.subscribe(() => {
+        if (!this.data.joining) this.refresh();
+      });
+    }
     const sharedMeal = options.sessionId
       && store.getState().mealSessions.find((session) => session.id === options.sessionId);
     const joiningSharedFamily = Boolean(
-      options.familyId
+      options.inviteCode
       && options.sessionId
       && !sharedMeal
-      && store.getState().family.id !== options.familyId
     );
     this.setData({
       date: sharedMeal ? sharedMeal.date : (options.date || todayString()),
@@ -26,22 +43,28 @@ Page({
       joining: joiningSharedFamily,
     });
     if (joiningSharedFamily) {
-      setTimeout(() => this.confirmJoinFromMeal(options.familyId, options.sessionId, options.date), 0);
+      setTimeout(() => this.confirmJoinFromMeal(options.inviteCode, options.sessionId, options.date), 0);
+    }
+  },
+  onUnload() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
     }
   },
   onShow() {
     if (this.data.joining) return;
-    const store = getApp().globalData.store;
+    const store = this.getStore();
     if (store.getFamilySummary().cloudEnabled) {
       store.hydrateFromCloud().then(() => this.refresh()).catch(() => this.refresh());
       return;
     }
     this.refresh();
   },
-  confirmJoinFromMeal(familyId, sessionId, fallbackDate) {
+  confirmJoinFromMeal(inviteCode, sessionId, fallbackDate) {
     wx.showModal({
       title: '加入家庭后查看晚餐？',
-      content: '这个分享来自一个家庭空间，加入后才能看到完整的菜品和候选。',
+      content: '这条分享来自一个家庭空间，加入后才能看到完整的菜品和候选。',
       confirmText: '加入并查看',
       cancelText: '暂不加入',
       success: (result) => {
@@ -50,12 +73,12 @@ Page({
           wx.reLaunch({ url: '/pages/index/index' });
           return;
         }
-        const store = getApp().globalData.store;
+        const store = this.getStore();
         const state = store.getState();
         const current = state.members.find((member) => member.id === state.currentMemberId);
-        store.joinFamily(familyId, {
+        store.joinFamilyByInvite(inviteCode, {
           id: state.currentMemberId,
-          displayName: current ? current.displayName : '我',
+          displayName: current ? current.displayName : '家庭成员',
         }).then(() => {
           const meal = store.getState().mealSessions.find((item) => item.id === sessionId);
           this.setData({
@@ -64,11 +87,11 @@ Page({
             finalDishIds: [],
             finalInitialized: false,
           }, () => this.refresh());
-        }).catch(() => {
+        }).catch((error) => {
           this.setData({ joining: false });
           wx.showModal({
             title: '暂时无法打开晚餐',
-            content: '请先配置 CloudBase 并加入家庭空间，再打开群里的选餐链接。',
+            content: joinErrorMessage(error),
             showCancel: false,
             success: () => wx.reLaunch({ url: '/pages/index/index' }),
           });
@@ -77,7 +100,8 @@ Page({
     });
   },
   refresh() {
-    const store = getApp().globalData.store;
+    const store = this.getStore();
+    if (!store) return;
     const state = store.getState();
     if (state.dishes.length && !store.getMeal(this.data.date, 'dinner')) {
       store.ensureMeal({ date: this.data.date, mealType: 'dinner' });
@@ -94,7 +118,7 @@ Page({
     this.setData({ model, finalDishIds, finalInitialized: true });
   },
   toggleDish(event) {
-    const store = getApp().globalData.store;
+    const store = this.getStore();
     const model = this.data.model;
     if (!model.canEdit || !model.meal) return;
     const dish = model.dishes.find((item) => item.id === event.currentTarget.dataset.id);
@@ -122,7 +146,7 @@ Page({
     this.setData({ finalDishIds }, () => this.refresh());
   },
   confirmMeal() {
-    const store = getApp().globalData.store;
+    const store = this.getStore();
     const model = this.data.model;
     if (!model.meal || !model.selectedDishCount || !model.finalDishCount) {
       wx.showToast({ title: '至少选一道菜', icon: 'none' });
@@ -148,13 +172,14 @@ Page({
     wx.navigateTo({ url: `/pages/dish-edit/dish-edit?dishId=${event.currentTarget.dataset.id}` });
   },
   onShareAppMessage() {
+    const store = this.getStore();
     const sessionId = this.data.model.meal ? this.data.model.meal.id : this.data.sessionId;
-    const familyId = this.data.model.meal
-      ? this.data.model.meal.familyId
-      : getApp().globalData.store.getState().family.id;
+    const inviteCode = store.getFamilySummary().inviteCode || '';
     return {
       title: '今天晚餐吃什么？来选一道家里的菜',
-      path: `/pages/meal/meal?sessionId=${sessionId}&date=${this.data.date}&familyId=${familyId}`,
+      path: inviteCode
+        ? `/pages/meal/meal?sessionId=${sessionId}&date=${this.data.date}&inviteCode=${encodeURIComponent(inviteCode)}`
+        : '/pages/family/family',
     };
   },
 });

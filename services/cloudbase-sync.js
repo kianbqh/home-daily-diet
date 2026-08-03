@@ -71,10 +71,11 @@ function unwrapFunctionResult(result) {
 
 function createCloudBaseSync(api, options = {}) {
   const envId = String(options.envId || '').trim();
-  if (!api || !api.cloud || !envId || typeof api.cloud.callFunction !== 'function') {
+  if (!api || !api.cloud || !envId) {
     return null;
   }
   api.cloud.init({ env: envId, traceUser: true });
+  if (typeof api.cloud.callFunction !== 'function') return null;
   const accessFunction = options.accessFunction || 'family-access';
 
   async function callFunction(action, payload = {}) {

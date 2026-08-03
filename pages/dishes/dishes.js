@@ -17,14 +17,29 @@ Page({
     emptyDescription: '记录一道家里的菜，它就会出现在这里，也能参与今天的选择。',
     hasSearch: false,
   },
+  getStore() {
+    const app = typeof getApp === 'function' ? getApp() : null;
+    return app && app.globalData ? app.globalData.store : null;
+  },
   onLoad(options) {
+    const store = this.getStore();
+    if (store && typeof store.subscribe === 'function') {
+      this.unsubscribe = store.subscribe(() => this.refresh());
+    }
     if (options && options.query) this.setData({ query: options.query });
+  },
+  onUnload() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
   },
   onShow() {
     this.refresh();
   },
   refresh() {
-    const store = getApp().globalData.store;
+    const store = this.getStore();
+    if (!store) return;
     const model = buildLibraryViewModel(store.getState(), {
       query: this.data.query,
       tag: this.data.activeTag,

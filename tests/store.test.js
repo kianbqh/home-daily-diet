@@ -9,14 +9,14 @@ test('loads an empty local state and persists a new dish across store instances'
   const storage = createMemoryStorage();
   const first = createStore({
     storage,
-    initialState: createInitialState({ memberId: 'member-1', memberName: '小明' }),
+    initialState: createInitialState({ memberId: 'member-1', memberName: 'Xiaoming' }),
   });
 
-  first.addDish({ name: '红烧茄子' }, '2026-08-02T10:00:00.000Z');
+  first.addDish({ name: 'Tomato eggs' }, '2026-08-02T10:00:00.000Z');
   const reloaded = createStore({ storage });
 
   assert.equal(reloaded.getState().dishes.length, 1);
-  assert.equal(reloaded.getState().dishes[0].name, '红烧茄子');
+  assert.equal(reloaded.getState().dishes[0].name, 'Tomato eggs');
   assert.equal(reloaded.getState().cookingRecords.length, 1);
 });
 
@@ -26,14 +26,14 @@ test('repairs an incomplete persisted state before the family page reads it', ()
     storage,
     initialState: createInitialState({
       familyId: 'family-repaired',
-      familyName: '我们的家',
+      familyName: 'Our family',
       memberId: 'member-repaired',
-      memberName: '我',
+      memberName: 'Me',
     }),
   });
 
   assert.equal(store.getFamilySummary().id, 'family-repaired');
-  assert.equal(store.getFamilySummary().name, '我们的家');
+  assert.equal(store.getFamilySummary().name, 'Our family');
   assert.equal(store.getFamilySummary().memberCount, 1);
   assert.equal(store.getState().currentMemberId, 'member-repaired');
 });
@@ -44,7 +44,7 @@ test('keeps a dinner selection after persistence reload', () => {
     storage,
     initialState: createInitialState({ memberId: 'member-1' }),
   });
-  const dish = store.addDish({ name: '莲藕排骨汤' }, '2026-08-02T10:00:00.000Z');
+  const dish = store.addDish({ name: 'Pork soup' }, '2026-08-02T10:00:00.000Z');
   const meal = store.ensureMeal({ date: '2026-08-02', mealType: 'dinner' }, '2026-08-02T10:01:00.000Z');
 
   store.selectDish({ sessionId: meal.id, dishId: dish.dishes[0].id }, '2026-08-02T10:02:00.000Z');
@@ -62,23 +62,23 @@ test('notifies subscribers after a persisted change', () => {
   const snapshots = [];
   const unsubscribe = store.subscribe((state) => snapshots.push(state));
 
-  store.addDish({ name: '蒜蓉生菜' }, '2026-08-02T10:00:00.000Z');
+  store.addDish({ name: 'Garlic vegetables' }, '2026-08-02T10:00:00.000Z');
   unsubscribe();
-  store.addDish({ name: '冬瓜排骨汤' }, '2026-08-02T10:01:00.000Z');
+  store.addDish({ name: 'Winter melon soup' }, '2026-08-02T10:01:00.000Z');
 
   assert.equal(snapshots.length, 1);
-  assert.equal(snapshots[0].dishes[0].name, '蒜蓉生菜');
+  assert.equal(snapshots[0].dishes[0].name, 'Garlic vegetables');
 });
 
 test('updates the shared family profile through the same store boundary', () => {
   const store = createStore({
     storage: createMemoryStorage(),
-    initialState: createInitialState({ familyName: '旧名字' }),
+    initialState: createInitialState({ familyName: 'Old name' }),
   });
 
-  store.updateFamily({ name: '周末饭桌' });
+  store.updateFamily({ name: 'Weekend dinner' });
 
-  assert.equal(store.getFamilySummary().name, '周末饭桌');
+  assert.equal(store.getFamilySummary().name, 'Weekend dinner');
   assert.equal(store.getFamilySummary().memberCount, 1);
   assert.equal(store.getFamilySummary().cloudEnabled, false);
   assert.equal(store.getFamilySummary().syncStatus, 'local');
@@ -106,7 +106,7 @@ test('reports a ready cloud connection after hydration succeeds', async () => {
 test('keeps local family data usable when cloud hydration fails', async () => {
   const store = createStore({
     storage: createMemoryStorage(),
-    initialState: createInitialState({ familyName: '本地家庭' }),
+    initialState: createInitialState({ familyName: 'Local family' }),
     cloudSync: {
       async load() {
         throw new Error('database permission denied');
@@ -117,22 +117,22 @@ test('keeps local family data usable when cloud hydration fails', async () => {
 
   await store.hydrateFromCloud();
 
-  assert.equal(store.getFamilySummary().name, '本地家庭');
+  assert.equal(store.getFamilySummary().name, 'Local family');
   assert.equal(store.getSyncStatus().status, 'error');
   assert.match(store.getSyncStatus().message, /本地数据/);
 });
 
-test('normalizes an incomplete cloud snapshot before replacing local state', async () => {
+test('keeps local family identity while normalizing an incomplete cloud snapshot', async () => {
   const store = createStore({
     storage: createMemoryStorage(),
     initialState: createInitialState({
       familyId: 'family-local-safe',
-      familyName: '本地家庭',
+      familyName: 'Local family',
       memberId: 'member-local-safe',
     }),
     cloudSync: {
       async load() {
-        return { version: 1, family: { id: 'family-cloud-old', name: '云端家庭' } };
+        return { version: 1, family: { id: 'family-cloud-old', name: 'Cloud family' } };
       },
       async save() {},
     },
@@ -140,16 +140,16 @@ test('normalizes an incomplete cloud snapshot before replacing local state', asy
 
   await store.hydrateFromCloud();
 
-  assert.equal(store.getFamilySummary().id, 'family-cloud-old');
-  assert.equal(store.getFamilySummary().name, '云端家庭');
+  assert.equal(store.getFamilySummary().id, 'family-local-safe');
+  assert.equal(store.getFamilySummary().name, 'Local family');
   assert.equal(store.getFamilySummary().memberCount, 1);
   assert.equal(store.getState().currentMemberId, 'member-local-safe');
   assert.equal(store.getSyncStatus().status, 'ready');
 });
 
 test('keeps the local member identity when hydrating a shared family', async () => {
-  const remoteState = createInitialState({ familyId: 'family-shared', memberId: 'member-remote', memberName: '爸爸' });
-  const localState = createInitialState({ familyId: 'family-shared', memberId: 'member-local', memberName: '小明' });
+  const remoteState = createInitialState({ familyId: 'family-shared', memberId: 'member-remote', memberName: 'Dad' });
+  const localState = createInitialState({ familyId: 'family-shared', memberId: 'member-local', memberName: 'Me' });
   const store = createStore({
     storage: createMemoryStorage(),
     initialState: localState,
@@ -170,12 +170,12 @@ test('keeps the local member identity when hydrating a shared family', async () 
 test('updates the current member name through the same store boundary', () => {
   const store = createStore({
     storage: createMemoryStorage(),
-    initialState: createInitialState({ memberId: 'member-test', memberName: '我' }),
+    initialState: createInitialState({ memberId: 'member-test', memberName: 'Me' }),
   });
 
-  store.updateMember({ memberId: 'member-test', displayName: '小明' });
+  store.updateMember({ memberId: 'member-test', displayName: 'Xiaoming' });
 
-  assert.equal(store.getState().members[0].displayName, '小明');
+  assert.equal(store.getState().members[0].displayName, 'Xiaoming');
 });
 
 test('updates an existing dish profile through the same store boundary', () => {
@@ -183,18 +183,18 @@ test('updates an existing dish profile through the same store boundary', () => {
     storage: createMemoryStorage(),
     initialState: createInitialState(),
   });
-  const created = store.addDish({ name: '番茄炒蛋' }, '2026-08-02T10:00:00.000Z');
+  const created = store.addDish({ name: 'Tomato eggs' }, '2026-08-02T10:00:00.000Z');
   const dishId = created.dishes[0].id;
 
-  store.updateDish({ dishId, name: '少油番茄炒蛋', tags: ['家常'] });
+  store.updateDish({ dishId, name: 'Low-oil tomato eggs', tags: ['home'] });
 
-  assert.equal(store.listDishes()[0].name, '少油番茄炒蛋');
-  assert.deepEqual(store.listDishes()[0].tags, ['家常']);
+  assert.equal(store.listDishes()[0].name, 'Low-oil tomato eggs');
+  assert.deepEqual(store.listDishes()[0].tags, ['home']);
   assert.equal(store.getState().cookingRecords.length, 1);
 });
 
-test('hydrates a family state from the optional cloud sync boundary', async () => {
-  const remoteState = createInitialState({ familyId: 'family-cloud', familyName: '云端饭桌' });
+test('hydrates a family state without changing the local family identity', async () => {
+  const remoteState = createInitialState({ familyId: 'family-local', familyName: 'Cloud dinner' });
   const store = createStore({
     storage: createMemoryStorage(),
     initialState: createInitialState({ familyId: 'family-local' }),
@@ -208,26 +208,91 @@ test('hydrates a family state from the optional cloud sync boundary', async () =
 
   await store.hydrateFromCloud();
 
-  assert.equal(store.getFamilySummary().name, '云端饭桌');
-  assert.equal(store.getState().family.id, 'family-cloud');
+  assert.equal(store.getState().family.id, 'family-local');
 });
 
-test('joins a remote family by adding the current member to the shared state', async () => {
-  const remoteState = createInitialState({ familyId: 'family-shared', familyName: '共享饭桌' });
+test('joins a remote family through the invite code boundary', async () => {
+  const remoteState = createInitialState({ familyId: 'family-shared', familyName: 'Shared dinner' });
   const store = createStore({
     storage: createMemoryStorage(),
     initialState: createInitialState({ familyId: 'family-local' }),
     cloudSync: {
-      async load() {
-        return remoteState;
+      async acceptInvite(code, member) {
+        assert.equal(code, 'A7K9Q2');
+        assert.equal(member.id, 'member-2');
+        return { state: remoteState, member: { memberId: 'member-2', displayName: 'Dad' } };
       },
       async save() {},
     },
   });
 
-  await store.joinFamily('family-shared', { id: 'member-2', displayName: '爸爸' });
+  await store.joinFamilyByInvite('A7K9Q2', { id: 'member-2', displayName: 'Dad' });
 
   assert.equal(store.getState().family.id, 'family-shared');
   assert.equal(store.getState().currentMemberId, 'member-2');
   assert.equal(store.getFamilySummary().memberCount, 2);
+});
+
+test('merges remote dishes with local dishes during cloud hydration', async () => {
+  const localState = createInitialState({ familyId: 'family-merge' });
+  const remoteStore = createStore({ storage: createMemoryStorage(), initialState: createInitialState({ familyId: 'family-merge' }) });
+  remoteStore.addDish({ name: 'Remote dish' }, '2026-08-04T10:01:00.000Z');
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: localState,
+    cloudSync: {
+      async load() {
+        return remoteStore.getState();
+      },
+      async save() {},
+    },
+  });
+  store.addDish({ name: 'Local dish' }, '2026-08-04T10:00:00.000Z');
+
+  await store.hydrateFromCloud();
+
+  assert.deepEqual(store.listDishes().map((dish) => dish.name).sort(), ['Local dish', 'Remote dish']);
+});
+
+test('keeps a local change made while cloud hydration is in flight', async () => {
+  let releaseLoad;
+  const loading = new Promise((resolve) => { releaseLoad = resolve; });
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-flight' }),
+    cloudSync: {
+      async load() {
+        await loading;
+        return createInitialState({ familyId: 'family-flight' });
+      },
+      async save() {},
+    },
+  });
+
+  const hydration = store.hydrateFromCloud();
+  store.addDish({ name: 'Change during hydration' }, '2026-08-04T10:02:00.000Z');
+  releaseLoad();
+  await hydration;
+
+  assert.equal(store.listDishes().some((dish) => dish.name === 'Change during hydration'), true);
+});
+
+test('loads and clears short invite metadata through the store boundary', async () => {
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-invite' }),
+    cloudSync: {
+      async getInvite() {
+        return { code: 'A7K9Q2', expiresAt: '2026-09-03T10:00:00.000Z', status: 'active' };
+      },
+      async revokeInvite() {
+        return { revoked: true };
+      },
+    },
+  });
+
+  await store.getInvite();
+  assert.equal(store.getFamilySummary().inviteCode, 'A7K9Q2');
+  await store.revokeInvite();
+  assert.equal(store.getFamilySummary().inviteCode, '');
 });

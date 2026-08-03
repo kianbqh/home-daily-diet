@@ -19,6 +19,7 @@ const {
   updateMealSelection,
 } = require('./domain');
 const { createDefaultStorage } = require('./storage');
+const { mergeFamilyStates } = require('./cloudbase-sync');
 
 const CLOUD_FALLBACK_MESSAGE = '云端连接失败，当前继续使用本地数据。';
 
@@ -33,7 +34,7 @@ function normalizePersistedState(candidate, fallbackState) {
     ...fallback.family,
     ...candidateFamily,
     id: String(candidateFamily.id || fallback.family.id || '').trim() || 'family-local',
-    name: String(candidateFamily.name || fallback.family.name || '').trim() || '我们的家',
+    name: String(candidateFamily.name || fallback.family.name || '').trim() || '我们家的饭桌',
   };
 
   let members = Array.isArray(candidate.members)
@@ -72,6 +73,8 @@ function createStore(options = {}) {
   if (storedState) storage.saveState(state);
   const listeners = new Set();
   let cloudSaveChain = Promise.resolve();
+  let localRevision = 0;
+  let invite = null;
   let syncStatus = options.initialSyncStatus || (cloudSync ? 'connecting' : 'local');
   let syncMessage = options.initialSyncMessage || '';
 
@@ -86,18 +89,32 @@ function createStore(options = {}) {
     if (changed) notify();
   }
 
+  function queueCloudSave(snapshot, revision) {
+    if (!cloudSync || typeof cloudSync.save !== 'function') return Promise.resolve(snapshot);
+    const operation = cloudSaveChain.then(() => cloudSync.save(snapshot));
+    cloudSaveChain = operation.catch(() => undefined);
+    return operation
+      .then((saved) => {
+        if (revision === localRevision) updateSyncStatus('ready');
+        return saved;
+      })
+      .catch((error) => {
+        updateSyncStatus('error', CLOUD_FALLBACK_MESSAGE);
+        throw error;
+      });
+  }
+
   function commit(nextState) {
     state = nextState;
+    localRevision += 1;
     storage.saveState(state);
     notify();
-    if (cloudSync && typeof cloudSync.save === 'function') {
-      const snapshot = state;
-      cloudSaveChain = cloudSaveChain
-        .then(() => cloudSync.save(snapshot))
-        .then(() => updateSyncStatus('ready'))
-        .catch(() => updateSyncStatus('error', CLOUD_FALLBACK_MESSAGE));
-    }
+    queueCloudSave(state, localRevision).catch(() => {});
     return state;
+  }
+
+  function currentMember() {
+    return state.members.find((member) => member.id === state.currentMemberId);
   }
 
   return {
@@ -109,41 +126,76 @@ function createStore(options = {}) {
         updateSyncStatus('local');
         return state;
       }
-      const localState = state;
+      const localStateAtStart = state;
       try {
         await cloudSaveChain;
-        const remote = await cloudSync.load(state.family.id);
-        if (remote) {
-          const localMemberId = localState.currentMemberId;
-          const localMember = localState.members.find((member) => member.id === localMemberId);
-          const normalizedRemote = normalizePersistedState(remote, localState);
-          state = { ...normalizedRemote, currentMemberId: localMemberId };
-          if (localMember && !state.members.some((member) => member.id === localMemberId)) {
-            state = addMember(state, localMember);
-          }
-          storage.saveState(state);
+        if (typeof cloudSync.bootstrap === 'function') {
+          const member = currentMember();
+          await cloudSync.bootstrap(state, member);
         }
-        syncStatus = 'ready';
-        syncMessage = '';
+        const remote = await cloudSync.load(state.family.id);
+        const latestLocalState = state;
+        const merged = remote
+          ? mergeFamilyStates(remote, latestLocalState)
+          : latestLocalState;
+        state = normalizePersistedState(merged, latestLocalState);
+        state.currentMemberId = latestLocalState.currentMemberId;
+        storage.saveState(state);
         notify();
+        await queueCloudSave(state, localRevision);
+        updateSyncStatus('ready');
       } catch (error) {
-        state = localState;
+        // Keep the newest local state, including edits made while the request was in flight.
+        state = state || localStateAtStart;
+        storage.saveState(state);
         updateSyncStatus('error', CLOUD_FALLBACK_MESSAGE);
       }
       return state;
     },
-    async joinFamily(familyId, member) {
-      if (!cloudSync || typeof cloudSync.load !== 'function') {
+    async joinFamilyByInvite(code, member) {
+      if (!cloudSync || typeof cloudSync.acceptInvite !== 'function') {
         throw new Error('当前还没有配置家庭云端同步');
       }
-      const remote = await cloudSync.load(familyId);
-      if (!remote) {
-        throw new Error('没有找到这个家庭空间');
+      const result = await cloudSync.acceptInvite(code, member);
+      const remote = result && result.state ? result.state : null;
+      if (!remote) throw new Error('没有找到这个家庭空间');
+      const memberId = result.member && result.member.memberId
+        ? result.member.memberId
+        : member.id;
+      state = normalizePersistedState({ ...remote, currentMemberId: memberId }, state);
+      state.currentMemberId = memberId;
+      if (!state.members.some((item) => item.id === memberId)) {
+        state = addMember(state, { id: memberId, displayName: member.displayName });
       }
-      let nextState = addMember(remote, member);
-      nextState.currentMemberId = member.id;
-      commit(nextState);
-      return nextState;
+      localRevision += 1;
+      invite = null;
+      storage.saveState(state);
+      updateSyncStatus('ready');
+      notify();
+      return state;
+    },
+    async getInvite() {
+      if (!cloudSync || typeof cloudSync.getInvite !== 'function') return null;
+      invite = await cloudSync.getInvite(state.family.id);
+      notify();
+      return invite;
+    },
+    async createInvite() {
+      if (!cloudSync || typeof cloudSync.createInvite !== 'function') {
+        throw new Error('连接云端后才能生成邀请码');
+      }
+      invite = await cloudSync.createInvite(state.family.id);
+      notify();
+      return invite;
+    },
+    async revokeInvite() {
+      if (!cloudSync || typeof cloudSync.revokeInvite !== 'function') {
+        throw new Error('连接云端后才能撤销邀请码');
+      }
+      const result = await cloudSync.revokeInvite(state.family.id);
+      invite = null;
+      notify();
+      return result;
     },
     subscribe(listener) {
       listeners.add(listener);
@@ -168,8 +220,12 @@ function createStore(options = {}) {
       return commit(updateDishProfile(state, input, now));
     },
     getFamilySummary() {
+      const summary = getFamilySummary(state);
       return {
-        ...getFamilySummary(state),
+        ...summary,
+        inviteCode: invite ? invite.code : '',
+        inviteExpiresAt: invite ? invite.expiresAt : '',
+        inviteStatus: invite ? invite.status : 'unavailable',
         cloudEnabled: syncStatus === 'ready',
         syncStatus,
         syncMessage,
@@ -229,4 +285,4 @@ function createStore(options = {}) {
   };
 }
 
-module.exports = { CLOUD_FALLBACK_MESSAGE, createStore };
+module.exports = { CLOUD_FALLBACK_MESSAGE, createStore, normalizePersistedState };

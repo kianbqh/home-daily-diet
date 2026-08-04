@@ -15,13 +15,21 @@
 
   <view class="card-surface form-section">
     <text class="form-label">家庭名称</text>
-    <input class="text-input" value="{{nameDraft}}" maxlength="20" bindinput="onNameInput" />
+    <view class="text-input-shell">
+      <text wx:if="{{nameDraft}}" class="input-visible">{{nameDraft}}</text>
+      <text wx:else class="input-visible input-placeholder">例如：我们的家</text>
+      <input class="input-capture" value="{{nameDraft}}" maxlength="20" bindfocus="onNameFocus" bindinput="onNameInput" bindblur="onNameBlur" />
+    </view>
     <button class="secondary-button save-name" bindtap="saveName">保存名称</button>
   </view>
 
   <view class="card-surface form-section">
     <text class="form-label">你的称呼</text>
-    <input class="text-input" value="{{memberNameDraft}}" maxlength="12" placeholder="例如：爸爸、小明" bindinput="onMemberNameInput" />
+    <view class="text-input-shell">
+      <text wx:if="{{memberNameDraft}}" class="input-visible">{{memberNameDraft}}</text>
+      <text wx:else class="input-visible input-placeholder">例如：爸爸、小明</text>
+      <input class="input-capture" value="{{memberNameDraft}}" maxlength="12" bindfocus="onMemberNameFocus" bindinput="onMemberNameInput" bindblur="onMemberNameBlur" />
+    </view>
     <button class="secondary-button save-name" bindtap="saveMemberName">保存称呼</button>
   </view>
 

@@ -30,6 +30,25 @@ function requireValue(value, code, message) {
   throw createAccessError(code, message);
 }
 
+function resolveOpenId(context = {}, wxContext = {}) {
+  const openid = wxContext && wxContext.OPENID
+    ? wxContext.OPENID
+    : context && context.OPENID;
+  return String(openid || '').trim();
+}
+
+function runtimeErrorCode(error) {
+  const code = error && (error.errCode || error.code);
+  return code == null || code === '' ? 'INTERNAL_ERROR' : String(code);
+}
+
+function withoutSystemId(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const payload = { ...data };
+  delete payload._id;
+  return payload;
+}
+
 function publicMember(member) {
   if (!member) return null;
   return {
@@ -78,7 +97,7 @@ async function getDocument(db, name, id) {
 }
 
 async function setDocument(db, name, id, data) {
-  await collection(db, name).doc(id).set({ data });
+  await collection(db, name).doc(id).set({ data: withoutSystemId(data) });
 }
 
 async function updateDocument(db, name, id, data) {
@@ -92,7 +111,7 @@ async function updateDocument(db, name, id, data) {
 }
 
 async function addDocument(db, name, data) {
-  await collection(db, name).add({ data });
+  await collection(db, name).add({ data: withoutSystemId(data) });
 }
 
 function chooseLatest(remoteItem, localItem, dateField = 'updatedAt') {
@@ -340,12 +359,29 @@ async function handleAction(event = {}, context = {}, db, options = {}) {
 }
 
 async function main(event = {}, context = {}) {
+  let stage = 'load-sdk';
   try {
     // Loaded lazily so the action handler remains unit-testable without installing the server SDK locally.
     const cloud = require('wx-server-sdk');
     const env = process.env.TCB_ENV || process.env.SCF_NAMESPACE;
-    cloud.init(env ? { env } : {});
-    const result = await handleAction(event, context, cloud.database(), {
+    const runtimeEnv = cloud.DYNAMIC_CURRENT_ENV || env;
+    stage = 'init-sdk';
+    cloud.init(runtimeEnv ? { env: runtimeEnv } : {});
+    stage = 'read-wx-context';
+    const wxContext = typeof cloud.getWXContext === 'function'
+      ? cloud.getWXContext()
+      : {};
+    const requestContext = {
+      ...context,
+      OPENID: resolveOpenId(context, wxContext),
+    };
+    // Use the server-side database client so the function's membership checks
+    // remain the authorization boundary instead of the caller's document owner
+    // permission blocking a legitimate second family member.
+    stage = 'open-database';
+    const db = cloud.database(runtimeEnv ? { env: runtimeEnv } : {});
+    stage = `action:${String(event.action || 'unknown')}`;
+    const result = await handleAction(event, requestContext, db, {
       config: {
         stateCollection: process.env.STATE_COLLECTION || DEFAULT_CONFIG.stateCollection,
         eventCollection: process.env.EVENT_COLLECTION || DEFAULT_CONFIG.eventCollection,
@@ -355,14 +391,31 @@ async function main(event = {}, context = {}) {
     });
     return result;
   } catch (error) {
+    const code = runtimeErrorCode(error);
+    if (typeof console !== 'undefined' && typeof console.error === 'function') {
+      console.error('[family-access] failed', {
+        stage,
+        code,
+        name: error && error.name ? String(error.name) : 'Error',
+        message: String(error && (error.errMsg || error.message) || '').slice(0, 240),
+      });
+    }
     return {
       ok: false,
       error: {
-        code: error.code || 'INTERNAL_ERROR',
-        message: error.code ? error.message : '家庭云端暂时不可用',
+        code,
+        message: code === 'INTERNAL_ERROR'
+          ? '家庭云端暂时不可用'
+          : (error.message || error.errMsg || '家庭云端暂时不可用'),
       },
     };
   }
 }
 
-module.exports = { handleAction, main, mergeFamilyStates };
+module.exports = {
+  handleAction,
+  main,
+  mergeFamilyStates,
+  resolveOpenId,
+  runtimeErrorCode,
+};

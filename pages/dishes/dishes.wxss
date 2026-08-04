@@ -34,6 +34,33 @@
   font-size: 27rpx;
 }
 
+.search-input-shell {
+  position: relative;
+  flex: 1;
+  height: 84rpx;
+  min-width: 0;
+}
+
+.search-input-visible {
+  min-height: 84rpx;
+  padding: 0;
+  color: #353a34;
+  font-size: 27rpx;
+  line-height: 84rpx;
+}
+
+.search-input-capture {
+  height: 84rpx;
+  padding: 0;
+  color: transparent;
+  caret-color: transparent;
+}
+
+.search-box .search-input-capture {
+  color: transparent;
+  caret-color: transparent;
+}
+
 .search-clear {
   color: #315b49;
   font-size: 22rpx;

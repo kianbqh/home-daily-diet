@@ -68,26 +68,40 @@ Page({
     const model = store
       ? buildFamilyViewModel(store.getState(), store.getFamilySummary())
       : buildFamilyViewModel(null, null);
-    if (this.nameDraftDirty) {
+    const preserveNameInput = Boolean(this.nameEditing || this.nameDraftDirty);
+    const preserveMemberNameInput = Boolean(this.memberNameEditing || this.memberNameDraftDirty);
+    if (preserveNameInput) {
       model.name = this.nameDraft;
-      model.nameDraft = this.nameDraft;
     } else {
       this.nameDraft = model.name;
       model.nameDraft = model.name;
     }
-    if (this.memberNameDraftDirty) {
+    if (preserveMemberNameInput) {
       model.memberName = this.memberNameDraft;
-      model.memberNameDraft = this.memberNameDraft;
     } else {
       this.memberNameDraft = model.memberName;
       model.memberNameDraft = model.memberName;
     }
+    // Do not send a new value prop to a focused/edited native input. On iOS,
+    // rebinding value during composition can clear the visible text while the
+    // native control still retains the latest event.detail.value.
+    if (preserveNameInput) delete model.nameDraft;
+    if (preserveMemberNameInput) delete model.memberNameDraft;
     this.setData(model);
+  },
+  onNameFocus() {
+    this.nameEditing = true;
+    if (!this.nameDraftDirty) {
+      this.nameDraft = String(this.data.nameDraft || this.data.name || '');
+    }
+  },
+  onNameBlur() {
+    this.nameEditing = false;
   },
   onNameInput(event) {
     this.nameDraft = String(event.detail.value || '');
     this.nameDraftDirty = true;
-    this.setData({ name: this.nameDraft, nameDraft: this.nameDraft });
+    this.setData({ nameDraft: this.nameDraft });
   },
   saveName() {
     const name = String(
@@ -101,14 +115,24 @@ Page({
     if (!store) return;
     this.nameDraft = name;
     this.nameDraftDirty = false;
+    this.nameEditing = false;
     store.updateFamily({ name });
     wx.showToast({ title: '已保存', icon: 'success' });
     this.refresh();
   },
+  onMemberNameFocus() {
+    this.memberNameEditing = true;
+    if (!this.memberNameDraftDirty) {
+      this.memberNameDraft = String(this.data.memberNameDraft || this.data.memberName || '');
+    }
+  },
+  onMemberNameBlur() {
+    this.memberNameEditing = false;
+  },
   onMemberNameInput(event) {
     this.memberNameDraft = String(event.detail.value || '');
     this.memberNameDraftDirty = true;
-    this.setData({ memberName: this.memberNameDraft, memberNameDraft: this.memberNameDraft });
+    this.setData({ memberNameDraft: this.memberNameDraft });
   },
   saveMemberName() {
     const displayName = String(
@@ -124,6 +148,7 @@ Page({
     if (!store) return;
     this.memberNameDraft = displayName;
     this.memberNameDraftDirty = false;
+    this.memberNameEditing = false;
     store.updateMember({ displayName });
     wx.showToast({ title: '称呼已保存', icon: 'success' });
     this.refresh();

@@ -11,13 +11,16 @@ Page({
     isEditingProfile: false,
     dishId: '',
     name: '',
+    nameDraft: '',
     image: '',
     displayImage: '',
     tags: '',
+    tagsDraft: '',
     recordDate: todayString(),
     mealType: '',
     mealTypeLabel: '未指定餐次',
     customMealType: '',
+    customMealTypeDraft: '',
     history: [],
     mealTypes: [
       { key: '', label: '未指定餐次' },
@@ -33,27 +36,73 @@ Page({
     if (!dish) return;
     const editProfile = options.mode === 'edit';
     const detail = buildDishDetailViewModel(store.getState(), dish.id);
+    const name = dish.name;
+    const tags = editProfile ? (dish.tags || []).join('、') : '';
     this.setData({
       isExisting: true,
       isEditingProfile: editProfile,
       dishId: dish.id,
-      name: dish.name,
-      tags: editProfile ? (dish.tags || []).join('、') : '',
+      name,
+      nameDraft: name,
+      tags,
+      tagsDraft: tags,
+      customMealTypeDraft: '',
       image: editProfile ? dish.coverImage : '',
       displayImage: editProfile ? dish.coverImage : '',
       history: detail.history,
     });
+    this.nameDraft = name;
+    this.nameDraftDirty = false;
+    this.tagsDraft = tags;
+    this.tagsDraftDirty = false;
+    this.customMealTypeDraft = '';
+    this.customMealTypeDraftDirty = false;
     this.resolveCloudImage(dish.coverImage, 'displayImage');
     this.resolveHistoryImages(detail.history);
   },
+  onNameFocus() {
+    this.nameEditing = true;
+    if (!this.nameDraftDirty) {
+      this.nameDraft = String(this.data.nameDraft || this.data.name || '');
+    }
+  },
+  onNameBlur() {
+    this.nameEditing = false;
+  },
   onNameInput(event) {
-    this.setData({ name: event.detail.value });
+    this.nameDraft = String(event.detail.value || '');
+    this.nameDraftDirty = true;
+    this.setData({ nameDraft: this.nameDraft });
+  },
+  onTagsFocus() {
+    this.tagsEditing = true;
+    if (!this.tagsDraftDirty) {
+      this.tagsDraft = String(this.data.tagsDraft || this.data.tags || '');
+    }
+  },
+  onTagsBlur() {
+    this.tagsEditing = false;
   },
   onTagsInput(event) {
-    this.setData({ tags: event.detail.value });
+    this.tagsDraft = String(event.detail.value || '');
+    this.tagsDraftDirty = true;
+    this.setData({ tagsDraft: this.tagsDraft });
+  },
+  onCustomMealTypeFocus() {
+    this.customMealTypeEditing = true;
+    if (!this.customMealTypeDraftDirty) {
+      this.customMealTypeDraft = String(
+        this.data.customMealTypeDraft || this.data.customMealType || ''
+      );
+    }
+  },
+  onCustomMealTypeBlur() {
+    this.customMealTypeEditing = false;
   },
   onCustomMealTypeInput(event) {
-    this.setData({ customMealType: event.detail.value });
+    this.customMealTypeDraft = String(event.detail.value || '');
+    this.customMealTypeDraftDirty = true;
+    this.setData({ customMealTypeDraft: this.customMealTypeDraft });
   },
   chooseMealType(event) {
     const index = Number(event.detail.value);
@@ -95,9 +144,18 @@ Page({
   },
   startProfileEdit() {
     const dish = getApp().globalData.store.getState().dishes.find((item) => item.id === this.data.dishId);
+    const name = dish ? dish.name : '';
+    const tags = dish ? (dish.tags || []).join('、') : '';
+    this.nameDraft = name;
+    this.nameDraftDirty = false;
+    this.tagsDraft = tags;
+    this.tagsDraftDirty = false;
     this.setData({
       isEditingProfile: true,
-      tags: dish ? (dish.tags || []).join('、') : '',
+      name,
+      nameDraft: name,
+      tags,
+      tagsDraft: tags,
       image: dish ? dish.coverImage : '',
       displayImage: dish ? dish.coverImage : '',
     });
@@ -137,13 +195,21 @@ Page({
     });
   },
   async save() {
-    const name = this.data.name.trim();
+    const name = String(
+      this.nameDraftDirty ? this.nameDraft : (this.data.nameDraft || this.data.name || '')
+    ).trim();
     if (!name) {
       wx.showToast({ title: '先写下菜名', icon: 'none' });
       return;
     }
     const store = getApp().globalData.store;
-    const tags = this.data.tags.split(/[，、\s]+/).filter(Boolean);
+    const tagsText = this.tagsDraftDirty
+      ? this.tagsDraft
+      : (this.data.tagsDraft || this.data.tags || '');
+    const tags = String(tagsText).split(/[，、\s]+/).filter(Boolean);
+    const customMealType = this.customMealTypeDraftDirty
+      ? this.customMealTypeDraft
+      : (this.data.customMealTypeDraft || this.data.customMealType || '');
     let image = this.data.image;
     if (image && typeof store.uploadImage === 'function') {
       if (typeof wx.showLoading === 'function') wx.showLoading({ title: '正在保存图片' });
@@ -169,7 +235,7 @@ Page({
       tags,
       recordedAt: isoForDate(this.data.recordDate),
       mealType: this.data.mealType === 'custom'
-        ? this.data.customMealType.trim() || '其他餐次'
+        ? String(customMealType).trim() || '其他餐次'
         : this.data.mealType,
     };
     if (this.data.isExisting) {

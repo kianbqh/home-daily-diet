@@ -19,7 +19,11 @@
 
   <view class="card-surface form-section">
     <text class="form-label">菜名 <text class="required">*</text></text>
-    <input class="text-input {{isExisting && !isEditingProfile ? 'readonly' : ''}}" value="{{name}}" disabled="{{isExisting && !isEditingProfile}}" placeholder="例如：番茄炒蛋" bindinput="onNameInput" />
+    <view class="text-input-shell {{isExisting && !isEditingProfile ? 'readonly' : ''}}">
+      <text wx:if="{{nameDraft}}" class="input-visible">{{nameDraft}}</text>
+      <text wx:else class="input-visible input-placeholder">例如：番茄炒蛋</text>
+      <input class="input-capture" value="{{nameDraft}}" disabled="{{isExisting && !isEditingProfile}}" placeholder-class="input-placeholder" bindfocus="onNameFocus" bindinput="onNameInput" bindblur="onNameBlur" />
+    </view>
   </view>
 
   <view class="card-surface form-section">
@@ -35,7 +39,11 @@
 
   <view wx:if="{{!isExisting || isEditingProfile}}" class="card-surface form-section">
     <text class="form-label">标签 <text class="optional">可选</text></text>
-    <input class="text-input" value="{{tags}}" placeholder="例如：家常、素菜、下饭" bindinput="onTagsInput" />
+    <view class="text-input-shell">
+      <text wx:if="{{tagsDraft}}" class="input-visible">{{tagsDraft}}</text>
+      <text wx:else class="input-visible input-placeholder">例如：家常、素菜、下饭</text>
+      <input class="input-capture" value="{{tagsDraft}}" placeholder-class="input-placeholder" bindfocus="onTagsFocus" bindinput="onTagsInput" bindblur="onTagsBlur" />
+    </view>
   </view>
 
   <block wx:if="{{!isEditingProfile}}">
@@ -48,7 +56,11 @@
       <picker mode="selector" range="{{mealTypes}}" range-key="label" bindchange="chooseMealType">
         <view class="picker-field">{{mealTypeLabel}} <text class="picker-arrow">⌄</text></view>
       </picker>
-      <input wx:if="{{mealType === 'custom'}}" class="text-input sub-input" value="{{customMealType}}" placeholder="例如：周末聚餐" bindinput="onCustomMealTypeInput" />
+      <view wx:if="{{mealType === 'custom'}}" class="text-input-shell sub-input">
+        <text wx:if="{{customMealTypeDraft}}" class="input-visible">{{customMealTypeDraft}}</text>
+        <text wx:else class="input-visible input-placeholder">例如：周末聚餐</text>
+        <input class="input-capture" value="{{customMealTypeDraft}}" placeholder-class="input-placeholder" bindfocus="onCustomMealTypeFocus" bindinput="onCustomMealTypeInput" bindblur="onCustomMealTypeBlur" />
+      </view>
     </view>
   </block>
 

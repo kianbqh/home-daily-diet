@@ -16,3 +16,11 @@ test('dish record form does not ask for ratings or notes', () => {
   assert.doesNotMatch(pageScript, /rating:\s*this\.data\.rating/);
   assert.doesNotMatch(pageScript, /note:\s*this\.data\.note/);
 });
+
+test('dish text inputs render their placeholder outside the native control', () => {
+  assert.match(template, /class="input-visible input-placeholder">例如：番茄炒蛋/);
+  assert.match(template, /class="input-visible input-placeholder">例如：家常、素菜、下饭/);
+  assert.match(template, /placeholder-class="input-placeholder"/);
+  assert.match(template, /class="input-visible"/);
+  assert.match(template, /class="input-capture"/);
+});

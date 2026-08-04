@@ -69,6 +69,42 @@ test('saves a dish without its photo when image upload fails', async () => {
   global.wx = originalWx;
 });
 
+test('dish text inputs keep native composition out of page setData', () => {
+  const page = createPageInstance(loadDishEditPage(), {
+    name: '',
+    tags: '',
+    customMealType: '',
+  });
+  let setDataCalls = 0;
+  const setDataPayloads = [];
+  const originalSetData = page.setData;
+  page.setData = (next) => {
+    setDataCalls += 1;
+    setDataPayloads.push(next);
+    originalSetData.call(page, next);
+  };
+
+  page.onNameFocus();
+  page.onNameInput({ detail: { value: '番茄炒蛋' } });
+  page.onTagsFocus();
+  page.onTagsInput({ detail: { value: '家常、下饭' } });
+  page.onCustomMealTypeFocus();
+  page.onCustomMealTypeInput({ detail: { value: '周末聚餐' } });
+
+  assert.equal(setDataCalls, 3);
+  assert.deepEqual(setDataPayloads.map((payload) => Object.keys(payload)), [
+    ['nameDraft'],
+    ['tagsDraft'],
+    ['customMealTypeDraft'],
+  ]);
+  assert.equal(page.nameDraft, '番茄炒蛋');
+  assert.equal(page.tagsDraft, '家常、下饭');
+  assert.equal(page.customMealTypeDraft, '周末聚餐');
+  assert.equal(page.data.nameDraft, '番茄炒蛋');
+  assert.equal(page.data.tagsDraft, '家常、下饭');
+  assert.equal(page.data.customMealTypeDraft, '周末聚餐');
+});
+
 test('dish record page does not render rating or note sections', () => {
   const template = fs.readFileSync('pages/dish-edit/dish-edit.wxml', 'utf8');
 

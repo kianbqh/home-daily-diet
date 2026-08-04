@@ -108,4 +108,6 @@ test('family template does not render a raw family id field', () => {
 
   assert.equal(template.includes('{{family.id}}'), false);
   assert.equal(template.includes('familyId='), false);
+  assert.match(template, /class="input-visible"/);
+  assert.match(template, /class="input-capture"/);
 });

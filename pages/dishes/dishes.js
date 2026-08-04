@@ -3,6 +3,7 @@ const { buildLibraryViewModel } = require('../../utils/view-model');
 Page({
   data: {
     query: '',
+    queryDraft: '',
     activeTag: 'all',
     tags: [
       { key: 'all', label: '全部' },
@@ -26,7 +27,10 @@ Page({
     if (store && typeof store.subscribe === 'function') {
       this.unsubscribe = store.subscribe(() => this.refresh());
     }
-    if (options && options.query) this.setData({ query: options.query });
+    if (options && options.query) {
+      this.queryDraft = options.query;
+      this.setData({ query: options.query, queryDraft: options.query });
+    }
   },
   onUnload() {
     if (this.unsubscribe) {
@@ -52,10 +56,12 @@ Page({
     });
   },
   onSearch(event) {
-    this.setData({ query: event.detail.value }, () => this.refresh());
+    this.queryDraft = String(event.detail.value || '');
+    this.setData({ query: this.queryDraft, queryDraft: this.queryDraft }, () => this.refresh());
   },
   clearSearch() {
-    this.setData({ query: '' }, () => this.refresh());
+    this.queryDraft = '';
+    this.setData({ query: '', queryDraft: '' }, () => this.refresh());
   },
   chooseTag(event) {
     this.setData({ activeTag: event.currentTarget.dataset.tag }, () => this.refresh());

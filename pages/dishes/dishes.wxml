@@ -10,7 +10,11 @@
 
   <view class="search-box">
     <text class="search-icon">⌕</text>
-    <input value="{{query}}" placeholder="搜索菜名" confirm-type="search" bindinput="onSearch" />
+    <view class="search-input-shell">
+      <text wx:if="{{queryDraft}}" class="input-visible search-input-visible">{{queryDraft}}</text>
+      <text wx:else class="input-visible search-input-visible input-placeholder">搜索菜名</text>
+      <input class="input-capture search-input-capture" value="{{queryDraft}}" confirm-type="search" bindinput="onSearch" />
+    </view>
     <text wx:if="{{query}}" class="search-clear" bindtap="clearSearch">清除</text>
   </view>
 

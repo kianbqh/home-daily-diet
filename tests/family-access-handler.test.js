@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { createInitialState } = require('../services/domain');
-const { handleAction } = require('../cloudfunctions/family-access');
+const {
+  handleAction,
+  resolveOpenId,
+  runtimeErrorCode,
+} = require('../cloudfunctions/family-access');
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -30,6 +34,11 @@ function createMemoryDatabase(seed = {}, options = {}) {
             return { data: data ? clone(data) : null };
           },
           async set({ data }) {
+            if (options.rejectSystemId && Object.prototype.hasOwnProperty.call(data || {}, '_id')) {
+              const error = new Error('document.set:fail -501007 invalid parameters. cannot update _id');
+              error.errCode = '-501007';
+              throw error;
+            }
             records.set(id, clone(data));
             return { _id: id };
           },
@@ -41,6 +50,11 @@ function createMemoryDatabase(seed = {}, options = {}) {
         };
       },
       async add({ data }) {
+        if (options.rejectSystemId && Object.prototype.hasOwnProperty.call(data || {}, '_id')) {
+          const error = new Error('document.add:fail -501007 invalid parameters. cannot set _id');
+          error.errCode = '-501007';
+          throw error;
+        }
         const id = data._id || `${name}-${records.size + 1}`;
         records.set(id, { ...clone(data), _id: id });
         return { _id: id };
@@ -73,6 +87,19 @@ function createMemoryDatabase(seed = {}, options = {}) {
 function familyState(familyId) {
   return createInitialState({ familyId, familyName: 'Test Family' });
 }
+
+test('resolves the trusted mini-program identity returned by getWXContext', () => {
+  assert.equal(resolveOpenId({ OPENID: 'context-openid' }, { OPENID: 'wx-openid' }), 'wx-openid');
+  assert.equal(resolveOpenId({}, { OPENID: 'wx-openid' }), 'wx-openid');
+  assert.equal(resolveOpenId({ OPENID: 'context-openid' }, {}), 'context-openid');
+  assert.equal(resolveOpenId({ userInfo: { openId: 'event-openid' } }, {}), '');
+});
+
+test('keeps CloudBase runtime error codes available for diagnosis', () => {
+  assert.equal(runtimeErrorCode({ errCode: -502005 }), '-502005');
+  assert.equal(runtimeErrorCode({ code: 'DATABASE_PERMISSION_DENIED' }), 'DATABASE_PERMISSION_DENIED');
+  assert.equal(runtimeErrorCode(new Error('unknown failure')), 'INTERNAL_ERROR');
+});
 
 async function invoke(db, event, openid, options = {}) {
   return handleAction(event, { OPENID: openid }, db, {
@@ -122,6 +149,26 @@ test('first cloud save treats a missing family state document as an empty state'
 
   assert.equal(result.ok, true);
   assert.equal(result.data.state.family.id, 'family-new');
+});
+
+test('database writes strip CloudBase system ids before set and add', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  }, { rejectSystemId: true });
+
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const invite = await invoke(db, {
+    action: 'createInvite',
+    familyId: 'family-1',
+  }, 'openid-1');
+
+  assert.equal(invite.ok, true);
+  assert.equal(invite.data.invite.code.length, 6);
 });
 
 test('createInvite and acceptInvite create a shared member', async () => {

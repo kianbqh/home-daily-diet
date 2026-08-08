@@ -35,11 +35,20 @@ Page({
   goDishes() {
     wx.navigateTo({ url: '/pages/dishes/dishes' });
   },
+  onRecentDishTap(event) {
+    const dish = event && event.detail && event.detail.dish;
+    if (!dish || !dish.id) return;
+    wx.navigateTo({ url: `/pages/dish-edit/dish-edit?dishId=${dish.id}` });
+  },
   goFamily() {
     wx.navigateTo({ url: '/pages/family/family' });
   },
   goMeal() {
     const store = this.getStore();
+    if (!store) {
+      wx.showToast({ title: '应用正在初始化，请稍后再试', icon: 'none' });
+      return;
+    }
     if (store.getState().dishes.length === 0) {
       wx.showToast({ title: '先记录一道菜', icon: 'none' });
       this.goRecord();
@@ -50,6 +59,12 @@ Page({
   },
   onShareAppMessage() {
     const store = this.getStore();
+    if (!store) {
+      return {
+        title: '一起记录家里的菜',
+        path: '/pages/index/index',
+      };
+    }
     if (store.getState().dishes.length === 0) {
       return {
         title: '一起记录家里的菜',

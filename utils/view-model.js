@@ -3,9 +3,10 @@ const {
   getMealForDate,
   getFinalDishIds,
   getSelectedSubmissions,
+  listDeletedDishSummaries,
   listDishSummaries,
 } = require('../services/domain');
-const { formatDate, formatMealType, formatRating } = require('./format');
+const { formatDate, formatMealType, formatRating, formatStars } = require('./format');
 
 const DEFAULT_FAMILY_NAME = '我们的家';
 const DEFAULT_MEMBER_NAME = '我';
@@ -122,17 +123,88 @@ function buildLibraryViewModel(state, filters = {}) {
 
 function buildDishDetailViewModel(state, dishId) {
   const dish = getDishSummary(state, dishId);
-  const history = state.cookingRecords
+  if (!dish) return { dish: null, history: [], reviews: [], reviewStats: null, canReview: false };
+
+  const memberNames = new Map((state.members || []).map((member) => [member.id, member.displayName]));
+  const records = state.cookingRecords
     .filter((record) => record.dishId === dishId)
-    .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
-    .map((record) => ({
+    .sort((a, b) => String(b.recordedAt || '').localeCompare(String(a.recordedAt || '')));
+  const recordMap = new Map(records.map((record) => [record.id, record]));
+  const allReviews = (Array.isArray(state.recordReviews) ? state.recordReviews : [])
+    .filter((review) => review.dishId === dishId && recordMap.has(review.recordId))
+    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
+  const history = records.map((record) => {
+    const recordReviews = allReviews.filter((review) => review.recordId === record.id);
+    const myReview = recordReviews.find((review) => review.memberId === state.currentMemberId) || null;
+    return {
       ...record,
       recordDateLabel: formatDate(record.recordedAt),
       mealLabel: record.mealType ? formatMealType(record.mealType) : '未指定餐次',
       ratingLabel: formatRating(record.rating),
       noteLabel: record.note || '这次没有写备注',
-    }));
-  return { dish, history };
+      reviewCount: recordReviews.length,
+      myReview,
+      reviewLabel: recordReviews.length ? `${recordReviews.length} 条评价` : '还没有评价',
+      canReview: dish.status !== 'deleted',
+    };
+  });
+  const reviews = allReviews.map((review) => {
+    const record = recordMap.get(review.recordId);
+    const displayName = memberNames.get(review.memberId) || '家庭成员';
+    return {
+      ...review,
+      displayName,
+      initial: displayName.slice(0, 1),
+      starsLabel: formatStars(review.stars),
+      starSlots: buildStarSlots(review.stars),
+      recordDateLabel: record ? formatDate(record.recordedAt) : '未知日期',
+      mealLabel: record && record.mealType ? formatMealType(record.mealType) : '未指定餐次',
+      recordImage: record ? record.image || '' : '',
+    };
+  });
+  const reviewStats = {
+    reviewCount: dish.reviewCount || 0,
+    averageStars: dish.averageStars || 0,
+    averageLabel: formatStars(dish.averageStars),
+    distribution: dish.ratingDistribution || {},
+    starSlots: buildStarSlots(dish.averageStars),
+  };
+  return {
+    dish,
+    history,
+    reviews,
+    reviewStats,
+    canReview: dish.status !== 'deleted',
+    isArchived: dish.status === 'deleted',
+  };
+}
+
+function buildStarSlots(stars) {
+  const value = Number(stars) || 0;
+  return Array.from({ length: 5 }, (_, index) => {
+    const fill = Math.max(0, Math.min(1, value - index));
+    return {
+      index,
+      state: fill >= 1 ? 'full' : (fill >= 0.5 ? 'half' : 'empty'),
+    };
+  });
+}
+
+function buildTrashViewModel(state) {
+  const dishes = listDeletedDishSummaries(state).map((dish) => ({
+    ...dish,
+    canRestore: true,
+    canPurge: true,
+    historyLabel: `${dish.recordCount || 0} 次制作记录`,
+    reviewLabel: `${dish.reviewCount || 0} 条评价`,
+  }));
+  return {
+    dishes,
+    count: dishes.length,
+    isEmpty: dishes.length === 0,
+    emptyTitle: '回收站是空的',
+    emptyDescription: '移除的菜品会先放在这里，确认后再彻底删除。',
+  };
 }
 
 function buildMealViewModel(state, date, memberId, mealType = 'dinner') {
@@ -167,4 +239,5 @@ module.exports = {
   buildHomeViewModel,
   buildLibraryViewModel,
   buildMealViewModel,
+  buildTrashViewModel,
 };

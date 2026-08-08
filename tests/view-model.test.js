@@ -63,6 +63,19 @@ test('library view model distinguishes an empty library from an empty search', (
   assert.equal(noMatch.hasSearch, true);
 });
 
+test('library and meal view models hide soft-deleted dishes', () => {
+  let state = addDish(createInitialState(), { name: '鱼香茄子' }, NOW);
+  state.dishes[0].status = 'deleted';
+  state.dishes[0].deletedAt = '2026-08-03T10:00:00.000Z';
+
+  const library = buildLibraryViewModel(state);
+  const meal = buildMealViewModel(state, '2026-08-02', state.currentMemberId);
+
+  assert.equal(library.dishes.length, 0);
+  assert.equal(meal.dishes.length, 0);
+  assert.equal(meal.emptyLibrary, true);
+});
+
 test('dish detail view model exposes cooking history in reverse chronological order', () => {
   let state = addDish(createInitialState(), { name: '鱼香茄子' }, NOW);
   const dishId = state.dishes[0].id;

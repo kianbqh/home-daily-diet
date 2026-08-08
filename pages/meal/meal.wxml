@@ -30,8 +30,8 @@
     </view>
 
     <view wx:if="{{!model.confirmed}}" class="meal-grid">
-      <view wx:for="{{model.dishes}}" wx:key="id" class="meal-dish-wrap" data-id="{{item.id}}" bindtap="toggleDish">
-        <dish-card dish="{{item}}" selected="{{item.selectedByMe}}" />
+      <view wx:for="{{model.dishes}}" wx:key="id" class="meal-dish-wrap">
+        <dish-card dish="{{item}}" selected="{{item.selectedByMe}}" data-id="{{item.id}}" bind:dishTap="toggleDish" />
         <view wx:if="{{item.submissionCount}}" class="vote-count">{{item.submissionCount}} 人想吃</view>
         <view wx:if="{{item.selected}}" class="final-toggle {{item.finalSelected ? 'active' : ''}}" data-id="{{item.id}}" catchtap="toggleFinalDish">{{item.finalSelected ? '保留进最终菜单' : '不做这道'}}</view>
       </view>

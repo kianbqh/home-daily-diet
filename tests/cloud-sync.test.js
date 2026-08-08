@@ -1,7 +1,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { addDish, createInitialState } = require('../services/domain');
+const {
+  addCookingRecord,
+  addDish,
+  createInitialState,
+  deleteDish,
+  purgeDish,
+  rateDish,
+  upsertRecordReview,
+} = require('../services/domain');
 const { createCloudBaseSync, mergeFamilyStates } = require('../services/cloudbase-sync');
 
 function createFakeCloudApi(options = {}) {
@@ -134,6 +142,23 @@ test('cloudbase sync is disabled without an environment id', () => {
   assert.equal(createCloudBaseSync(null, { envId: '' }), null);
 });
 
+test('cloud-enabled image upload never falls back to a device-local path', async () => {
+  const api = {
+    cloud: {
+      init() {},
+      async callFunction() {
+        return { result: { ok: true, data: {} } };
+      },
+    },
+  };
+  const sync = createCloudBaseSync(api, { envId: 'env-test' });
+
+  await assert.rejects(
+    sync.uploadImage('wxfile://tmp/photo.jpg', 'family-1'),
+    (error) => error && error.code === 'IMAGE_UPLOAD_UNAVAILABLE'
+  );
+});
+
 test('restores an event-backed family when the base document was initially missing', async () => {
   const fake = createFakeCloudApi({ throwWhenMissing: true });
   const sync = createCloudBaseSync(fake.api, { envId: 'env-test' });
@@ -239,4 +264,95 @@ test('cloudbase sync keeps both concurrent device snapshots through immutable ev
   const finalState = await syncA.load('family-race');
 
   assert.deepEqual(finalState.dishes.map((dish) => dish.name).sort(), ['冬瓜汤', '清蒸鱼']);
+});
+
+test('cloudbase merge preserves the newest rating and a soft deletion marker', () => {
+  let remote = createInitialState({ familyId: 'family-rating' });
+  remote = addDish(remote, { name: '清蒸鱼' }, '2026-08-02T10:00:00.000Z');
+  const dishId = remote.dishes[0].id;
+  remote = rateDish(remote, { dishId, memberId: 'member-local', rating: 'like' }, '2026-08-02T10:01:00.000Z');
+
+  let local = createInitialState({ familyId: 'family-rating' });
+  local = addDish(local, { id: dishId, name: '清蒸鱼' }, '2026-08-02T10:00:00.000Z');
+  local = rateDish(local, { dishId, memberId: 'member-local', rating: 'dislike' }, '2026-08-03T10:01:00.000Z');
+  local = deleteDish(local, { dishId }, '2026-08-04T10:01:00.000Z');
+
+  const merged = mergeFamilyStates(remote, local);
+
+  assert.equal(merged.dishRatings.length, 1);
+  assert.equal(merged.dishRatings[0].rating, 'dislike');
+  assert.equal(merged.dishes[0].status, 'deleted');
+});
+
+test('cloudbase merge never resurrects a soft-deleted dish from a stale active snapshot', () => {
+  let remote = createInitialState({ familyId: 'family-durian' });
+  remote = addDish(remote, {
+    id: 'dish-durian',
+    name: '榴莲',
+  }, '2026-08-08T12:00:00.000Z');
+
+  let local = createInitialState({ familyId: 'family-durian' });
+  local = addDish(local, {
+    id: 'dish-durian',
+    name: '榴莲',
+  }, '2026-08-01T12:00:00.000Z');
+  local = deleteDish(local, { dishId: 'dish-durian' }, '2026-08-08T11:00:00.000Z');
+
+  const merged = mergeFamilyStates(remote, local);
+
+  assert.equal(merged.dishes[0].status, 'deleted');
+  assert.equal(merged.dishes[0].deletedAt, '2026-08-08T11:00:00.000Z');
+});
+
+test('an explicit restore can win over a previously recorded deletion', () => {
+  let remote = createInitialState({ familyId: 'family-restore' });
+  remote = addDish(remote, {
+    id: 'dish-restore',
+    name: 'Dish',
+  }, '2026-08-01T12:00:00.000Z');
+  remote = deleteDish(remote, { dishId: 'dish-restore' }, '2026-08-08T10:00:00.000Z');
+
+  let local = remote;
+  local = require('../services/domain').restoreDish(
+    local,
+    { dishId: 'dish-restore' },
+    '2026-08-08T11:00:00.000Z'
+  );
+
+  const merged = mergeFamilyStates(remote, local);
+
+  assert.equal(merged.dishes[0].status, 'active');
+  assert.equal(merged.dishes[0].restoredAt, '2026-08-08T11:00:00.000Z');
+});
+
+test('cloudbase merge keeps record reviews and does not resurrect a purged dish', () => {
+  let remote = createInitialState({ familyId: 'family-review-merge' });
+  remote = addDish(remote, { name: 'Tomato eggs' }, '2026-08-02T10:00:00.000Z');
+  const dishId = remote.dishes[0].id;
+  const recordId = remote.cookingRecords[0].id;
+  remote = upsertRecordReview(remote, {
+    dishId,
+    recordId,
+    memberId: 'member-local',
+    stars: 3.5,
+    text: 'remote',
+  }, '2026-08-02T10:01:00.000Z');
+
+  let local = remote;
+  local = upsertRecordReview(local, {
+    dishId,
+    recordId,
+    memberId: 'member-local',
+    stars: 4.5,
+    text: 'local latest',
+  }, '2026-08-03T10:01:00.000Z');
+  local = deleteDish(local, { dishId }, '2026-08-04T10:01:00.000Z');
+  local = purgeDish(local, { dishId }, '2026-08-05T10:01:00.000Z');
+
+  const merged = mergeFamilyStates(remote, local);
+
+  assert.equal(merged.dishes.some((dish) => dish.id === dishId), false);
+  assert.equal(merged.cookingRecords.some((record) => record.dishId === dishId), false);
+  assert.equal(merged.recordReviews.some((review) => review.dishId === dishId), false);
+  assert.equal(merged.purgedDishes[0].dishId, dishId);
 });

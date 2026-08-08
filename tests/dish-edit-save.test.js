@@ -7,9 +7,7 @@ function loadDishEditPage() {
   const modulePath = require.resolve('../pages/dish-edit/dish-edit.js');
   const originalPage = global.Page;
   let definition = null;
-  global.Page = (config) => {
-    definition = config;
-  };
+  global.Page = (config) => { definition = config; };
   delete require.cache[modulePath];
   require(modulePath);
   global.Page = originalPage;
@@ -26,7 +24,7 @@ function createPageInstance(definition, data = {}) {
   };
 }
 
-test('saves a dish without its photo when image upload fails', async () => {
+test('does not save a dish when its selected photo upload fails', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   let saved = null;
@@ -37,9 +35,6 @@ test('saves a dish without its photo when image upload fails', async () => {
     findDishByName() {
       return null;
     },
-    findSimilarDishes() {
-      return [];
-    },
     addDish(payload) {
       saved = payload;
     },
@@ -49,12 +44,10 @@ test('saves a dish without its photo when image upload fails', async () => {
     showLoading() {},
     hideLoading() {},
     showToast() {},
-    showActionSheet() {},
   };
   const page = createPageInstance(loadDishEditPage(), {
-    name: 'Tomato eggs',
+    nameDraft: 'Tomato eggs',
     image: 'wxfile://photo',
-    tags: '',
     recordDate: '2026-08-04',
     mealType: 'dinner',
     isExisting: false,
@@ -63,46 +56,23 @@ test('saves a dish without its photo when image upload fails', async () => {
 
   await page.save();
 
-  assert.equal(saved.name, 'Tomato eggs');
-  assert.equal(saved.image, '');
+  assert.equal(saved, null);
+  assert.equal(page.data.image, 'wxfile://photo');
   global.getApp = originalGetApp;
   global.wx = originalWx;
 });
 
-test('dish text inputs keep native composition out of page setData', () => {
+test('dish text inputs update visible draft values without shadow text state', () => {
   const page = createPageInstance(loadDishEditPage(), {
-    name: '',
-    tags: '',
-    customMealType: '',
+    nameDraft: '',
+    customMealTypeDraft: '',
   });
-  let setDataCalls = 0;
-  const setDataPayloads = [];
-  const originalSetData = page.setData;
-  page.setData = (next) => {
-    setDataCalls += 1;
-    setDataPayloads.push(next);
-    originalSetData.call(page, next);
-  };
-
-  page.onNameFocus();
   page.onNameInput({ detail: { value: '番茄炒蛋' } });
-  page.onTagsFocus();
-  page.onTagsInput({ detail: { value: '家常、下饭' } });
-  page.onCustomMealTypeFocus();
   page.onCustomMealTypeInput({ detail: { value: '周末聚餐' } });
 
-  assert.equal(setDataCalls, 3);
-  assert.deepEqual(setDataPayloads.map((payload) => Object.keys(payload)), [
-    ['nameDraft'],
-    ['tagsDraft'],
-    ['customMealTypeDraft'],
-  ]);
-  assert.equal(page.nameDraft, '番茄炒蛋');
-  assert.equal(page.tagsDraft, '家常、下饭');
-  assert.equal(page.customMealTypeDraft, '周末聚餐');
   assert.equal(page.data.nameDraft, '番茄炒蛋');
-  assert.equal(page.data.tagsDraft, '家常、下饭');
   assert.equal(page.data.customMealTypeDraft, '周末聚餐');
+  assert.equal(Object.prototype.hasOwnProperty.call(page.data, 'tagsDraft'), false);
 });
 
 test('dish record page does not render rating or note sections', () => {
@@ -121,10 +91,7 @@ test('an image-less cooking record keeps the existing dish cover', () => {
   }, '2026-08-04T10:00:00.000Z');
   const dishId = state.dishes[0].id;
 
-  state = addCookingRecord(state, {
-    dishId,
-    image: '',
-  }, '2026-08-04T11:00:00.000Z');
+  state = addCookingRecord(state, { dishId, image: '' }, '2026-08-04T11:00:00.000Z');
 
   assert.equal(state.dishes[0].coverImage, 'cloud://cover-image');
 });

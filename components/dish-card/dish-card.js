@@ -1,4 +1,5 @@
 const { formatDate, initials } = require('../../utils/format');
+const { isCloudFileId, resolveCloudFileUrls } = require('../../utils/cloud-image');
 
 Component({
   properties: {
@@ -23,28 +24,33 @@ Component({
   },
   methods: {
     updateDisplayDish(dish) {
+      const sourceImage = dish && dish.coverImage ? String(dish.coverImage) : '';
+      const requestId = (this.imageRequestId || 0) + 1;
+      this.imageRequestId = requestId;
       this.setData({
         displayDish: {
           ...dish,
           placeholder: initials(dish && dish.name),
           latestRecordLabel: formatDate(dish && dish.latestRecordAt),
+          coverImage: isCloudFileId(sourceImage) ? '' : sourceImage,
+          hasImage: Boolean(sourceImage && !isCloudFileId(sourceImage)),
         },
       });
-      if (
-        dish && dish.coverImage && dish.coverImage.indexOf('cloud://') === 0
-        && typeof wx !== 'undefined'
-        && wx.cloud && typeof wx.cloud.getTempFileURL === 'function'
-      ) {
-        wx.cloud.getTempFileURL({
-          fileList: [dish.coverImage],
-          success: (result) => {
-            const file = result.fileList && result.fileList[0];
-            if (file && file.tempFileURL) {
-              this.setData({ 'displayDish.coverImage': file.tempFileURL });
-            }
-          },
+      if (!isCloudFileId(sourceImage) || typeof wx === 'undefined' || !wx.cloud) return;
+      resolveCloudFileUrls([sourceImage], wx.cloud)
+        .then((urls) => {
+          if (requestId !== this.imageRequestId) return;
+          const image = urls.get(sourceImage) || '';
+          this.setData({
+            'displayDish.coverImage': image,
+            'displayDish.hasImage': Boolean(image),
+          });
+        })
+        .catch(() => {
+          if (requestId === this.imageRequestId) {
+            this.setData({ 'displayDish.coverImage': '', 'displayDish.hasImage': false });
+          }
         });
-      }
     },
     onTap() {
       this.triggerEvent('dishTap', { dish: this.data.dish });

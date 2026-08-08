@@ -20,9 +20,14 @@ function formatRating(rating) {
   return ({ like: '喜欢', neutral: '一般', dislike: '不喜欢' })[rating] || '暂无评价';
 }
 
+function formatStars(stars) {
+  const value = Number(stars);
+  if (!Number.isFinite(value) || value <= 0) return '暂无';
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
 function initials(name) {
   return String(name || '菜').trim().slice(0, 1);
 }
 
-module.exports = { formatDate, formatMealType, formatRating, initials, todayString };
-
+module.exports = { formatDate, formatMealType, formatRating, formatStars, initials, todayString };

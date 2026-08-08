@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { createInitialState } = require('../services/domain');
 const {
   handleAction,
+  mergeFamilyStates,
   resolveOpenId,
   runtimeErrorCode,
 } = require('../cloudfunctions/family-access');
@@ -99,6 +100,37 @@ test('keeps CloudBase runtime error codes available for diagnosis', () => {
   assert.equal(runtimeErrorCode({ errCode: -502005 }), '-502005');
   assert.equal(runtimeErrorCode({ code: 'DATABASE_PERMISSION_DENIED' }), 'DATABASE_PERMISSION_DENIED');
   assert.equal(runtimeErrorCode(new Error('unknown failure')), 'INTERNAL_ERROR');
+});
+
+test('cloud function merge also keeps deletion tombstones and explicit restores deterministic', () => {
+  const remote = {
+    family: { id: 'family-merge' },
+    dishes: [{ id: 'dish-1', status: 'active', updatedAt: '2026-08-08T12:00:00.000Z' }],
+  };
+  const localDeleted = {
+    family: { id: 'family-merge' },
+    dishes: [{
+      id: 'dish-1',
+      status: 'deleted',
+      updatedAt: '2026-08-08T11:00:00.000Z',
+      deletedAt: '2026-08-08T11:00:00.000Z',
+    }],
+  };
+  const deleted = mergeFamilyStates(remote, localDeleted);
+  assert.equal(deleted.dishes[0].status, 'deleted');
+
+  const localRestored = {
+    family: { id: 'family-merge' },
+    dishes: [{
+      id: 'dish-1',
+      status: 'active',
+      restoredAt: '2026-08-08T13:00:00.000Z',
+      updatedAt: '2026-08-08T13:00:00.000Z',
+    }],
+  };
+  const restored = mergeFamilyStates(deleted, localRestored);
+  assert.equal(restored.dishes[0].status, 'active');
+  assert.equal(restored.dishes[0].restoredAt, '2026-08-08T13:00:00.000Z');
 });
 
 async function invoke(db, event, openid, options = {}) {

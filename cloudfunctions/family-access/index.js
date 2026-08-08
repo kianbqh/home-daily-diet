@@ -120,6 +120,25 @@ function chooseLatest(remoteItem, localItem, dateField = 'updatedAt') {
   return localDate >= remoteDate ? localItem : remoteItem;
 }
 
+function chooseDish(remoteItem, localItem) {
+  const remoteDeleted = remoteItem && remoteItem.status === 'deleted';
+  const localDeleted = localItem && localItem.status === 'deleted';
+  if (remoteDeleted !== localDeleted) {
+    const deletedItem = remoteDeleted ? remoteItem : localItem;
+    const activeItem = remoteDeleted ? localItem : remoteItem;
+    if (activeItem && activeItem.restoredAt) {
+      const restoredAt = String(activeItem.restoredAt || activeItem.updatedAt || '');
+      const deletedAt = String(deletedItem.deletedAt || deletedItem.updatedAt || '');
+      if (restoredAt >= deletedAt) return activeItem;
+    }
+    return deletedItem;
+  }
+  if (remoteDeleted && localDeleted) {
+    return chooseLatest(remoteItem, localItem, 'deletedAt');
+  }
+  return chooseLatest(remoteItem, localItem);
+}
+
 function mergeByKey(remoteItems = [], localItems = [], keyOf, resolver = chooseLatest) {
   const merged = new Map();
   remoteItems.forEach((item) => merged.set(keyOf(item), item));
@@ -136,15 +155,49 @@ function mergeMealSession(remoteItem, localItem) {
   return chooseLatest(remoteItem, localItem, 'confirmedAt');
 }
 
+function purgeDishReferences(state) {
+  if (!state) return state;
+  const purgedIds = new Set((state.purgedDishes || []).map((item) => item.dishId));
+  if (!purgedIds.size) return state;
+  return {
+    ...state,
+    dishes: (state.dishes || []).filter((dish) => !purgedIds.has(dish.id)),
+    cookingRecords: (state.cookingRecords || []).filter((record) => !purgedIds.has(record.dishId)),
+    dishRatings: (state.dishRatings || []).filter((rating) => !purgedIds.has(rating.dishId)),
+    recordReviews: (state.recordReviews || []).filter((review) => !purgedIds.has(review.dishId)),
+    mealSubmissions: (state.mealSubmissions || []).filter((submission) => !purgedIds.has(submission.dishId)),
+    mealSessions: (state.mealSessions || []).map((session) => ({
+      ...session,
+      finalDishIds: (session.finalDishIds || []).filter((dishId) => !purgedIds.has(dishId)),
+    })),
+  };
+}
+
 function mergeFamilyStates(remote, local) {
-  if (!remote) return clone(local);
+  if (!remote) return purgeDishReferences(clone(local));
   const merged = {
     ...clone(remote),
     ...clone(local),
     family: { ...(remote.family || {}), ...(local.family || {}) },
     members: mergeByKey(remote.members, local.members, (item) => item.id),
-    dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id),
+    dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id, chooseDish),
     cookingRecords: mergeByKey(remote.cookingRecords, local.cookingRecords, (item) => item.id),
+    dishRatings: mergeByKey(
+      remote.dishRatings || [],
+      local.dishRatings || [],
+      (item) => item.id || `${item.dishId}|${item.memberId}`
+    ),
+    recordReviews: mergeByKey(
+      remote.recordReviews || [],
+      local.recordReviews || [],
+      (item) => item.id || `${item.recordId}|${item.memberId}`
+    ),
+    purgedDishes: mergeByKey(
+      remote.purgedDishes || [],
+      local.purgedDishes || [],
+      (item) => item.id || item.dishId,
+      (remoteItem, localItem) => chooseLatest(remoteItem, localItem, 'purgedAt')
+    ),
     mealSessions: mergeByKey(remote.mealSessions, local.mealSessions, (item) => item.id, mergeMealSession),
     mealSubmissions: mergeByKey(
       remote.mealSubmissions,
@@ -153,7 +206,7 @@ function mergeFamilyStates(remote, local) {
     ),
   };
   delete merged.currentMemberId;
-  return merged;
+  return purgeDishReferences(merged);
 }
 
 async function readFamilyState(db, config, familyId) {

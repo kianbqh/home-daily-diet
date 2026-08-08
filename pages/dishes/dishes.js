@@ -69,6 +69,9 @@ Page({
   goAdd() {
     wx.navigateTo({ url: '/pages/dish-edit/dish-edit' });
   },
+  goTrash() {
+    wx.navigateTo({ url: '/pages/trash/trash' });
+  },
   onDishTap(event) {
     wx.navigateTo({ url: `/pages/dish-edit/dish-edit?dishId=${event.detail.dish.id}` });
   },

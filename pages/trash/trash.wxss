@@ -1,0 +1,98 @@
+.trash-page {
+  padding-bottom: 80rpx;
+}
+
+.trash-list {
+  margin-top: 34rpx;
+}
+
+.trash-card {
+  margin-bottom: 20rpx;
+  padding: 22rpx;
+}
+
+.trash-card-main {
+  display: flex;
+  gap: 18rpx;
+}
+
+.trash-image-wrap,
+.trash-image-wrap image,
+.trash-placeholder {
+  flex: 0 0 132rpx;
+  width: 132rpx;
+  height: 132rpx;
+  border-radius: 18rpx;
+}
+
+.trash-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(145deg, #e9dbc9, #d9e5d8);
+  font-size: 38rpx;
+}
+
+.trash-copy {
+  min-width: 0;
+  flex: 1;
+  padding-top: 8rpx;
+}
+
+.trash-name {
+  overflow: hidden;
+  color: #30352f;
+  font-size: 31rpx;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trash-meta,
+.trash-date {
+  display: block;
+  margin-top: 12rpx;
+  color: #858a82;
+  font-size: 23rpx;
+}
+
+.trash-date {
+  color: #b0a69b;
+  font-size: 21rpx;
+}
+
+.trash-actions {
+  display: flex;
+  gap: 14rpx;
+  margin-top: 20rpx;
+  padding-top: 18rpx;
+  border-top: 1rpx solid #f0ece4;
+}
+
+.trash-action-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  height: 84rpx;
+  margin: 0;
+  padding: 0 20rpx;
+  border-radius: 18rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.trash-action-button.secondary-button {
+  background: #ede9df;
+  color: #315b49;
+}
+
+.trash-action-button.danger-button {
+  background: #f7e9e4;
+  color: #b85c45;
+}
+
+.trash-empty {
+  margin-top: 42rpx;
+}

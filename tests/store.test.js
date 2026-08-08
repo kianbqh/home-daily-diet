@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const { createInitialState } = require('../services/domain');
 const { createMemoryStorage } = require('../services/storage');
-const { createStore } = require('../services/app-store');
+const { createStore, normalizePersistedState } = require('../services/app-store');
 
 test('loads an empty local state and persists a new dish across store instances', () => {
   const storage = createMemoryStorage();
@@ -18,6 +18,19 @@ test('loads an empty local state and persists a new dish across store instances'
   assert.equal(reloaded.getState().dishes.length, 1);
   assert.equal(reloaded.getState().dishes[0].name, 'Tomato eggs');
   assert.equal(reloaded.getState().cookingRecords.length, 1);
+});
+
+test('does not persist a device-local image path when cloud image upload is unavailable', async () => {
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState(),
+  });
+
+  await assert.rejects(
+    () => store.uploadImage('wxfile://tmp/photo.jpg'),
+    (error) => error && error.code === 'IMAGE_UPLOAD_UNAVAILABLE'
+  );
+  assert.equal(await store.uploadImage('https://cdn.example/photo.jpg'), 'https://cdn.example/photo.jpg');
 });
 
 test('repairs an incomplete persisted state before the family page reads it', () => {
@@ -315,4 +328,44 @@ test('loads and clears short invite metadata through the store boundary', async 
   assert.equal(store.getFamilySummary().inviteCode, 'A7K9Q2');
   await store.revokeInvite();
   assert.equal(store.getFamilySummary().inviteCode, '');
+});
+
+test('exposes record reviews and recycle-bin actions through the store boundary', () => {
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ memberId: 'member-1', memberName: 'Me' }),
+  });
+  const created = store.addDish({ name: 'Tomato eggs', category: '荤菜' }, '2026-08-02T10:00:00.000Z');
+  const dishId = created.dishes[0].id;
+  const recordId = created.cookingRecords[0].id;
+
+  store.rateRecord({ dishId, recordId, stars: 4.5, text: '很好吃' }, '2026-08-03T10:00:00.000Z');
+  assert.equal(store.getState().recordReviews[0].stars, 4.5);
+  assert.equal(store.getState().recordReviews[0].memberId, 'member-1');
+
+  store.deleteDish({ dishId }, '2026-08-04T10:00:00.000Z');
+  assert.equal(store.listDeletedDishes()[0].id, dishId);
+  store.restoreDish({ dishId }, '2026-08-05T10:00:00.000Z');
+  assert.equal(store.listDishes()[0].id, dishId);
+
+  store.deleteDish({ dishId }, '2026-08-06T10:00:00.000Z');
+  store.purgeDish({ dishId }, '2026-08-07T10:00:00.000Z');
+  assert.equal(store.getState().dishes.length, 0);
+  assert.equal(store.getState().recordReviews.length, 0);
+  assert.equal(store.listDeletedDishes().length, 0);
+});
+
+test('normalizes a persisted purge tombstone before local screens can render the old dish', () => {
+  const base = createInitialState({ familyId: 'family-purged' });
+  base.dishes = [{ id: 'dish-purged', name: 'Old dish', status: 'active' }];
+  base.cookingRecords = [{ id: 'record-purged', dishId: 'dish-purged' }];
+  base.recordReviews = [{ id: 'review-purged', dishId: 'dish-purged' }];
+  base.purgedDishes = [{ dishId: 'dish-purged', purgedAt: '2026-08-07T10:00:00.000Z' }];
+
+  const normalized = normalizePersistedState(base, createInitialState({ familyId: 'family-purged' }));
+
+  assert.equal(normalized.dishes.length, 0);
+  assert.equal(normalized.cookingRecords.length, 0);
+  assert.equal(normalized.recordReviews.length, 0);
+  assert.equal(normalized.purgedDishes.length, 1);
 });

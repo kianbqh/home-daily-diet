@@ -1,0 +1,33 @@
+<view class="page trash-page">
+  <view class="eyebrow">RECYCLE BIN</view>
+  <view class="page-title">回收站</view>
+  <view class="page-subtitle">移除的菜品会暂时留在这里，历史制作记录和评价也会一起保留。</view>
+
+  <view wx:if="{{isEmpty}}" class="empty-card trash-empty">
+    <view class="empty-icon">🧺</view>
+    <view class="empty-title">{{emptyTitle}}</view>
+    <view class="empty-description">{{emptyDescription}}</view>
+  </view>
+
+  <view wx:else class="trash-list">
+    <view wx:for="{{dishes}}" wx:key="id" class="card-surface trash-card">
+      <view class="trash-card-main" data-dish-id="{{item.id}}" bindtap="openDish">
+        <view class="trash-image-wrap">
+          <image wx:if="{{item.displayCoverImage}}" src="{{item.displayCoverImage}}" mode="aspectFill" />
+          <view wx:else class="trash-placeholder">🍽</view>
+        </view>
+        <view class="trash-copy">
+          <view class="trash-name">{{item.name}}</view>
+          <view class="trash-meta">{{item.historyLabel}} · {{item.reviewLabel}}</view>
+          <view class="trash-date">移除于 {{item.deletedAt}}</view>
+        </view>
+      </view>
+      <view class="trash-actions">
+        <button class="trash-action-button secondary-button" data-dish-id="{{item.id}}" bindtap="restoreDish">恢复</button>
+        <button class="trash-action-button danger-button" data-dish-id="{{item.id}}" bindtap="purgeDish">彻底删除</button>
+      </view>
+    </view>
+  </view>
+
+  <button class="ghost-button back-button" bindtap="goBack">返回</button>
+</view>

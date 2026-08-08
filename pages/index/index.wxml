@@ -36,7 +36,7 @@
     <text class="section-action" bindtap="goDishes">查看全部 {{model.dishCount}}</text>
   </view>
   <view class="dish-grid">
-    <dish-card wx:for="{{model.dishes}}" wx:key="id" dish="{{item}}" />
+    <dish-card wx:for="{{model.dishes}}" wx:key="id" dish="{{item}}" bind:dishTap="onRecentDishTap" />
   </view>
 
   <view class="bottom-nav">

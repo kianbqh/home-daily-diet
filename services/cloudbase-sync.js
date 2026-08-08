@@ -4,6 +4,27 @@ function chooseLatest(remoteItem, localItem, dateField = 'updatedAt') {
   return localDate >= remoteDate ? localItem : remoteItem;
 }
 
+function chooseDish(remoteItem, localItem) {
+  const remoteDeleted = remoteItem && remoteItem.status === 'deleted';
+  const localDeleted = localItem && localItem.status === 'deleted';
+  if (remoteDeleted !== localDeleted) {
+    const deletedItem = remoteDeleted ? remoteItem : localItem;
+    const activeItem = remoteDeleted ? localItem : remoteItem;
+    // A deletion is a tombstone. A stale active snapshot must not resurrect it.
+    // Only an explicit restore (recorded by restoredAt) can override that tombstone.
+    if (activeItem && activeItem.restoredAt) {
+      const restoredAt = String(activeItem.restoredAt || activeItem.updatedAt || '');
+      const deletedAt = String(deletedItem.deletedAt || deletedItem.updatedAt || '');
+      if (restoredAt >= deletedAt) return activeItem;
+    }
+    return deletedItem;
+  }
+  if (remoteDeleted && localDeleted) {
+    return chooseLatest(remoteItem, localItem, 'deletedAt');
+  }
+  return chooseLatest(remoteItem, localItem);
+}
+
 function mergeByKey(remoteItems = [], localItems = [], keyOf, resolver = chooseLatest) {
   const merged = new Map();
   remoteItems.forEach((item) => merged.set(keyOf(item), item));
@@ -20,15 +41,49 @@ function mergeMealSession(remoteItem, localItem) {
   return chooseLatest(remoteItem, localItem, 'confirmedAt');
 }
 
+function purgeDishReferences(state) {
+  if (!state) return state;
+  const purgedIds = new Set((state.purgedDishes || []).map((item) => item.dishId));
+  if (!purgedIds.size) return state;
+  return {
+    ...state,
+    dishes: (state.dishes || []).filter((dish) => !purgedIds.has(dish.id)),
+    cookingRecords: (state.cookingRecords || []).filter((record) => !purgedIds.has(record.dishId)),
+    dishRatings: (state.dishRatings || []).filter((rating) => !purgedIds.has(rating.dishId)),
+    recordReviews: (state.recordReviews || []).filter((review) => !purgedIds.has(review.dishId)),
+    mealSubmissions: (state.mealSubmissions || []).filter((submission) => !purgedIds.has(submission.dishId)),
+    mealSessions: (state.mealSessions || []).map((session) => ({
+      ...session,
+      finalDishIds: (session.finalDishIds || []).filter((dishId) => !purgedIds.has(dishId)),
+    })),
+  };
+}
+
 function mergeFamilyStates(remote, local) {
-  if (!remote) return local;
+  if (!remote) return purgeDishReferences(local);
   const merged = {
     ...remote,
     ...local,
     family: { ...remote.family, ...local.family },
     members: mergeByKey(remote.members, local.members, (item) => item.id),
-    dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id),
+    dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id, chooseDish),
     cookingRecords: mergeByKey(remote.cookingRecords, local.cookingRecords, (item) => item.id),
+    dishRatings: mergeByKey(
+      remote.dishRatings || [],
+      local.dishRatings || [],
+      (item) => item.id || `${item.dishId}|${item.memberId}`
+    ),
+    recordReviews: mergeByKey(
+      remote.recordReviews || [],
+      local.recordReviews || [],
+      (item) => item.id || `${item.recordId}|${item.memberId}`
+    ),
+    purgedDishes: mergeByKey(
+      remote.purgedDishes || [],
+      local.purgedDishes || [],
+      (item) => item.id || item.dishId,
+      (remoteItem, localItem) => chooseLatest(remoteItem, localItem, 'purgedAt')
+    ),
     mealSessions: mergeByKey(remote.mealSessions, local.mealSessions, (item) => item.id, mergeMealSession),
     mealSubmissions: mergeByKey(
       remote.mealSubmissions,
@@ -42,7 +97,7 @@ function mergeFamilyStates(remote, local) {
   } else {
     delete merged.currentMemberId;
   }
-  return merged;
+  return purgeDishReferences(merged);
 }
 
 function removeLocalIdentity(state) {
@@ -153,15 +208,24 @@ function createCloudBaseSync(api, options = {}) {
       });
     },
     async uploadImage(filePath, familyId = 'family-local') {
-      if (!filePath || !api.cloud.uploadFile) return filePath || '';
-      if (/^(cloud:\/\/|https?:\/\/)/.test(filePath)) return filePath;
+      if (!filePath || /^(cloud:\/\/|https?:\/\/)/.test(filePath)) return filePath || '';
+      if (typeof api.cloud.uploadFile !== 'function') {
+        const error = new Error('云端图片上传暂不可用');
+        error.code = 'IMAGE_UPLOAD_UNAVAILABLE';
+        throw error;
+      }
       const extension = String(filePath).match(/\.[a-z0-9]+$/i);
       const suffix = extension ? extension[0] : '.jpg';
       const result = await api.cloud.uploadFile({
         cloudPath: `${options.fileStoragePrefix || 'family-meals/'}${familyId}/${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`,
         filePath,
       });
-      return result && result.fileID ? result.fileID : filePath;
+      if (!result || !result.fileID) {
+        const error = new Error('云端图片上传未返回文件地址');
+        error.code = 'IMAGE_UPLOAD_UNAVAILABLE';
+        throw error;
+      }
+      return result.fileID;
     },
   };
 }

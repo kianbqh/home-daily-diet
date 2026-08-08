@@ -8,6 +8,7 @@ const {
   confirmMealSession,
   createInitialState,
   createMealSession,
+  deleteDish,
   getDishSummary,
   addMember,
   updateMemberProfile,
@@ -17,7 +18,12 @@ const {
   findDishByName,
   findSimilarDishes,
   listDishSummaries,
+  listDeletedDishSummaries,
+  purgeDish,
+  rateDish,
+  restoreDish,
   submitMealSelection,
+  upsertRecordReview,
   updateDishProfile,
   updateMealSelection,
 } = require('../services/domain');
@@ -231,6 +237,35 @@ test('can filter the library to dishes with a family favorite rating', () => {
   assert.deepEqual(results.map((dish) => dish.name), ['家常红烧肉']);
 });
 
+test('upserts one rating per family member and dish', () => {
+  let state = stateWithDish({ name: '番茄炒蛋' });
+  const dishId = state.dishes[0].id;
+
+  state = rateDish(state, { dishId, memberId: 'member-test', rating: 'like' }, NOW);
+  state = rateDish(state, {
+    dishId,
+    memberId: 'member-test',
+    rating: 'neutral',
+  }, '2026-08-03T10:00:00.000Z');
+
+  assert.equal(state.dishRatings.length, 1);
+  assert.equal(state.dishRatings[0].rating, 'neutral');
+  assert.equal(state.dishRatings[0].updatedAt, '2026-08-03T10:00:00.000Z');
+});
+
+test('soft deletes a dish while preserving its cooking history', () => {
+  const state = stateWithDish({ name: '番茄炒蛋' });
+  const dishId = state.dishes[0].id;
+
+  const deleted = deleteDish(state, { dishId }, '2026-08-04T10:00:00.000Z');
+
+  assert.equal(deleted.dishes[0].status, 'deleted');
+  assert.equal(deleted.dishes[0].deletedAt, '2026-08-04T10:00:00.000Z');
+  assert.equal(deleted.cookingRecords.length, state.cookingRecords.length);
+  assert.equal(listDishSummaries(deleted).length, 0);
+  assert.equal(findDishByName(deleted, '番茄炒蛋'), null);
+});
+
 test('updates the family name and adds an invited member without duplicate identities', () => {
   let state = createInitialState({ familyName: '周末饭桌' });
   state = updateFamilyProfile(state, { name: '我们家饭桌' });
@@ -253,4 +288,99 @@ test('updates a member display name without changing family permissions', () => 
 
   assert.equal(updated.members[0].displayName, '小明');
   assert.equal(updated.currentMemberId, 'member-test');
+});
+
+test('stores optional dish category and characteristic tags without free-form category text', () => {
+  const state = addDish(createInitialState(), {
+    name: 'Tomato eggs',
+    category: '荤菜',
+    tags: ['家常', '下饭', 'not-allowed'],
+  }, NOW);
+
+  assert.equal(state.dishes[0].category, '荤菜');
+  assert.deepEqual(state.dishes[0].tags, ['家常', '下饭', 'not-allowed']);
+
+  const updated = updateDishProfile(state, {
+    dishId: state.dishes[0].id,
+    name: 'Tomato eggs',
+    category: '汤',
+    tags: ['清淡', '辣味'],
+  });
+  assert.equal(updated.dishes[0].category, '汤');
+  assert.deepEqual(updated.dishes[0].tags, ['清淡', '辣味']);
+
+  assert.deepEqual(listDishSummaries(updated, { tag: '汤' }).map((dish) => dish.id), [updated.dishes[0].id]);
+});
+
+test('upserts a half-star review for one cooking record and keeps it separate from other records', () => {
+  let state = stateWithDish({ name: 'Tomato eggs' });
+  const dishId = state.dishes[0].id;
+  state = addCookingRecord(state, { dishId }, '2026-08-03T10:00:00.000Z');
+  const firstRecordId = state.cookingRecords[0].id;
+  const secondRecordId = state.cookingRecords[1].id;
+
+  state = upsertRecordReview(state, {
+    dishId,
+    recordId: secondRecordId,
+    memberId: 'member-test',
+    stars: 3.5,
+    text: '这次盐放得刚好',
+  }, '2026-08-04T10:00:00.000Z');
+  state = upsertRecordReview(state, {
+    dishId,
+    recordId: secondRecordId,
+    memberId: 'member-test',
+    stars: 4.5,
+    text: '下次还想吃',
+  }, '2026-08-05T10:00:00.000Z');
+
+  assert.equal(state.recordReviews.length, 1);
+  assert.equal(state.recordReviews[0].id, `${secondRecordId}|member-test`);
+  assert.equal(state.recordReviews[0].stars, 4.5);
+  assert.equal(state.recordReviews[0].text, '下次还想吃');
+  assert.equal(state.recordReviews[0].recordId, secondRecordId);
+  assert.notEqual(state.recordReviews[0].recordId, firstRecordId);
+  assert.throws(
+    () => upsertRecordReview(state, {
+      dishId,
+      recordId: secondRecordId,
+      memberId: 'member-test',
+      stars: 4.25,
+    }, NOW),
+    /半星/
+  );
+});
+
+test('restores a deleted dish and permanently purges its records, reviews, and meal references', () => {
+  let state = stateWithDish({ name: 'Tomato eggs' });
+  const dishId = state.dishes[0].id;
+  const recordId = state.cookingRecords[0].id;
+  state = upsertRecordReview(state, {
+    dishId,
+    recordId,
+    memberId: 'member-test',
+    stars: 5,
+  }, NOW);
+  state = rateDish(state, { dishId, memberId: 'member-test', rating: 'like' }, NOW);
+  state = createMealSession(state, { date: '2026-08-04', mealType: 'dinner' }, NOW);
+  const sessionId = state.mealSessions[0].id;
+  state = submitMealSelection(state, { sessionId, memberId: 'member-test', dishId }, NOW);
+  state = confirmMealSession(state, { sessionId, memberId: 'member-test' }, NOW);
+  state = deleteDish(state, { dishId }, '2026-08-05T10:00:00.000Z');
+
+  assert.deepEqual(listDeletedDishSummaries(state).map((dish) => dish.id), [dishId]);
+  const restored = restoreDish(state, { dishId }, '2026-08-06T10:00:00.000Z');
+  assert.equal(restored.dishes[0].status, 'active');
+  assert.equal(restored.dishes[0].deletedAt, '');
+
+  const deletedAgain = deleteDish(restored, { dishId }, '2026-08-07T10:00:00.000Z');
+  const purged = purgeDish(deletedAgain, { dishId }, '2026-08-08T10:00:00.000Z');
+  assert.equal(purged.dishes.some((dish) => dish.id === dishId), false);
+  assert.equal(purged.cookingRecords.some((record) => record.dishId === dishId), false);
+  assert.equal(purged.recordReviews.some((review) => review.dishId === dishId), false);
+  assert.equal(purged.dishRatings.some((rating) => rating.dishId === dishId), false);
+  assert.equal(purged.mealSubmissions.some((submission) => submission.dishId === dishId), false);
+  assert.deepEqual(purged.mealSessions[0].finalDishIds, []);
+  assert.equal(purged.purgedDishes[0].dishId, dishId);
+  assert.equal(listDeletedDishSummaries(purged).length, 0);
 });

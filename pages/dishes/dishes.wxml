@@ -4,7 +4,10 @@
       <view class="eyebrow">THE DISH LIBRARY</view>
       <view class="page-title">菜品库</view>
     </view>
-    <button class="header-add" bindtap="goAdd">＋ 记录</button>
+    <view class="library-header-actions">
+      <button class="header-trash" bindtap="goTrash">回收站</button>
+      <button class="header-add" bindtap="goAdd">＋ 记录</button>
+    </view>
   </view>
   <view class="page-subtitle">先把做过的菜留下来，之后每一次选择都会更容易。</view>
 

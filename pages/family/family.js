@@ -35,16 +35,40 @@ Page({
     }
     if (options.inviteCode) {
       this.setData({ joinCode: options.inviteCode });
-      setTimeout(() => wx.showModal({
-        title: '加入家庭空间',
-        content: '加入后可以和家人一起记录菜品、提交想吃的菜。',
-        confirmText: '加入家庭',
-        cancelText: '暂不加入',
-        success: (result) => {
-          if (result.confirm) this.tryJoin(options.inviteCode);
-        },
-      }), 0);
+      this.handleInviteLink(options.inviteCode);
     }
+  },
+  async handleInviteLink(inviteCode) {
+    const store = this.getStore();
+    if (!store) return;
+    let currentInvite = null;
+    try {
+      const summary = store.getFamilySummary();
+      if (summary.syncStatus === 'connecting' && typeof store.hydrateFromCloud === 'function') {
+        await store.hydrateFromCloud();
+      }
+      const readySummary = store.getFamilySummary();
+      if (readySummary.syncStatus === 'ready' && typeof store.getInvite === 'function') {
+        currentInvite = await store.getInvite();
+      }
+    } catch (error) {
+      // If the current device cannot read its family invite, the normal join
+      // flow below still gives a new member a chance to accept the link.
+    }
+    if (currentInvite && currentInvite.code === inviteCode) {
+      wx.showToast({ title: '你已在这个家庭中', icon: 'none' });
+      this.refresh();
+      return;
+    }
+    wx.showModal({
+      title: '加入家庭空间',
+      content: '加入后可以和家人一起记录菜品、提交想吃的菜。',
+      confirmText: '加入家庭',
+      cancelText: '暂不加入',
+      success: (result) => {
+        if (result.confirm) this.tryJoin(inviteCode);
+      },
+    });
   },
   onUnload() {
     if (this.unsubscribe) {

@@ -1,15 +1,38 @@
-.page-header {
+.dishes-page .page-header {
+  display: block;
+}
+
+.dishes-page .page-title {
+  white-space: nowrap;
+}
+
+.library-header-actions {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  width: 100%;
+  gap: 16rpx;
+  margin-top: 24rpx;
+}
+
+.library-header-actions button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 84rpx;
+  margin: 0;
+  padding: 0 18rpx;
+  font-size: 26rpx;
+  line-height: 1.2;
+}
+
+.header-trash {
+  background: #ede9df;
+  color: #315b49;
 }
 
 .header-add {
-  margin-top: 4rpx;
-  padding: 18rpx 20rpx;
   background: #315b49;
   color: #fff;
-  font-size: 24rpx;
 }
 
 .search-box {

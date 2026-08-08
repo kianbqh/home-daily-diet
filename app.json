@@ -4,7 +4,8 @@
     "pages/dishes/dishes",
     "pages/dish-edit/dish-edit",
     "pages/meal/meal",
-    "pages/family/family"
+    "pages/family/family",
+    "pages/trash/trash"
   ],
   "window": {
     "navigationBarTitleText": "今天想吃啥",

@@ -31,6 +31,7 @@ Page({
       });
     }
     const sharedMeal = options.sessionId
+      && store
       && store.getState().mealSessions.find((session) => session.id === options.sessionId);
     const joiningSharedFamily = Boolean(
       options.inviteCode
@@ -55,6 +56,7 @@ Page({
   onShow() {
     if (this.data.joining) return;
     const store = this.getStore();
+    if (!store) return;
     if (store.getFamilySummary().cloudEnabled) {
       store.hydrateFromCloud().then(() => this.refresh()).catch(() => this.refresh());
       return;
@@ -121,7 +123,9 @@ Page({
     const store = this.getStore();
     const model = this.data.model;
     if (!model.canEdit || !model.meal) return;
-    const dish = model.dishes.find((item) => item.id === event.currentTarget.dataset.id);
+    const dishId = event.currentTarget.dataset.id
+      || (event.detail && event.detail.dish && event.detail.dish.id);
+    const dish = model.dishes.find((item) => item.id === dishId);
     if (!dish) return;
     if (dish.selectedByMe) {
       store.cancelSelection({ sessionId: model.meal.id, dishId: dish.id });

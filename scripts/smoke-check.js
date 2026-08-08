@@ -38,6 +38,9 @@ const requiredFiles = [
   'pages/family/family.js',
   'pages/family/family.wxml',
   'pages/family/family.wxss',
+  'pages/trash/trash.js',
+  'pages/trash/trash.wxml',
+  'pages/trash/trash.wxss',
 ];
 
 const missing = requiredFiles.filter((file) => !fs.existsSync(path.join(root, file)));
@@ -52,6 +55,7 @@ const expectedPages = [
   'pages/dish-edit/dish-edit',
   'pages/meal/meal',
   'pages/family/family',
+  'pages/trash/trash',
 ];
 const missingPages = expectedPages.filter((page) => !appConfig.pages.includes(page));
 if (missingPages.length) {

@@ -6,17 +6,23 @@ const {
   confirmMealSession,
   createInitialState,
   createMealSession,
+  deleteDish,
   getMealForDate,
   getFamilySummary,
   getSelectedSubmissions,
   findDishByName,
   findSimilarDishes,
+  listDeletedDishSummaries,
   listDishSummaries,
+  purgeDish,
+  rateDish,
+  restoreDish,
   submitMealSelection,
   updateDishProfile,
   updateFamilyProfile,
   updateMemberProfile,
   updateMealSelection,
+  upsertRecordReview,
 } = require('./domain');
 const { createDefaultStorage } = require('./storage');
 const { mergeFamilyStates } = require('./cloudbase-sync');
@@ -69,7 +75,7 @@ function normalizePersistedState(candidate, fallbackState) {
       : members[0].id;
   }
 
-  return {
+  const normalized = {
     ...fallback,
     ...candidate,
     family,
@@ -77,8 +83,25 @@ function normalizePersistedState(candidate, fallbackState) {
     members,
     dishes: Array.isArray(candidate.dishes) ? candidate.dishes : [],
     cookingRecords: Array.isArray(candidate.cookingRecords) ? candidate.cookingRecords : [],
+    dishRatings: Array.isArray(candidate.dishRatings) ? candidate.dishRatings : [],
+    recordReviews: Array.isArray(candidate.recordReviews) ? candidate.recordReviews : [],
+    purgedDishes: Array.isArray(candidate.purgedDishes) ? candidate.purgedDishes : [],
     mealSessions: Array.isArray(candidate.mealSessions) ? candidate.mealSessions : [],
     mealSubmissions: Array.isArray(candidate.mealSubmissions) ? candidate.mealSubmissions : [],
+  };
+  const purgedIds = new Set(normalized.purgedDishes.map((item) => item.dishId));
+  if (!purgedIds.size) return normalized;
+  return {
+    ...normalized,
+    dishes: normalized.dishes.filter((dish) => !purgedIds.has(dish.id)),
+    cookingRecords: normalized.cookingRecords.filter((record) => !purgedIds.has(record.dishId)),
+    dishRatings: normalized.dishRatings.filter((rating) => !purgedIds.has(rating.dishId)),
+    recordReviews: normalized.recordReviews.filter((review) => !purgedIds.has(review.dishId)),
+    mealSubmissions: normalized.mealSubmissions.filter((submission) => !purgedIds.has(submission.dishId)),
+    mealSessions: normalized.mealSessions.map((session) => ({
+      ...session,
+      finalDishIds: (session.finalDishIds || []).filter((dishId) => !purgedIds.has(dishId)),
+    })),
   };
 }
 
@@ -236,6 +259,27 @@ function createStore(options = {}) {
     updateDish(input, now) {
       return commit(updateDishProfile(state, input, now));
     },
+    rateDish(input, now) {
+      return commit(rateDish(state, {
+        ...input,
+        memberId: input.memberId || state.currentMemberId,
+      }, now));
+    },
+    rateRecord(input, now) {
+      return commit(upsertRecordReview(state, {
+        ...input,
+        memberId: input.memberId || state.currentMemberId,
+      }, now));
+    },
+    deleteDish(input, now) {
+      return commit(deleteDish(state, input, now));
+    },
+    restoreDish(input, now) {
+      return commit(restoreDish(state, input, now));
+    },
+    purgeDish(input, now) {
+      return commit(purgeDish(state, input, now));
+    },
     getFamilySummary() {
       const summary = getFamilySummary(state);
       return {
@@ -289,6 +333,9 @@ function createStore(options = {}) {
     listDishes(filters = {}) {
       return listDishSummaries(state, filters);
     },
+    listDeletedDishes() {
+      return listDeletedDishSummaries(state);
+    },
     findDishByName(name) {
       return findDishByName(state, name);
     },
@@ -296,7 +343,12 @@ function createStore(options = {}) {
       return findSimilarDishes(state, name);
     },
     async uploadImage(filePath) {
-      if (!cloudSync || typeof cloudSync.uploadImage !== 'function') return filePath || '';
+      if (!filePath || /^(cloud:\/\/|https?:\/\/)/.test(filePath)) return filePath || '';
+      if (!cloudSync || typeof cloudSync.uploadImage !== 'function') {
+        const error = new Error('云端图片上传暂不可用');
+        error.code = 'IMAGE_UPLOAD_UNAVAILABLE';
+        throw error;
+      }
       return cloudSync.uploadImage(filePath, state.family.id);
     },
   };

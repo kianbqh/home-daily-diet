@@ -122,7 +122,33 @@ Page({
 
   refresh() {
     if (!this.data.dishId || this.data.isEditingProfile) return;
-    this.onLoad({ dishId: this.data.dishId });
+    const store = this.getStore();
+    if (!store) return;
+    const state = store.getState();
+    const dish = state.dishes.find((item) => item.id === this.data.dishId);
+    if (!dish) return;
+
+    const detail = buildDishDetailViewModel(state, dish.id);
+    const isArchived = dish.status === 'deleted';
+    const coverImage = dish.coverImage || '';
+    this.setData({
+      isExisting: true,
+      isArchived,
+      canAddRecord: !isArchived,
+      canEditProfile: !isArchived,
+      dishId: dish.id,
+      name: dish.name,
+      nameDraft: dish.name,
+      dishCover: isCloudFileId(coverImage) ? '' : coverImage,
+      selectedCategory: dish.category || '',
+      selectedTags: Array.isArray(dish.tags) ? dish.tags : [],
+      tagOptions: this.makeTagOptions(Array.isArray(dish.tags) ? dish.tags : []),
+      history: detail.history,
+      reviews: detail.reviews,
+      reviewStats: detail.reviewStats,
+    });
+    this.resolveCloudImage(coverImage, 'dishCover');
+    this.resolveHistoryImages(detail.history);
   },
 
   onNameInput(event) {

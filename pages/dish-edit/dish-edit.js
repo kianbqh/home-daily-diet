@@ -71,6 +71,15 @@ Page({
     }));
   },
 
+  beginImageResolution() {
+    this.imageResolutionGeneration = (this.imageResolutionGeneration || 0) + 1;
+    return this.imageResolutionGeneration;
+  },
+
+  isCurrentImageResolution(generation) {
+    return generation === this.imageResolutionGeneration;
+  },
+
   onLoad(options = {}) {
     const store = this.getStore();
     if (!store) return;
@@ -107,9 +116,10 @@ Page({
       reviewStars: 0,
       reviewText: '',
     });
-    this.resolveCloudImage(dish.coverImage, 'dishCover');
-    this.resolveCloudImage(image, 'displayImage');
-    this.resolveHistoryImages(detail.history);
+    const generation = this.beginImageResolution();
+    this.resolveCloudImage(dish.coverImage, 'dishCover', generation);
+    this.resolveCloudImage(image, 'displayImage', generation);
+    this.resolveHistoryImages(detail.history, generation);
   },
 
   onShow() {
@@ -147,8 +157,9 @@ Page({
       reviews: detail.reviews,
       reviewStats: detail.reviewStats,
     });
-    this.resolveCloudImage(coverImage, 'dishCover');
-    this.resolveHistoryImages(detail.history);
+    const generation = this.beginImageResolution();
+    this.resolveCloudImage(coverImage, 'dishCover', generation);
+    this.resolveHistoryImages(detail.history, generation);
   },
 
   onNameInput(event) {
@@ -212,7 +223,7 @@ Page({
     });
   },
 
-  resolveCloudImage(fileId, field) {
+  resolveCloudImage(fileId, field, generation = this.imageResolutionGeneration) {
     if (!fileId) return;
     if (!isCloudFileId(fileId)) {
       this.setData({ [field]: fileId });
@@ -222,20 +233,23 @@ Page({
     if (!store) return;
     resolveCloudFileUrls([fileId], store)
       .then((urls) => {
+        if (!this.isCurrentImageResolution(generation)) return;
         const image = urls.get(fileId) || '';
         this.setData({ [field]: image });
       })
       .catch(() => {
+        if (!this.isCurrentImageResolution(generation)) return;
         this.setData({ [field]: '' });
       });
   },
 
-  resolveHistoryImages(history) {
+  resolveHistoryImages(history, generation = this.imageResolutionGeneration) {
     const cloudImages = history.filter((record) => record.image && record.image.indexOf('cloud://') === 0);
     const store = this.getStore();
     if (!cloudImages.length || !store) return;
     resolveCloudFileUrls(cloudImages.map((record) => record.image), store)
       .then((urls) => {
+        if (!this.isCurrentImageResolution(generation)) return;
         this.setData({
           history: history.map((record) => ({ ...record, image: urls.get(record.image) || record.image })),
           reviews: this.data.reviews.map((review) => ({
@@ -324,7 +338,8 @@ Page({
       selectedTags: Array.isArray(dish.tags) ? dish.tags : [],
       tagOptions: this.makeTagOptions(Array.isArray(dish.tags) ? dish.tags : []),
     });
-    this.resolveCloudImage(dish.coverImage, 'displayImage');
+    const generation = this.beginImageResolution();
+    this.resolveCloudImage(dish.coverImage, 'displayImage', generation);
   },
 
   cancelProfileEdit() {
@@ -344,7 +359,8 @@ Page({
       selectedTags: Array.isArray(dish.tags) ? dish.tags : [],
       tagOptions: this.makeTagOptions(Array.isArray(dish.tags) ? dish.tags : []),
     });
-    this.resolveCloudImage(coverImage, 'dishCover');
+    const generation = this.beginImageResolution();
+    this.resolveCloudImage(coverImage, 'dishCover', generation);
   },
 
   // Kept as a compatibility shim for old local data/tests; the visible UI uses record reviews.
@@ -449,7 +465,8 @@ Page({
           reviews: detail.reviews,
           reviewStats: detail.reviewStats,
         });
-        this.resolveCloudImage(coverImage, 'dishCover');
+        const generation = this.beginImageResolution();
+        this.resolveCloudImage(coverImage, 'dishCover', generation);
         showToast('菜品信息已更新', 'success');
         return;
       }

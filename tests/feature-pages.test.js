@@ -194,6 +194,107 @@ test('dish detail lifecycle refreshes server fields without clearing review or r
   }
 });
 
+test('dish detail ignores late image resolutions from an older snapshot', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  let state = addDish(createInitialState({ memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: '旧菜名',
+    image: 'cloud://family-meals/family-1/old-cover.jpg',
+  }, '2026-08-09T10:00:00.000Z');
+  const recordId = state.cookingRecords[0].id;
+  const requests = [];
+  const newCoverId = 'cloud://family-meals/family-1/new-cover.jpg';
+  const newRecordId = 'cloud://family-meals/family-1/new-record.jpg';
+  const store = {
+    async syncFromCloud() {
+      state = {
+        ...state,
+        dishes: state.dishes.map((dish) => ({
+          ...dish,
+          name: '新菜名',
+          coverImage: newCoverId,
+        })),
+        cookingRecords: state.cookingRecords.map((record) => ({
+          ...record,
+          image: newRecordId,
+        })),
+      };
+    },
+    getState() { return state; },
+    resolveImageUrls(ids) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      requests.push({ ids, resolve });
+      return promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = { showToast() {} };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    assert.deepEqual(requests.map((request) => request.ids), [
+      ['cloud://family-meals/family-1/old-cover.jpg'],
+      ['cloud://family-meals/family-1/old-cover.jpg'],
+    ]);
+    page.setData({
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '保留草稿',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+    });
+
+    page.onShow();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests.slice(2).map((request) => request.ids), [
+      [newCoverId],
+      [newRecordId],
+    ]);
+
+    requests[2].resolve(new Map([[newCoverId, 'https://cdn/new/new-cover.jpg']]));
+    requests[3].resolve(new Map([[newRecordId, 'https://cdn/new/new-record.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual({
+      name: page.data.name,
+      dishCover: page.data.dishCover,
+      recordImage: page.data.history[0].image,
+    }, {
+      name: '新菜名',
+      dishCover: 'https://cdn/new/new-cover.jpg',
+      recordImage: 'https://cdn/new/new-record.jpg',
+    });
+
+    requests[0].resolve(new Map([['cloud://family-meals/family-1/old-cover.jpg', 'https://cdn/old/old-cover.jpg']]));
+    requests[1].resolve(new Map([['cloud://family-meals/family-1/old-cover.jpg', 'https://cdn/old/old-record.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual({
+      name: page.data.name,
+      dishCover: page.data.dishCover,
+      recordImage: page.data.history[0].image,
+      reviewingRecordId: page.data.reviewingRecordId,
+      reviewStars: page.data.reviewStars,
+      reviewText: page.data.reviewText,
+      image: page.data.image,
+      displayImage: page.data.displayImage,
+    }, {
+      name: '新菜名',
+      dishCover: 'https://cdn/new/new-cover.jpg',
+      recordImage: 'https://cdn/new/new-record.jpg',
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '保留草稿',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('dish detail lifecycle does not overwrite an active profile edit draft', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

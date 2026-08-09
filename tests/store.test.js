@@ -167,12 +167,54 @@ test('coalesces concurrent cloud sync and lets forced refresh bypass the cooldow
   assert.equal(loadCalls, 2);
 });
 
-test('does not save when cloud state already matches the merged shared state', async () => {
-  const remoteState = createInitialState({ familyId: 'family-no-write' });
+test('throttles automatic cloud sync from clock zero through the five-second boundary', async () => {
+  let clockMs = 0;
+  let loadCalls = 0;
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-sync-zero' }),
+    clock: () => clockMs,
+    syncIntervalMs: 5000,
+    cloudSync: {
+      async load() { loadCalls += 1; return null; },
+      async save() {},
+    },
+  });
+
+  await store.syncFromCloud();
+  assert.equal(loadCalls, 1);
+
+  clockMs = 4999;
+  await store.syncFromCloud();
+  assert.equal(loadCalls, 1);
+
+  clockMs = 5000;
+  await store.syncFromCloud();
+  assert.equal(loadCalls, 2);
+});
+
+test('does not save equivalent shared state when current member identity is device-local', async () => {
+  const initialState = createInitialState({ familyId: 'family-no-write', memberId: 'member-local' });
+  const remoteMember = {
+    id: 'member-remote',
+    displayName: 'Remote member',
+    joinedAt: initialState.family.createdAt,
+    updatedAt: initialState.family.createdAt,
+  };
+  const localState = {
+    ...initialState,
+    members: [...initialState.members, remoteMember],
+    currentMemberId: 'member-local',
+  };
+  const remoteState = {
+    ...localState,
+    members: localState.members.map((member) => ({ ...member })),
+    currentMemberId: 'member-remote',
+  };
   let saveCalls = 0;
   const store = createStore({
     storage: createMemoryStorage(),
-    initialState: remoteState,
+    initialState: localState,
     cloudSync: {
       async load() { return remoteState; },
       async save() { saveCalls += 1; },
@@ -182,6 +224,7 @@ test('does not save when cloud state already matches the merged shared state', a
   await store.syncFromCloud();
 
   assert.equal(saveCalls, 0);
+  assert.equal(store.getState().currentMemberId, 'member-local');
 });
 
 test('saves one merged cloud state when a local dish is absent remotely', async () => {
@@ -220,6 +263,35 @@ test('keeps local family data usable when cloud hydration fails', async () => {
   assert.equal(store.getFamilySummary().name, 'Local family');
   assert.equal(store.getSyncStatus().status, 'error');
   assert.match(store.getSyncStatus().message, /本地数据/);
+});
+
+test('keeps an in-flight local edit when cloud loading rejects', async () => {
+  let signalLoadStarted;
+  let rejectLoad;
+  const loadStarted = new Promise((resolve) => { signalLoadStarted = resolve; });
+  const loadGate = new Promise((resolve, reject) => { rejectLoad = reject; });
+  const storage = createMemoryStorage();
+  const store = createStore({
+    storage,
+    initialState: createInitialState({ familyId: 'family-error-flight' }),
+    cloudSync: {
+      async load() {
+        signalLoadStarted();
+        await loadGate;
+      },
+      async save() {},
+    },
+  });
+
+  const sync = store.syncFromCloud();
+  await loadStarted;
+  store.addDish({ name: 'Edit retained after failure' }, '2026-08-09T10:00:00.000Z');
+  rejectLoad(new Error('database permission denied'));
+  await sync;
+
+  assert.equal(store.listDishes().some((dish) => dish.name === 'Edit retained after failure'), true);
+  assert.equal(createStore({ storage }).listDishes().some((dish) => dish.name === 'Edit retained after failure'), true);
+  assert.equal(store.getSyncStatus().status, 'error');
 });
 
 test('explains a cloud function call failure without exposing backend details', async () => {

@@ -136,7 +136,8 @@ function createStore(options = {}) {
   let syncStatus = options.initialSyncStatus || (cloudSync ? 'connecting' : 'local');
   let syncMessage = options.initialSyncMessage || '';
   let syncPromise = null;
-  let lastSuccessfulSyncAt = 0;
+  let lastSuccessfulSyncAt = null;
+  let failedCloudSyncRevision = null;
 
   function notify() {
     listeners.forEach((listener) => listener(state));
@@ -155,7 +156,9 @@ function createStore(options = {}) {
     cloudSaveChain = operation.catch(() => undefined);
     return operation
       .then((saved) => {
-        if (revision === localRevision) updateSyncStatus('ready');
+        if (revision === localRevision && failedCloudSyncRevision !== revision) {
+          updateSyncStatus('ready');
+        }
         return saved;
       })
       .catch((error) => {
@@ -200,12 +203,14 @@ function createStore(options = {}) {
       if (!remote || !sharedStatesEqual(remote, merged)) {
         await queueCloudSave(state, localRevision);
       }
+      failedCloudSyncRevision = null;
       updateSyncStatus('ready');
       return { state, succeeded: true };
     } catch (error) {
       // Keep the newest local state, including edits made while the request was in flight.
       state = state || localStateAtStart;
       storage.saveState(state);
+      failedCloudSyncRevision = localRevision;
       updateSyncStatus('error', cloudErrorMessage(error));
       return { state, succeeded: false };
     }
@@ -217,7 +222,7 @@ function createStore(options = {}) {
     },
     syncFromCloud({ force = false } = {}) {
       if (syncPromise) return syncPromise;
-      if (!force && lastSuccessfulSyncAt && clock() - lastSuccessfulSyncAt < syncIntervalMs) {
+      if (!force && lastSuccessfulSyncAt !== null && clock() - lastSuccessfulSyncAt < syncIntervalMs) {
         return Promise.resolve(state);
       }
       syncPromise = performCloudSync()

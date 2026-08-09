@@ -111,9 +111,21 @@ function normalizePersistedState(candidate, fallbackState) {
   };
 }
 
+function sharedSnapshot(value) {
+  const snapshot = JSON.parse(JSON.stringify(value || {}));
+  delete snapshot.currentMemberId;
+  return snapshot;
+}
+
+function sharedStatesEqual(left, right) {
+  return JSON.stringify(sharedSnapshot(left)) === JSON.stringify(sharedSnapshot(right));
+}
+
 function createStore(options = {}) {
   const storage = options.storage || createDefaultStorage();
   const cloudSync = options.cloudSync || null;
+  const clock = options.clock || Date.now;
+  const syncIntervalMs = Number(options.syncIntervalMs || 5000);
   const storedState = storage.loadState();
   let state = normalizePersistedState(storedState, options.initialState || createInitialState());
   if (storedState) storage.saveState(state);
@@ -123,6 +135,8 @@ function createStore(options = {}) {
   let invite = null;
   let syncStatus = options.initialSyncStatus || (cloudSync ? 'connecting' : 'local');
   let syncMessage = options.initialSyncMessage || '';
+  let syncPromise = null;
+  let lastSuccessfulSyncAt = 0;
 
   function notify() {
     listeners.forEach((listener) => listener(state));
@@ -163,40 +177,59 @@ function createStore(options = {}) {
     return state.members.find((member) => member.id === state.currentMemberId);
   }
 
+  async function performCloudSync() {
+    if (!cloudSync || typeof cloudSync.load !== 'function') {
+      updateSyncStatus('local');
+      return { state, succeeded: true };
+    }
+    const localStateAtStart = state;
+    try {
+      await cloudSaveChain;
+      if (typeof cloudSync.bootstrap === 'function') {
+        await cloudSync.bootstrap(state, currentMember());
+      }
+      const remote = await cloudSync.load(state.family.id);
+      const latestLocalState = state;
+      const merged = remote
+        ? mergeFamilyStates(remote, latestLocalState)
+        : latestLocalState;
+      state = normalizePersistedState(merged, latestLocalState);
+      state.currentMemberId = latestLocalState.currentMemberId;
+      storage.saveState(state);
+      notify();
+      if (!remote || !sharedStatesEqual(remote, merged)) {
+        await queueCloudSave(state, localRevision);
+      }
+      updateSyncStatus('ready');
+      return { state, succeeded: true };
+    } catch (error) {
+      // Keep the newest local state, including edits made while the request was in flight.
+      state = state || localStateAtStart;
+      storage.saveState(state);
+      updateSyncStatus('error', cloudErrorMessage(error));
+      return { state, succeeded: false };
+    }
+  }
+
   return {
     getState() {
       return state;
     },
-    async hydrateFromCloud() {
-      if (!cloudSync || typeof cloudSync.load !== 'function') {
-        updateSyncStatus('local');
-        return state;
+    syncFromCloud({ force = false } = {}) {
+      if (syncPromise) return syncPromise;
+      if (!force && lastSuccessfulSyncAt && clock() - lastSuccessfulSyncAt < syncIntervalMs) {
+        return Promise.resolve(state);
       }
-      const localStateAtStart = state;
-      try {
-        await cloudSaveChain;
-        if (typeof cloudSync.bootstrap === 'function') {
-          const member = currentMember();
-          await cloudSync.bootstrap(state, member);
-        }
-        const remote = await cloudSync.load(state.family.id);
-        const latestLocalState = state;
-        const merged = remote
-          ? mergeFamilyStates(remote, latestLocalState)
-          : latestLocalState;
-        state = normalizePersistedState(merged, latestLocalState);
-        state.currentMemberId = latestLocalState.currentMemberId;
-        storage.saveState(state);
-        notify();
-        await queueCloudSave(state, localRevision);
-        updateSyncStatus('ready');
-      } catch (error) {
-        // Keep the newest local state, including edits made while the request was in flight.
-        state = state || localStateAtStart;
-        storage.saveState(state);
-        updateSyncStatus('error', cloudErrorMessage(error));
-      }
-      return state;
+      syncPromise = performCloudSync()
+        .then((result) => {
+          if (result.succeeded) lastSuccessfulSyncAt = clock();
+          return result.state;
+        })
+        .finally(() => { syncPromise = null; });
+      return syncPromise;
+    },
+    hydrateFromCloud() {
+      return this.syncFromCloud({ force: true });
     },
     async joinFamilyByInvite(code, member) {
       if (!cloudSync || typeof cloudSync.acceptInvite !== 'function') {

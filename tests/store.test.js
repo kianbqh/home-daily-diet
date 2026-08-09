@@ -136,6 +136,73 @@ test('reports a ready cloud connection after hydration succeeds', async () => {
   assert.equal(store.getFamilySummary().cloudEnabled, true);
 });
 
+test('coalesces concurrent cloud sync and lets forced refresh bypass the cooldown', async () => {
+  let clockMs = 10000;
+  let loadCalls = 0;
+  let releaseLoad;
+  const gate = new Promise((resolve) => { releaseLoad = resolve; });
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-sync' }),
+    clock: () => clockMs,
+    syncIntervalMs: 5000,
+    cloudSync: {
+      async load() { loadCalls += 1; await gate; return null; },
+      async save() {},
+    },
+  });
+
+  const first = store.syncFromCloud();
+  const second = store.syncFromCloud();
+  const forcedWhileLoading = store.syncFromCloud({ force: true });
+  assert.strictEqual(second, first);
+  assert.strictEqual(forcedWhileLoading, first);
+  releaseLoad();
+  await Promise.all([first, second, forcedWhileLoading]);
+  assert.equal(loadCalls, 1);
+
+  await store.syncFromCloud();
+  assert.equal(loadCalls, 1);
+  await store.syncFromCloud({ force: true });
+  assert.equal(loadCalls, 2);
+});
+
+test('does not save when cloud state already matches the merged shared state', async () => {
+  const remoteState = createInitialState({ familyId: 'family-no-write' });
+  let saveCalls = 0;
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: remoteState,
+    cloudSync: {
+      async load() { return remoteState; },
+      async save() { saveCalls += 1; },
+    },
+  });
+
+  await store.syncFromCloud();
+
+  assert.equal(saveCalls, 0);
+});
+
+test('saves one merged cloud state when a local dish is absent remotely', async () => {
+  const storage = createMemoryStorage();
+  const initialState = createInitialState({ familyId: 'family-merge-save' });
+  const localStore = createStore({ storage, initialState });
+  localStore.addDish({ name: 'Unsynced local dish' }, '2026-08-09T10:00:00.000Z');
+  let saveCalls = 0;
+  const store = createStore({
+    storage,
+    cloudSync: {
+      async load() { return initialState; },
+      async save() { saveCalls += 1; },
+    },
+  });
+
+  await store.syncFromCloud();
+
+  assert.equal(saveCalls, 1);
+});
+
 test('keeps local family data usable when cloud hydration fails', async () => {
   const store = createStore({
     storage: createMemoryStorage(),

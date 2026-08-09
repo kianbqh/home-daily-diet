@@ -214,6 +214,32 @@ test('newer remote family and member profiles beat stale local defaults', () => 
   assert.equal(merged.members[0].displayName, '妈妈');
 });
 
+test('equal family and member profile timestamps keep remote values', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '云端家庭',
+    memberId: 'member-1',
+    memberName: '云端成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '本地家庭',
+    memberId: 'member-1',
+    memberName: '本地成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '云端家庭');
+  assert.equal(merged.members[0].displayName, '云端成员');
+});
+
 test('cloudbase sync uses family-access for load and never reads the state collection directly', async () => {
   const fake = createFakeCloudApi();
   const sync = createCloudBaseSync(fake.api, { envId: 'env-test', accessFunction: 'family-access' });

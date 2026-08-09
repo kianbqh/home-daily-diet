@@ -367,10 +367,17 @@ async function acceptInvite(event, context, db, config, now) {
   const nextState = clone(state);
   nextState.members = Array.isArray(nextState.members) ? nextState.members : [];
   const existingMember = nextState.members.find((item) => item.id === memberId);
+  const profileUpdatedAt = timestamp(now);
   if (existingMember) {
     existingMember.displayName = displayName;
+    existingMember.updatedAt = profileUpdatedAt;
   } else {
-    nextState.members.push({ id: memberId, displayName });
+    nextState.members.push({
+      id: memberId,
+      displayName,
+      joinedAt: profileUpdatedAt,
+      updatedAt: profileUpdatedAt,
+    });
   }
   const sharedState = await writeFamilyState(db, config, nextState, now);
   await updateDocument(db, config.inviteCollection, invite._id, {

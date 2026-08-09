@@ -159,6 +159,32 @@ test('cloud function merge keeps newer remote family and member profiles', () =>
   assert.equal(merged.members[0].displayName, '妈妈');
 });
 
+test('cloud function merge keeps remote family and member profiles on equal timestamps', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '云端家庭',
+    memberId: 'member-1',
+    memberName: '云端成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '本地家庭',
+    memberId: 'member-1',
+    memberName: '本地成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '云端家庭');
+  assert.equal(merged.members[0].displayName, '云端成员');
+});
+
 async function invoke(db, event, openid, options = {}) {
   return handleAction(event, { OPENID: openid }, db, {
     now: '2026-08-04T10:00:00.000Z',
@@ -261,6 +287,50 @@ test('createInvite and acceptInvite create a shared member', async () => {
   assert.equal(joined.data.state.family.id, 'family-1');
   assert.equal(joined.data.state.members.some((member) => member.id === 'member-2'), true);
   assert.equal(joined.data.member.openid, undefined);
+});
+
+test('acceptInvite versions a joined member and preserves a later rename through merge', async () => {
+  const state = createInitialState({
+    familyId: 'family-1',
+    familyName: 'Test Family',
+    memberId: 'member-1',
+    memberName: 'Dad',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': state },
+  });
+
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1', { now: '2026-08-02T00:00:00.000Z' });
+  const invite = await invoke(db, {
+    action: 'createInvite',
+    familyId: 'family-1',
+  }, 'openid-1', { now: '2026-08-02T01:00:00.000Z' });
+
+  const joined = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-2',
+    displayName: 'Xiaoming',
+  }, 'openid-2', { now: '2026-08-03T00:00:00.000Z' });
+  const joinedMember = joined.data.state.members.find((member) => member.id === 'member-2');
+  assert.equal(joinedMember.joinedAt, '2026-08-03T00:00:00.000Z');
+  assert.equal(joinedMember.updatedAt, '2026-08-03T00:00:00.000Z');
+
+  const renamed = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-2',
+    displayName: 'Little Ming',
+  }, 'openid-2', { now: '2026-08-04T00:00:00.000Z' });
+  const renamedMember = renamed.data.state.members.find((member) => member.id === 'member-2');
+  assert.equal(renamedMember.displayName, 'Little Ming');
+  assert.equal(renamedMember.updatedAt, '2026-08-04T00:00:00.000Z');
 });
 
 test('non-members cannot load a family state', async () => {

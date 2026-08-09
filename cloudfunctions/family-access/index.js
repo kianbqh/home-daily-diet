@@ -139,6 +139,12 @@ function chooseDish(remoteItem, localItem) {
   return chooseLatest(remoteItem, localItem);
 }
 
+function chooseProfile(remoteItem, localItem, fallbackField) {
+  const remoteTime = String(remoteItem && (remoteItem.updatedAt || remoteItem[fallbackField]) || '');
+  const localTime = String(localItem && (localItem.updatedAt || localItem[fallbackField]) || '');
+  return localTime > remoteTime ? localItem : remoteItem;
+}
+
 function mergeByKey(remoteItems = [], localItems = [], keyOf, resolver = chooseLatest) {
   const merged = new Map();
   remoteItems.forEach((item) => merged.set(keyOf(item), item));
@@ -178,8 +184,13 @@ function mergeFamilyStates(remote, local) {
   const merged = {
     ...clone(remote),
     ...clone(local),
-    family: { ...(remote.family || {}), ...(local.family || {}) },
-    members: mergeByKey(remote.members, local.members, (item) => item.id),
+    family: chooseProfile(remote.family, local.family, 'createdAt'),
+    members: mergeByKey(
+      remote.members,
+      local.members,
+      (item) => item.id,
+      (remoteMember, localMember) => chooseProfile(remoteMember, localMember, 'joinedAt')
+    ),
     dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id, chooseDish),
     cookingRecords: mergeByKey(remote.cookingRecords, local.cookingRecords, (item) => item.id),
     dishRatings: mergeByKey(

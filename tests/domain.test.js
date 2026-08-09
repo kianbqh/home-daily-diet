@@ -290,6 +290,24 @@ test('updates a member display name without changing family permissions', () => 
   assert.equal(updated.currentMemberId, 'member-test');
 });
 
+test('timestamps real family and member profile edits', () => {
+  const state = createInitialState({
+    familyId: 'family-profile',
+    memberId: 'member-profile',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  const familyUpdated = updateFamilyProfile(state, {
+    name: '新的家庭名',
+  }, '2026-08-09T10:00:00.000Z');
+  const memberUpdated = updateMemberProfile(familyUpdated, {
+    memberId: 'member-profile',
+    displayName: '妈妈',
+  }, '2026-08-09T10:01:00.000Z');
+
+  assert.equal(memberUpdated.family.updatedAt, '2026-08-09T10:00:00.000Z');
+  assert.equal(memberUpdated.members[0].updatedAt, '2026-08-09T10:01:00.000Z');
+});
+
 test('stores optional dish category and characteristic tags without free-form category text', () => {
   const state = addDish(createInitialState(), {
     name: 'Tomato eggs',

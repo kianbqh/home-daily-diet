@@ -51,6 +51,26 @@ test('repairs an incomplete persisted state before the family page reads it', ()
   assert.equal(store.getState().currentMemberId, 'member-repaired');
 });
 
+test('normalizes old family and member profiles with stable timestamps', () => {
+  const normalized = normalizePersistedState({
+    version: 1,
+    family: {
+      id: 'family-profile',
+      name: '旧家庭',
+      createdAt: '2026-08-01T00:00:00.000Z',
+    },
+    currentMemberId: 'member-profile',
+    members: [{
+      id: 'member-profile',
+      displayName: '旧成员',
+      joinedAt: '2026-08-02T00:00:00.000Z',
+    }],
+  });
+
+  assert.equal(normalized.family.updatedAt, '2026-08-01T00:00:00.000Z');
+  assert.equal(normalized.members[0].updatedAt, '2026-08-02T00:00:00.000Z');
+});
+
 test('keeps a dinner selection after persistence reload', () => {
   const storage = createMemoryStorage();
   const store = createStore({

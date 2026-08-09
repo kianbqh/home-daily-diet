@@ -34,18 +34,21 @@ function normalizeDishTags(tags) {
 function createInitialState(options = {}) {
   const familyId = options.familyId || 'family-local';
   const memberId = options.memberId || 'member-local';
+  const createdAt = timestamp(options.createdAt);
   return {
     version: 1,
     family: {
       id: familyId,
       name: options.familyName || '我们的家',
-      createdAt: timestamp(options.createdAt),
+      createdAt,
+      updatedAt: createdAt,
     },
     currentMemberId: memberId,
     members: [{
       id: memberId,
       displayName: options.memberName || '我',
-      joinedAt: timestamp(options.createdAt),
+      joinedAt: createdAt,
+      updatedAt: createdAt,
     }],
     dishes: [],
     cookingRecords: [],
@@ -57,13 +60,14 @@ function createInitialState(options = {}) {
   };
 }
 
-function updateFamilyProfile(inputState, input = {}) {
+function updateFamilyProfile(inputState, input = {}, now) {
   const state = clone(inputState);
   const name = String(input.name || '').trim();
   if (!name) {
     throw new Error('家庭名称不能为空');
   }
   state.family.name = name;
+  state.family.updatedAt = timestamp(input.updatedAt || now);
   return state;
 }
 
@@ -75,12 +79,13 @@ function addMember(inputState, input = {}) {
     throw new Error('家庭成员信息不完整');
   }
   if (!state.members.some((member) => member.id === id)) {
-    state.members.push({ id, displayName, joinedAt: timestamp(input.joinedAt) });
+    const joinedAt = timestamp(input.joinedAt);
+    state.members.push({ id, displayName, joinedAt, updatedAt: joinedAt });
   }
   return state;
 }
 
-function updateMemberProfile(inputState, input = {}) {
+function updateMemberProfile(inputState, input = {}, now) {
   const state = clone(inputState);
   const member = state.members.find((item) => item.id === input.memberId);
   const displayName = String(input.displayName || '').trim();
@@ -88,6 +93,7 @@ function updateMemberProfile(inputState, input = {}) {
     throw new Error('成员称呼不能为空');
   }
   member.displayName = displayName;
+  member.updatedAt = timestamp(input.updatedAt || now);
   return state;
 }
 

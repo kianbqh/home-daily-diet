@@ -59,6 +59,7 @@ function normalizePersistedState(candidate, fallbackState) {
     id: String(candidateFamily.id || fallback.family.id || '').trim() || 'family-local',
     name: String(candidateFamily.name || fallback.family.name || '').trim() || '我们家的饭桌',
   };
+  family.updatedAt = String(candidateFamily.updatedAt || family.createdAt || '');
 
   let members = Array.isArray(candidate.members)
     ? candidate.members.filter((member) => member && member.id)
@@ -66,6 +67,11 @@ function normalizePersistedState(candidate, fallbackState) {
   if (members.length === 0) {
     members = fallback.members.map((member) => ({ ...member }));
   }
+  members = members.map((member) => ({
+    ...member,
+    joinedAt: String(member.joinedAt || family.createdAt || ''),
+    updatedAt: String(member.updatedAt || member.joinedAt || family.createdAt || ''),
+  }));
 
   let currentMemberId = String(candidate.currentMemberId || '').trim();
   if (!currentMemberId || !members.some((member) => member.id === currentMemberId)) {
@@ -247,14 +253,14 @@ function createStore(options = {}) {
     addCookingRecord(input, now) {
       return commit(addCookingRecord(state, input, now));
     },
-    updateFamily(input) {
-      return commit(updateFamilyProfile(state, input));
+    updateFamily(input, now) {
+      return commit(updateFamilyProfile(state, input, now));
     },
-    updateMember(input) {
+    updateMember(input, now) {
       return commit(updateMemberProfile(state, {
         ...input,
         memberId: input.memberId || state.currentMemberId,
-      }));
+      }, now));
     },
     updateDish(input, now) {
       return commit(updateDishProfile(state, input, now));

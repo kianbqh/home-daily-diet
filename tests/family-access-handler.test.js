@@ -133,6 +133,32 @@ test('cloud function merge also keeps deletion tombstones and explicit restores 
   assert.equal(restored.dishes[0].restoredAt, '2026-08-08T13:00:00.000Z');
 });
 
+test('cloud function merge keeps newer remote family and member profiles', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile',
+    familyName: '新的家庭名',
+    memberId: 'member-1',
+    memberName: '妈妈',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile',
+    familyName: '我的家庭',
+    memberId: 'member-1',
+    memberName: '我',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-01T00:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-01T00:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '新的家庭名');
+  assert.equal(merged.members[0].displayName, '妈妈');
+});
+
 async function invoke(db, event, openid, options = {}) {
   return handleAction(event, { OPENID: openid }, db, {
     now: '2026-08-04T10:00:00.000Z',

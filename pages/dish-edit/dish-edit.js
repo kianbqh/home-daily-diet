@@ -2,6 +2,7 @@ const { DISH_CATEGORIES, DISH_TAGS } = require('../../services/domain');
 const { todayString } = require('../../utils/format');
 const { buildDishDetailViewModel } = require('../../utils/view-model');
 const { isCloudFileId, resolveCloudFileUrls } = require('../../utils/cloud-image');
+const { syncPageFromCloud } = require('../../utils/page-refresh');
 
 function isoForDate(date) {
   return `${date}T12:00:00.000Z`;
@@ -109,6 +110,19 @@ Page({
     this.resolveCloudImage(dish.coverImage, 'dishCover');
     this.resolveCloudImage(image, 'displayImage');
     this.resolveHistoryImages(detail.history);
+  },
+
+  onShow() {
+    syncPageFromCloud(this).catch(() => {});
+  },
+
+  onPullDownRefresh() {
+    return syncPageFromCloud(this, { force: true, manual: true });
+  },
+
+  refresh() {
+    if (!this.data.dishId || this.data.isEditingProfile) return;
+    this.onLoad({ dishId: this.data.dishId });
   },
 
   onNameInput(event) {

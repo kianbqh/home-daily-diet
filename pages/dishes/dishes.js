@@ -1,4 +1,5 @@
 const { buildLibraryViewModel } = require('../../utils/view-model');
+const { syncPageFromCloud } = require('../../utils/page-refresh');
 
 Page({
   data: {
@@ -39,7 +40,10 @@ Page({
     }
   },
   onShow() {
-    this.refresh();
+    syncPageFromCloud(this).catch(() => {});
+  },
+  onPullDownRefresh() {
+    return syncPageFromCloud(this, { force: true, manual: true });
   },
   refresh() {
     const store = this.getStore();

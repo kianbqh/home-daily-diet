@@ -27,6 +27,24 @@ function createPageInstance(definition, data = {}) {
   };
 }
 
+test('refreshable pages expose pull-down lifecycle methods and enable native refresh globally', () => {
+  const appConfig = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+  const pagePaths = [
+    'pages/index/index.js',
+    'pages/dishes/dishes.js',
+    'pages/dish-edit/dish-edit.js',
+    'pages/meal/meal.js',
+    'pages/family/family.js',
+    'pages/trash/trash.js',
+  ];
+
+  assert.equal(appConfig.window.enablePullDownRefresh, true);
+  pagePaths.forEach((pagePath) => {
+    const definition = loadPage(pagePath);
+    assert.equal(typeof definition.onPullDownRefresh, 'function', `${pagePath} should refresh on pull-down`);
+  });
+});
+
 test('existing dish page saves a member rating and exposes removal separately from recording', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

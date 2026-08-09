@@ -1,5 +1,6 @@
 const { buildMealViewModel } = require('../../utils/view-model');
 const { todayString } = require('../../utils/format');
+const { syncPageFromCloud } = require('../../utils/page-refresh');
 
 function joinErrorMessage(error) {
   switch (error && error.code) {
@@ -55,13 +56,10 @@ Page({
   },
   onShow() {
     if (this.data.joining) return;
-    const store = this.getStore();
-    if (!store) return;
-    if (store.getFamilySummary().cloudEnabled) {
-      store.hydrateFromCloud().then(() => this.refresh()).catch(() => this.refresh());
-      return;
-    }
-    this.refresh();
+    syncPageFromCloud(this).catch(() => {});
+  },
+  onPullDownRefresh() {
+    return syncPageFromCloud(this, { force: true, manual: true });
   },
   confirmJoinFromMeal(inviteCode, sessionId, fallbackDate) {
     wx.showModal({

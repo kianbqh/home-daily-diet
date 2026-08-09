@@ -1,5 +1,6 @@
 const { buildTrashViewModel } = require('../../utils/view-model');
 const { isCloudFileId, resolveCloudFileUrls } = require('../../utils/cloud-image');
+const { syncPageFromCloud } = require('../../utils/page-refresh');
 
 Page({
   data: {
@@ -16,7 +17,11 @@ Page({
   },
 
   onShow() {
-    this.refresh();
+    syncPageFromCloud(this).catch(() => {});
+  },
+
+  onPullDownRefresh() {
+    return syncPageFromCloud(this, { force: true, manual: true });
   },
 
   refresh() {

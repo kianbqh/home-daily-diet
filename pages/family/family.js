@@ -1,4 +1,5 @@
 const { buildFamilyViewModel } = require('../../utils/view-model');
+const { syncPageFromCloud } = require('../../utils/page-refresh');
 
 function inviteErrorMessage(error) {
   switch (error && error.code) {
@@ -77,8 +78,12 @@ Page({
     }
   },
   onShow() {
-    this.refresh();
-    this.loadInvite();
+    syncPageFromCloud(this)
+      .then(() => this.loadInvite())
+      .catch(() => this.loadInvite());
+  },
+  onPullDownRefresh() {
+    return syncPageFromCloud(this, { force: true, manual: true });
   },
   loadInvite() {
     const store = this.getStore();

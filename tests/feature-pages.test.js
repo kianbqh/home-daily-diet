@@ -295,6 +295,49 @@ test('dish detail ignores late image resolutions from an older snapshot', async 
   }
 });
 
+test('profile edit transitions do not stale an in-flight history image resolution', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://family-meals/family-1/history.jpg';
+  const authorizedImageUrl = 'https://cdn.example/family-meals/family-1/history.jpg';
+  const state = addDish(createInitialState({ memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Deferred history dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    resolveImageUrls(ids) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      requests.push({ ids, resolve });
+      return promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    page.startProfileEdit();
+    page.cancelProfileEdit();
+
+    assert.ok(requests.length >= 2, 'onLoad should start deferred history resolution');
+    requests.forEach((request) => {
+      request.resolve(new Map(request.ids.map((id) => [id, authorizedImageUrl])));
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.data.history[0].image, authorizedImageUrl);
+    assert.match(page.data.history[0].image, /^https:\/\//);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('dish detail lifecycle does not overwrite an active profile edit draft', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

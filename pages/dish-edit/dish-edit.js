@@ -178,8 +178,9 @@ Page({
       this.setData({ [field]: fileId });
       return;
     }
-    if (typeof wx === 'undefined' || !wx.cloud) return;
-    resolveCloudFileUrls([fileId], wx.cloud)
+    const store = this.getStore();
+    if (!store) return;
+    resolveCloudFileUrls([fileId], store)
       .then((urls) => {
         const image = urls.get(fileId) || '';
         this.setData({ [field]: image });
@@ -191,8 +192,9 @@ Page({
 
   resolveHistoryImages(history) {
     const cloudImages = history.filter((record) => record.image && record.image.indexOf('cloud://') === 0);
-    if (!cloudImages.length || typeof wx === 'undefined' || !wx.cloud) return;
-    resolveCloudFileUrls(cloudImages.map((record) => record.image), wx.cloud)
+    const store = this.getStore();
+    if (!cloudImages.length || !store) return;
+    resolveCloudFileUrls(cloudImages.map((record) => record.image), store)
       .then((urls) => {
         this.setData({
           history: history.map((record) => ({ ...record, image: urls.get(record.image) || record.image })),

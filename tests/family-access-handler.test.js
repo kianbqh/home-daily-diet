@@ -343,6 +343,77 @@ test('non-members cannot load a family state', async () => {
   );
 });
 
+test('resolves only a member family image path and denies other requested files', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [
+      'cloud://env/family-meals/family-1/photo.jpg',
+      'cloud://env/family-meals/family-2/private.jpg',
+    ],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL({ fileList }) {
+        return {
+          fileList: fileList.map((fileID) => ({
+            fileID,
+            tempFileURL: `https://cdn/${fileID.split('/').pop()}`,
+          })),
+        };
+      },
+    },
+  });
+
+  assert.equal(resolved.data.files[0].tempFileURL, 'https://cdn/photo.jpg');
+  assert.equal(resolved.data.files[1].code, 'FILE_ACCESS_DENIED');
+});
+
+test('non-members cannot resolve family image URLs', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+
+  await assert.rejects(
+    () => invoke(db, {
+      action: 'resolveFiles',
+      familyId: 'family-1',
+      fileIds: ['cloud://env/family-meals/family-1/photo.jpg'],
+    }, 'openid-outsider'),
+    (error) => error.code === 'NOT_MEMBER'
+  );
+});
+
+test('rejects resolveFiles requests with more than fifty unique cloud file IDs', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+
+  await assert.rejects(
+    () => invoke(db, {
+      action: 'resolveFiles',
+      familyId: 'family-1',
+      fileIds: Array.from({ length: 51 }, (_, index) => `cloud://env/family-meals/family-1/${index}.jpg`),
+    }, 'openid-1'),
+    (error) => error.code === 'FILE_LIMIT_EXCEEDED'
+  );
+});
+
 test('revoked invite cannot be accepted', async () => {
   const db = createMemoryDatabase({
     family_states: { 'family-1': familyState('family-1') },

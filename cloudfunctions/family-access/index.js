@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   memberCollection: 'family_members',
   inviteCollection: 'family_invites',
 };
+const MAX_RESOLVE_FILES = 50;
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -260,6 +261,47 @@ async function requireMember(db, config, familyId, openid) {
   return member;
 }
 
+function uniqueFileIds(fileIds) {
+  const values = Array.isArray(fileIds) ? fileIds : [fileIds];
+  return [...new Set(values.map((fileId) => String(fileId || '').trim()).filter(Boolean))];
+}
+
+function familyFileAllowed(fileID, familyId, prefix = 'family-meals/') {
+  return String(fileID || '').startsWith('cloud://')
+    && String(fileID).includes(`/${prefix}${familyId}/`);
+}
+
+async function resolveFiles(event, context, db, config, options) {
+  const familyId = requireValue(event.familyId, 'FAMILY_REQUIRED', '缺少家庭信息');
+  await requireMember(db, config, familyId, context.OPENID);
+  const fileIds = uniqueFileIds(event.fileIds);
+  if (fileIds.length > MAX_RESOLVE_FILES) {
+    throw createAccessError('FILE_LIMIT_EXCEEDED', '单次最多解析 50 个文件');
+  }
+  const allowedIds = fileIds.filter((fileID) => familyFileAllowed(fileID, familyId));
+  const resolved = new Map();
+  if (allowedIds.length && options.fileApi && typeof options.fileApi.getTempFileURL === 'function') {
+    try {
+      const result = await options.fileApi.getTempFileURL({ fileList: allowedIds });
+      (result && result.fileList || []).forEach((file) => {
+        const fileID = file && (file.fileID || file.fileId);
+        const tempFileURL = file && (file.tempFileURL || file.tempFileUrl);
+        if (fileID && tempFileURL) resolved.set(fileID, { fileID, tempFileURL });
+      });
+    } catch (error) {
+      // Preserve each original file ID so a later request can retry without exposing file details.
+    }
+  }
+  return {
+    files: fileIds.map((fileID) => {
+      if (!familyFileAllowed(fileID, familyId)) {
+        return { fileID, tempFileURL: '', code: 'FILE_ACCESS_DENIED' };
+      }
+      return resolved.get(fileID) || { fileID, tempFileURL: '', code: 'FILE_RESOLVE_FAILED' };
+    }),
+  };
+}
+
 async function bootstrap(event, context, db, config, now) {
   const openid = requireValue(context.OPENID, 'AUTH_REQUIRED', '请先完成微信身份认证');
   const familyId = requireValue(event.familyId, 'FAMILY_REQUIRED', '缺少家庭信息');
@@ -424,6 +466,8 @@ async function handleAction(event = {}, context = {}, db, options = {}) {
       return { ok: true, data: await load(event, context, db, config) };
     case 'save':
       return { ok: true, data: await save(event, context, db, config, now) };
+    case 'resolveFiles':
+      return { ok: true, data: await resolveFiles(event, context, db, config, options) };
     default:
       throw createAccessError('ACTION_INVALID', '不支持这个操作');
   }
@@ -453,6 +497,7 @@ async function main(event = {}, context = {}) {
     const db = cloud.database(runtimeEnv ? { env: runtimeEnv } : {});
     stage = `action:${String(event.action || 'unknown')}`;
     const result = await handleAction(event, requestContext, db, {
+      fileApi: cloud,
       config: {
         stateCollection: process.env.STATE_COLLECTION || DEFAULT_CONFIG.stateCollection,
         eventCollection: process.env.EVENT_COLLECTION || DEFAULT_CONFIG.eventCollection,
@@ -484,6 +529,7 @@ async function main(event = {}, context = {}) {
 }
 
 module.exports = {
+  familyFileAllowed,
   handleAction,
   main,
   mergeFamilyStates,

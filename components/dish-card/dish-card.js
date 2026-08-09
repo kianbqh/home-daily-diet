@@ -23,6 +23,10 @@ Component({
     this.updateDisplayDish(dish);
   },
   methods: {
+    getStore() {
+      const app = typeof getApp === 'function' ? getApp() : null;
+      return app && app.globalData ? app.globalData.store : null;
+    },
     updateDisplayDish(dish) {
       const sourceImage = dish && dish.coverImage ? String(dish.coverImage) : '';
       const requestId = (this.imageRequestId || 0) + 1;
@@ -36,8 +40,9 @@ Component({
           hasImage: Boolean(sourceImage && !isCloudFileId(sourceImage)),
         },
       });
-      if (!isCloudFileId(sourceImage) || typeof wx === 'undefined' || !wx.cloud) return;
-      resolveCloudFileUrls([sourceImage], wx.cloud)
+      const store = this.getStore();
+      if (!isCloudFileId(sourceImage) || !store) return;
+      resolveCloudFileUrls([sourceImage], store)
         .then((urls) => {
           if (requestId !== this.imageRequestId) return;
           const image = urls.get(sourceImage) || '';

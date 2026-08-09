@@ -29,8 +29,8 @@ Page({
     }));
     this.setData({ ...model, dishes });
     const cloudImages = dishes.filter((dish) => isCloudFileId(dish.coverImage));
-    if (!cloudImages.length || typeof wx === 'undefined' || !wx.cloud) return;
-    resolveCloudFileUrls(cloudImages.map((dish) => dish.coverImage), wx.cloud)
+    if (!cloudImages.length) return;
+    resolveCloudFileUrls(cloudImages.map((dish) => dish.coverImage), store)
       .then((urls) => {
         this.setData({
           dishes: dishes.map((dish) => ({

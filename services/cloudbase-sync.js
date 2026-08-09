@@ -149,6 +149,11 @@ function unwrapFunctionResult(result) {
   return body.data || {};
 }
 
+function uniqueCloudFileIds(fileIds) {
+  const values = Array.isArray(fileIds) ? fileIds : [fileIds];
+  return [...new Set(values.filter((fileId) => typeof fileId === 'string' && fileId.indexOf('cloud://') === 0))];
+}
+
 function createCloudBaseSync(api, options = {}) {
   const envId = String(options.envId || '').trim();
   if (!api || !api.cloud || !envId) {
@@ -188,6 +193,12 @@ function createCloudBaseSync(api, options = {}) {
       if (!familyId) return null;
       const data = await callFunction('load', { familyId });
       return data.state || null;
+    },
+    async resolveFiles(familyId, fileIds) {
+      const ids = uniqueCloudFileIds(fileIds);
+      if (!familyId || !ids.length) return [];
+      const data = await callFunction('resolveFiles', { familyId, fileIds: ids });
+      return Array.isArray(data.files) ? data.files : [];
     },
     async save(state) {
       if (!state || !state.family || !state.family.id) {

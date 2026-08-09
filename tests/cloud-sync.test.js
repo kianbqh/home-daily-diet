@@ -253,6 +253,27 @@ test('cloudbase sync uses family-access for load and never reads the state colle
   assert.equal((fake.calls.collections || []).length, 0);
 });
 
+test('cloudbase sync resolves only unique cloud file IDs through family-access', async () => {
+  const fake = createFakeCloudApi();
+  const sync = createCloudBaseSync(fake.api, { envId: 'env-test', accessFunction: 'family-access' });
+
+  const files = await sync.resolveFiles('family-1', [
+    'cloud://env/family-meals/family-1/photo.jpg',
+    'https://cdn.example/already-public.jpg',
+    'cloud://env/family-meals/family-1/photo.jpg',
+  ]);
+
+  assert.deepEqual(files, []);
+  assert.deepEqual(fake.calls.functions[0], {
+    name: 'family-access',
+    data: {
+      action: 'resolveFiles',
+      familyId: 'family-1',
+      fileIds: ['cloud://env/family-meals/family-1/photo.jpg'],
+    },
+  });
+});
+
 test('cloudbase sync labels transport failures with the action that failed', async () => {
   const api = {
     cloud: {

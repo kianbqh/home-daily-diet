@@ -28,6 +28,8 @@ const { createDefaultStorage } = require('./storage');
 const { mergeFamilyStates } = require('./cloudbase-sync');
 
 const CLOUD_FALLBACK_MESSAGE = '云端连接失败，当前继续使用本地数据。';
+const IMAGE_URL_CACHE_MS = 30 * 60 * 1000;
+const MAX_RESOLVE_FILES = 50;
 
 function cloudErrorMessage(error) {
   switch (error && error.code) {
@@ -138,6 +140,42 @@ function createStore(options = {}) {
   let syncPromise = null;
   let lastSuccessfulSyncAt = null;
   let failedCloudSyncRevision = null;
+  const imageUrlCache = new Map();
+
+  async function resolveImageUrls(fileIds) {
+    const ids = [...new Set((Array.isArray(fileIds) ? fileIds : [fileIds])
+      .filter((fileId) => typeof fileId === 'string' && fileId.indexOf('cloud://') === 0))];
+    const urls = new Map();
+    const now = clock();
+    const unresolved = ids.filter((fileId) => {
+      const cached = imageUrlCache.get(fileId);
+      if (cached && cached.expiresAt > now) {
+        urls.set(fileId, cached.url);
+        return false;
+      }
+      return true;
+    });
+    if (!unresolved.length || !cloudSync || typeof cloudSync.resolveFiles !== 'function') return urls;
+    const batches = [];
+    for (let index = 0; index < unresolved.length; index += MAX_RESOLVE_FILES) {
+      batches.push(unresolved.slice(index, index + MAX_RESOLVE_FILES));
+    }
+    await Promise.all(batches.map(async (batch) => {
+      try {
+        const files = await cloudSync.resolveFiles(state.family.id, batch);
+        (files || []).forEach((file) => {
+          const fileId = file && (file.fileID || file.fileId);
+          const url = file && (file.tempFileURL || file.tempFileUrl);
+          if (!fileId || !url) return;
+          imageUrlCache.set(fileId, { url, expiresAt: clock() + IMAGE_URL_CACHE_MS });
+          urls.set(fileId, url);
+        });
+      } catch (error) {
+        // Leave failed IDs uncached so the next screen refresh can retry them.
+      }
+    }));
+    return urls;
+  }
 
   function notify() {
     listeners.forEach((listener) => listener(state));
@@ -386,6 +424,7 @@ function createStore(options = {}) {
     findSimilarDishes(name) {
       return findSimilarDishes(state, name);
     },
+    resolveImageUrls,
     async uploadImage(filePath) {
       if (!filePath || /^(cloud:\/\/|https?:\/\/)/.test(filePath)) return filePath || '';
       if (!cloudSync || typeof cloudSync.uploadImage !== 'function') {

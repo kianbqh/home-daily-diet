@@ -33,6 +33,36 @@ test('does not persist a device-local image path when cloud image upload is unav
   assert.equal(await store.uploadImage('https://cdn.example/photo.jpg'), 'https://cdn.example/photo.jpg');
 });
 
+test('reuses a successful resolved image URL from the thirty-minute memory cache', async () => {
+  let clockMs = 0;
+  let resolveCalls = 0;
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-images' }),
+    clock: () => clockMs,
+    cloudSync: {
+      async resolveFiles(familyId, fileIds) {
+        resolveCalls += 1;
+        assert.equal(familyId, 'family-images');
+        assert.deepEqual(fileIds, ['cloud://env/family-meals/family-images/photo.jpg']);
+        return [{
+          fileID: 'cloud://env/family-meals/family-images/photo.jpg',
+          tempFileURL: 'https://cdn.example/photo.jpg',
+        }];
+      },
+    },
+  });
+  const fileId = 'cloud://env/family-meals/family-images/photo.jpg';
+
+  const first = await store.resolveImageUrls([fileId, fileId]);
+  clockMs = (30 * 60 * 1000) - 1;
+  const second = await store.resolveImageUrls([fileId]);
+
+  assert.equal(first.get(fileId), 'https://cdn.example/photo.jpg');
+  assert.equal(second.get(fileId), 'https://cdn.example/photo.jpg');
+  assert.equal(resolveCalls, 1);
+});
+
 test('repairs an incomplete persisted state before the family page reads it', () => {
   const storage = createMemoryStorage({ version: 1 });
   const store = createStore({

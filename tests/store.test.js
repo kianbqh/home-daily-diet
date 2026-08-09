@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createInitialState } = require('../services/domain');
+const { addDish, createInitialState } = require('../services/domain');
 const { createMemoryStorage } = require('../services/storage');
 const { createStore, normalizePersistedState } = require('../services/app-store');
 
@@ -130,6 +130,113 @@ test('does not cache an authorized file that the cloud function failed to resolv
   assert.equal(first.has(fileId), false);
   assert.equal(second.has(fileId), false);
   assert.equal(resolveCalls, 2);
+});
+
+test('family transition rejects a late image resolution and does not reuse it in the joined family', async () => {
+  const fileId = 'cloud://env/family-meals/shared/photo.jpg';
+  const familyB = createInitialState({
+    familyId: 'family-b',
+    memberId: 'member-b',
+    memberName: 'Family B member',
+  });
+  let signalFamilyAResolution;
+  let releaseFamilyAResolution;
+  const familyAResolutionStarted = new Promise((resolve) => { signalFamilyAResolution = resolve; });
+  const familyAResolutionGate = new Promise((resolve) => { releaseFamilyAResolution = resolve; });
+  const calls = [];
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-a', memberId: 'member-a' }),
+    cloudSync: {
+      async resolveFiles(familyId, fileIds) {
+        calls.push({ familyId, fileIds });
+        if (familyId === 'family-a') {
+          signalFamilyAResolution();
+          await familyAResolutionGate;
+          return [{ fileID: fileId, tempFileURL: 'https://cdn.example/family-a-private.jpg' }];
+        }
+        return [{ fileID: fileId, tempFileURL: 'https://cdn.example/family-b-authorized.jpg' }];
+      },
+      async acceptInvite() {
+        return {
+          state: familyB,
+          member: { memberId: 'member-b', displayName: 'Family B member' },
+        };
+      },
+    },
+  });
+
+  const familyARequest = store.resolveImageUrls([fileId]);
+  await familyAResolutionStarted;
+  await store.joinFamilyByInvite('B22222', { id: 'member-b', displayName: 'Family B member' });
+  releaseFamilyAResolution();
+
+  const staleUrls = await familyARequest;
+  const familyBUrls = await store.resolveImageUrls([fileId]);
+
+  assert.equal(staleUrls.has(fileId), false);
+  assert.equal(familyBUrls.get(fileId), 'https://cdn.example/family-b-authorized.jpg');
+  assert.deepEqual(calls.map((call) => call.familyId), ['family-a', 'family-b']);
+});
+
+test('image resolver ignores response entries outside the request batch', async () => {
+  const requestedId = 'cloud://env/family-meals/family-images/requested.jpg';
+  const injectedId = 'cloud://env/family-meals/family-images/injected.jpg';
+  let resolveCalls = 0;
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-images' }),
+    cloudSync: {
+      async resolveFiles(familyId, fileIds) {
+        resolveCalls += 1;
+        assert.equal(familyId, 'family-images');
+        if (fileIds.includes(requestedId)) {
+          return [
+            { fileID: requestedId, tempFileURL: 'https://cdn.example/requested.jpg' },
+            { fileID: injectedId, tempFileURL: 'https://cdn.example/injected.jpg' },
+          ];
+        }
+        return [{ fileID: injectedId, tempFileURL: 'https://cdn.example/authorized-injected.jpg' }];
+      },
+    },
+  });
+
+  const first = await store.resolveImageUrls([requestedId]);
+  const second = await store.resolveImageUrls([injectedId]);
+
+  assert.deepEqual([...first.entries()], [[requestedId, 'https://cdn.example/requested.jpg']]);
+  assert.equal(second.get(injectedId), 'https://cdn.example/authorized-injected.jpg');
+  assert.equal(resolveCalls, 2);
+});
+
+test('image cache prunes its oldest family-scoped entry when the configured bound is exceeded', async () => {
+  const ids = [
+    'cloud://env/family-meals/family-images/one.jpg',
+    'cloud://env/family-meals/family-images/two.jpg',
+    'cloud://env/family-meals/family-images/three.jpg',
+  ];
+  let resolveCalls = 0;
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-images' }),
+    imageCacheMaxEntries: 2,
+    cloudSync: {
+      async resolveFiles(familyId, fileIds) {
+        resolveCalls += 1;
+        return fileIds.map((fileID) => ({
+          fileID,
+          tempFileURL: `https://cdn.example/${fileID.split('/').pop()}`,
+        }));
+      },
+    },
+  });
+
+  await store.resolveImageUrls([ids[0]]);
+  await store.resolveImageUrls([ids[1]]);
+  await store.resolveImageUrls([ids[2]]);
+  await store.resolveImageUrls([ids[0]]);
+
+  assert.equal(resolveCalls, 4);
 });
 
 test('repairs an incomplete persisted state before the family page reads it', () => {
@@ -413,7 +520,7 @@ test('explains a cloud function call failure without exposing backend details', 
   assert.doesNotMatch(store.getSyncStatus().message, /request timeout/);
 });
 
-test('keeps local family identity while normalizing an incomplete cloud snapshot', async () => {
+test('rejects a cloud snapshot for a different family while keeping local data', async () => {
   const store = createStore({
     storage: createMemoryStorage(),
     initialState: createInitialState({
@@ -435,7 +542,7 @@ test('keeps local family identity while normalizing an incomplete cloud snapshot
   assert.equal(store.getFamilySummary().name, 'Local family');
   assert.equal(store.getFamilySummary().memberCount, 1);
   assert.equal(store.getState().currentMemberId, 'member-local-safe');
-  assert.equal(store.getSyncStatus().status, 'ready');
+  assert.equal(store.getSyncStatus().status, 'error');
 });
 
 test('keeps the local member identity when hydrating a shared family', async () => {
@@ -500,6 +607,105 @@ test('hydrates a family state without changing the local family identity', async
   await store.hydrateFromCloud();
 
   assert.equal(store.getState().family.id, 'family-local');
+});
+
+test('deferred family A sync cannot merge, save, or notify after joining family B', async () => {
+  const familyARemote = addDish(
+    createInitialState({ familyId: 'family-a', memberId: 'member-a' }),
+    { id: 'dish-a', name: 'Family A private dish' },
+    '2026-08-09T10:00:00.000Z'
+  );
+  const familyBRemote = addDish(
+    createInitialState({ familyId: 'family-b', memberId: 'member-b', memberName: 'Family B member' }),
+    { id: 'dish-b', name: 'Family B dish' },
+    '2026-08-09T11:00:00.000Z'
+  );
+  let signalFamilyALoad;
+  let releaseFamilyALoad;
+  const familyALoadStarted = new Promise((resolve) => { signalFamilyALoad = resolve; });
+  const familyALoadGate = new Promise((resolve) => { releaseFamilyALoad = resolve; });
+  const loads = [];
+  const saves = [];
+  const notifications = [];
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-a', memberId: 'member-a' }),
+    cloudSync: {
+      async load(familyId) {
+        loads.push(familyId);
+        if (familyId === 'family-a') {
+          signalFamilyALoad();
+          await familyALoadGate;
+          return familyARemote;
+        }
+        return familyBRemote;
+      },
+      async save(snapshot) {
+        saves.push({
+          familyId: snapshot.family.id,
+          dishIds: snapshot.dishes.map((dish) => dish.id).sort(),
+        });
+      },
+      async acceptInvite() {
+        return {
+          state: familyBRemote,
+          member: { memberId: 'member-b', displayName: 'Family B member' },
+        };
+      },
+    },
+  });
+  store.subscribe((snapshot) => {
+    notifications.push({
+      familyId: snapshot.family.id,
+      dishIds: snapshot.dishes.map((dish) => dish.id).sort(),
+    });
+  });
+
+  const familyASync = store.syncFromCloud({ force: true });
+  await familyALoadStarted;
+  await store.joinFamilyByInvite('B22222', { id: 'member-b', displayName: 'Family B member' });
+  const familyBSync = store.syncFromCloud({ force: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const loadsBeforeFamilyACompletes = [...loads];
+  const notificationCountBeforeFamilyACompletes = notifications.length;
+
+  releaseFamilyALoad();
+  await Promise.all([familyASync, familyBSync]);
+
+  assert.deepEqual(loadsBeforeFamilyACompletes, ['family-a', 'family-b']);
+  assert.equal(store.getState().family.id, 'family-b');
+  assert.deepEqual(store.getState().dishes.map((dish) => dish.id), ['dish-b']);
+  assert.deepEqual(saves, []);
+  assert.equal(notifications.length, notificationCountBeforeFamilyACompletes);
+  assert.equal(notifications.some((snapshot) => snapshot.dishIds.includes('dish-a')), false);
+});
+
+test('joining a family resets the automatic-sync cooldown for the new family', async () => {
+  let clockMs = 10000;
+  const loads = [];
+  const familyB = createInitialState({ familyId: 'family-b', memberId: 'member-b' });
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-a', memberId: 'member-a' }),
+    clock: () => clockMs,
+    syncIntervalMs: 5000,
+    cloudSync: {
+      async load(familyId) {
+        loads.push(familyId);
+        return familyId === 'family-b' ? familyB : null;
+      },
+      async save() {},
+      async acceptInvite() {
+        return { state: familyB, member: { memberId: 'member-b', displayName: 'Family B member' } };
+      },
+    },
+  });
+
+  await store.syncFromCloud();
+  await store.joinFamilyByInvite('B22222', { id: 'member-b', displayName: 'Family B member' });
+  await store.syncFromCloud();
+
+  assert.deepEqual(loads, ['family-a', 'family-b']);
 });
 
 test('joins a remote family through the invite code boundary', async () => {

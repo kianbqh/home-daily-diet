@@ -3,6 +3,14 @@ const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const {
+  addDish,
+  createInitialState,
+  deleteDish: deleteDishState,
+  purgeDish: purgeDishState,
+  restoreDish: restoreDishState,
+} = require('../services/domain');
+
 function loadPage(relativePath) {
   const modulePath = require.resolve(`../${relativePath}`);
   const originalPage = global.Page;
@@ -82,4 +90,110 @@ test('trash page restores and permanently purges the selected dish through the s
 
   global.getApp = originalGetApp;
   global.wx = originalWx;
+});
+
+function createDeferredTrashHarness(action) {
+  const cloudImageId = 'cloud://env/family-meals/family-1/deleted.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1' }), {
+    id: 'dish-1',
+    name: 'Archived dish',
+    image: cloudImageId,
+  }, '2026-08-01T09:00:00.000Z');
+  state = deleteDishState(state, { dishId: 'dish-1' }, '2026-08-01T10:00:00.000Z');
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    resolveImageUrls(ids) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      requests.push({ ids, resolve });
+      return promise;
+    },
+    restoreDish(input) {
+      state = restoreDishState(state, input, '2026-08-02T10:00:00.000Z');
+    },
+    purgeDish(input) {
+      state = purgeDishState(state, input, '2026-08-02T10:00:00.000Z');
+    },
+  };
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {
+    showModal(options) { options.success({ confirm: true }); },
+    showToast() {},
+  };
+  const page = createPageInstance(loadPage('pages/trash/trash.js'));
+  page.refresh();
+  page[action]({ currentTarget: { dataset: { dishId: 'dish-1' } } });
+  return {
+    cloudImageId,
+    page,
+    requests,
+    restoreGlobals() {
+      global.getApp = originalGetApp;
+      global.wx = originalWx;
+    },
+  };
+}
+
+test('trash ignores an older deferred image resolution after restoring the row', async () => {
+  const harness = createDeferredTrashHarness('restoreDish');
+  try {
+    assert.deepEqual(harness.page.data.dishes, []);
+    assert.equal(harness.requests.length, 1);
+    harness.requests[0].resolve(new Map([[harness.cloudImageId, 'https://cdn.example/stale-restored.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(harness.page.data.dishes, []);
+  } finally {
+    harness.restoreGlobals();
+  }
+});
+
+test('trash ignores an older deferred image resolution after permanently purging the row', async () => {
+  const harness = createDeferredTrashHarness('purgeDish');
+  try {
+    assert.deepEqual(harness.page.data.dishes, []);
+    assert.equal(harness.requests.length, 1);
+    harness.requests[0].resolve(new Map([[harness.cloudImageId, 'https://cdn.example/stale-purged.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(harness.page.data.dishes, []);
+  } finally {
+    harness.restoreGlobals();
+  }
+});
+
+test('trash invalidates a deferred image resolution when the page unloads', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/unloaded.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1' }), {
+    id: 'dish-1',
+    name: 'Unloaded archived dish',
+    image: cloudImageId,
+  }, '2026-08-01T09:00:00.000Z');
+  state = deleteDishState(state, { dishId: 'dish-1' }, '2026-08-01T10:00:00.000Z');
+  let release;
+  const store = {
+    getState() { return state; },
+    resolveImageUrls() {
+      return new Promise((resolve) => { release = resolve; });
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/trash/trash.js'));
+
+  try {
+    page.refresh();
+    const beforeUnload = page.data.dishes.map((dish) => ({ ...dish }));
+    assert.equal(typeof page.onUnload, 'function');
+    page.onUnload();
+    release(new Map([[cloudImageId, 'https://cdn.example/stale-unloaded.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(page.data.dishes, beforeUnload);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
 });

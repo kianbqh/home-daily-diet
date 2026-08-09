@@ -2,6 +2,10 @@ async function syncPageFromCloud(page, options = {}) {
   const force = Boolean(options.force);
   const manual = Boolean(options.manual);
 
+  if (!manual && page && typeof page.refresh === 'function') {
+    page.refresh();
+  }
+
   try {
     const store = page && typeof page.getStore === 'function' ? page.getStore() : null;
     if (store && typeof store.syncFromCloud === 'function') {

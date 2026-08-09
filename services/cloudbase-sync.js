@@ -65,8 +65,20 @@ function purgeDishReferences(state) {
   };
 }
 
+function assertSameFamily(remote, local) {
+  const remoteFamilyId = String(remote && remote.family && remote.family.id || '').trim();
+  const localFamilyId = String(local && local.family && local.family.id || '').trim();
+  if (!remoteFamilyId || !localFamilyId || remoteFamilyId !== localFamilyId) {
+    const error = new Error('不能合并不同家庭的状态');
+    error.code = 'FAMILY_MISMATCH';
+    throw error;
+  }
+  return remoteFamilyId;
+}
+
 function mergeFamilyStates(remote, local) {
   if (!remote) return purgeDishReferences(local);
+  assertSameFamily(remote, local);
   const merged = {
     ...remote,
     ...local,

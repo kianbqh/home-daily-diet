@@ -24,7 +24,17 @@ Page({
     return syncPageFromCloud(this, { force: true, manual: true });
   },
 
+  beginImageResolution() {
+    this.imageResolutionGeneration = Number(this.imageResolutionGeneration || 0) + 1;
+    return this.imageResolutionGeneration;
+  },
+
+  onUnload() {
+    this.beginImageResolution();
+  },
+
   refresh() {
+    const generation = this.beginImageResolution();
     const store = this.getStore();
     if (!store) return;
     const model = buildTrashViewModel(store.getState());
@@ -37,6 +47,7 @@ Page({
     if (!cloudImages.length) return;
     resolveCloudFileUrls(cloudImages.map((dish) => dish.coverImage), store)
       .then((urls) => {
+        if (generation !== this.imageResolutionGeneration) return;
         this.setData({
           dishes: dishes.map((dish) => ({
             ...dish,

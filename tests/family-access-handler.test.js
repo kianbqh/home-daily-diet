@@ -185,6 +185,16 @@ test('cloud function merge keeps remote family and member profiles on equal time
   assert.equal(merged.members[0].displayName, '云端成员');
 });
 
+test('cloud function merge rejects snapshots from different families', () => {
+  const familyA = createInitialState({ familyId: 'family-a' });
+  const familyB = createInitialState({ familyId: 'family-b' });
+
+  assert.throws(
+    () => mergeFamilyStates(familyA, familyB),
+    (error) => error && error.code === 'FAMILY_MISMATCH'
+  );
+});
+
 async function invoke(db, event, openid, options = {}) {
   return handleAction(event, { OPENID: openid }, db, {
     now: '2026-08-04T10:00:00.000Z',
@@ -331,6 +341,55 @@ test('acceptInvite versions a joined member and preserves a later rename through
   const renamedMember = renamed.data.state.members.find((member) => member.id === 'member-2');
   assert.equal(renamedMember.displayName, 'Little Ming');
   assert.equal(renamedMember.updatedAt, '2026-08-04T00:00:00.000Z');
+});
+
+test('repeat invite acceptance uses the existing OPENID membership id instead of a new device id', async () => {
+  const state = createInitialState({
+    familyId: 'family-1',
+    memberId: 'member-owner',
+    memberName: 'Owner',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': state },
+  });
+
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-owner',
+    displayName: 'Owner',
+  }, 'openid-owner', { now: '2026-08-02T00:00:00.000Z' });
+  const invite = await invoke(db, {
+    action: 'createInvite',
+    familyId: 'family-1',
+  }, 'openid-owner', { now: '2026-08-02T01:00:00.000Z' });
+
+  const first = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-canonical',
+    displayName: 'First device name',
+  }, 'openid-repeat', { now: '2026-08-03T00:00:00.000Z' });
+  const repeated = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-new-device',
+    displayName: 'Second device name',
+  }, 'openid-repeat', { now: '2026-08-04T00:00:00.000Z' });
+
+  assert.equal(first.data.member.memberId, 'member-canonical');
+  assert.equal(repeated.data.member.memberId, 'member-canonical');
+  assert.deepEqual(
+    repeated.data.state.members
+      .filter((member) => ['member-canonical', 'member-new-device'].includes(member.id))
+      .map((member) => ({ id: member.id, displayName: member.displayName })),
+    [{ id: 'member-canonical', displayName: 'Second device name' }]
+  );
+  const authenticatedMemberships = [...db.records('family_members').values()]
+    .filter((member) => member.familyId === 'family-1' && member.openid === 'openid-repeat');
+  assert.equal(authenticatedMemberships.length, 1);
+  assert.equal(authenticatedMemberships[0].memberId, 'member-canonical');
 });
 
 test('non-members cannot load a family state', async () => {

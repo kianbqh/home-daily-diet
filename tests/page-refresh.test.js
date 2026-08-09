@@ -28,6 +28,36 @@ test('manual page refresh forces cloud sync and always stops the native animatio
   }
 });
 
+test('automatic page refresh renders cached content before pending cloud sync and renders again after it', async () => {
+  const calls = [];
+  let releaseSync;
+  const syncGate = new Promise((resolve) => { releaseSync = resolve; });
+  const page = {
+    data: { content: '' },
+    getStore() {
+      return {
+        async syncFromCloud(options) {
+          calls.push(options.force ? 'force' : 'auto');
+          await syncGate;
+        },
+      };
+    },
+    refresh() {
+      calls.push('render');
+      this.data.content = 'cached family content';
+    },
+  };
+
+  const refreshing = syncPageFromCloud(page);
+
+  assert.equal(page.data.content, 'cached family content');
+  assert.deepEqual(calls, ['render', 'auto']);
+
+  releaseSync();
+  await refreshing;
+  assert.deepEqual(calls, ['render', 'auto', 'render']);
+});
+
 test('manual page refresh reports cloud failure, renders, and stops the native animation', async () => {
   const calls = [];
   const originalWx = global.wx;
@@ -77,7 +107,7 @@ test('automatic page refresh remains silent when cloud sync fails', async () => 
 
   try {
     await syncPageFromCloud(page);
-    assert.deepEqual(calls, ['auto', 'render']);
+    assert.deepEqual(calls, ['render', 'auto', 'render']);
   } finally {
     global.wx = originalWx;
   }

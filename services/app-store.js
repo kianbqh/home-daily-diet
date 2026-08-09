@@ -29,6 +29,7 @@ const { mergeFamilyStates } = require('./cloudbase-sync');
 
 const CLOUD_FALLBACK_MESSAGE = '云端连接失败，当前继续使用本地数据。';
 const IMAGE_URL_CACHE_MS = 30 * 60 * 1000;
+const DEFAULT_IMAGE_URL_CACHE_MAX_ENTRIES = 500;
 const MAX_RESOLVE_FILES = 50;
 
 function cloudErrorMessage(error) {
@@ -128,6 +129,10 @@ function createStore(options = {}) {
   const cloudSync = options.cloudSync || null;
   const clock = options.clock || Date.now;
   const syncIntervalMs = Number(options.syncIntervalMs || 5000);
+  const imageCacheMaxEntries = Math.max(
+    1,
+    Number(options.imageCacheMaxEntries || DEFAULT_IMAGE_URL_CACHE_MAX_ENTRIES)
+  );
   const storedState = storage.loadState();
   let state = normalizePersistedState(storedState, options.initialState || createInitialState());
   if (storedState) storage.saveState(state);
@@ -140,17 +145,72 @@ function createStore(options = {}) {
   let syncPromise = null;
   let lastSuccessfulSyncAt = null;
   let failedCloudSyncRevision = null;
+  let familyGeneration = 0;
+  let activeFamilyTransitionGeneration = null;
   const imageUrlCache = new Map();
+
+  function familyIdOf(value) {
+    return String(value && value.family && value.family.id || '').trim();
+  }
+
+  function captureFamilyContext() {
+    return { familyId: familyIdOf(state), generation: familyGeneration };
+  }
+
+  function isCurrentFamilyContext(context) {
+    return Boolean(context)
+      && context.generation === familyGeneration
+      && context.familyId === familyIdOf(state);
+  }
+
+  function assertStateFamily(value, expectedFamilyId) {
+    const actualFamilyId = familyIdOf(value);
+    if (!actualFamilyId || !expectedFamilyId || actualFamilyId !== expectedFamilyId) {
+      const error = new Error('家庭状态与当前家庭不一致');
+      error.code = 'FAMILY_MISMATCH';
+      throw error;
+    }
+  }
+
+  function imageCacheKey(familyId, fileId) {
+    return `${familyId}\n${fileId}`;
+  }
+
+  function pruneImageUrlCache(now) {
+    imageUrlCache.forEach((entry, key) => {
+      if (!entry || entry.expiresAt <= now) imageUrlCache.delete(key);
+    });
+    while (imageUrlCache.size > imageCacheMaxEntries) {
+      const oldestKey = imageUrlCache.keys().next().value;
+      imageUrlCache.delete(oldestKey);
+    }
+  }
+
+  function beginFamilyTransition() {
+    familyGeneration += 1;
+    activeFamilyTransitionGeneration = familyGeneration;
+    syncPromise = null;
+    lastSuccessfulSyncAt = null;
+    failedCloudSyncRevision = null;
+    invite = null;
+    imageUrlCache.clear();
+    return captureFamilyContext();
+  }
 
   async function resolveImageUrls(fileIds) {
     const ids = [...new Set((Array.isArray(fileIds) ? fileIds : [fileIds])
       .filter((fileId) => typeof fileId === 'string' && fileId.indexOf('cloud://') === 0))];
     const urls = new Map();
+    const context = captureFamilyContext();
     const now = clock();
+    pruneImageUrlCache(now);
     const unresolved = ids.filter((fileId) => {
-      const cached = imageUrlCache.get(fileId);
+      const key = imageCacheKey(context.familyId, fileId);
+      const cached = imageUrlCache.get(key);
       if (cached && cached.expiresAt > now) {
         urls.set(fileId, cached.url);
+        imageUrlCache.delete(key);
+        imageUrlCache.set(key, cached);
         return false;
       }
       return true;
@@ -162,19 +222,27 @@ function createStore(options = {}) {
     }
     await Promise.all(batches.map(async (batch) => {
       try {
-        const files = await cloudSync.resolveFiles(state.family.id, batch);
+        const files = await cloudSync.resolveFiles(context.familyId, batch);
+        if (!isCurrentFamilyContext(context)) return;
+        const requestedIds = new Set(batch);
         (files || []).forEach((file) => {
           const fileId = file && (file.fileID || file.fileId);
           const url = file && (file.tempFileURL || file.tempFileUrl);
-          if (!fileId || !url) return;
-          imageUrlCache.set(fileId, { url, expiresAt: clock() + IMAGE_URL_CACHE_MS });
+          if (!requestedIds.has(fileId) || !/^https?:\/\//.test(String(url || ''))) return;
+          imageUrlCache.set(imageCacheKey(context.familyId, fileId), {
+            familyId: context.familyId,
+            fileId,
+            url,
+            expiresAt: clock() + IMAGE_URL_CACHE_MS,
+          });
+          pruneImageUrlCache(clock());
           urls.set(fileId, url);
         });
       } catch (error) {
         // Leave failed IDs uncached so the next screen refresh can retry them.
       }
     }));
-    return urls;
+    return isCurrentFamilyContext(context) ? urls : new Map();
   }
 
   function notify() {
@@ -188,19 +256,33 @@ function createStore(options = {}) {
     if (changed) notify();
   }
 
-  function queueCloudSave(snapshot, revision) {
+  function queueCloudSave(snapshot, revision, context = captureFamilyContext()) {
     if (!cloudSync || typeof cloudSync.save !== 'function') return Promise.resolve(snapshot);
-    const operation = cloudSaveChain.then(() => cloudSync.save(snapshot));
+    let skipped = false;
+    const operation = cloudSaveChain.then(() => {
+      assertStateFamily(snapshot, context.familyId);
+      if (!isCurrentFamilyContext(context)
+        || activeFamilyTransitionGeneration === context.generation) {
+        skipped = true;
+        return snapshot;
+      }
+      return cloudSync.save(snapshot);
+    });
     cloudSaveChain = operation.catch(() => undefined);
     return operation
       .then((saved) => {
-        if (revision === localRevision && failedCloudSyncRevision !== revision) {
+        if (!skipped
+          && isCurrentFamilyContext(context)
+          && revision === localRevision
+          && failedCloudSyncRevision !== revision) {
           updateSyncStatus('ready');
         }
         return saved;
       })
       .catch((error) => {
-        updateSyncStatus('error', cloudErrorMessage(error));
+        if (isCurrentFamilyContext(context)) {
+          updateSyncStatus('error', cloudErrorMessage(error));
+        }
         throw error;
       });
   }
@@ -210,7 +292,7 @@ function createStore(options = {}) {
     localRevision += 1;
     storage.saveState(state);
     notify();
-    queueCloudSave(state, localRevision).catch(() => {});
+    queueCloudSave(state, localRevision, captureFamilyContext()).catch(() => {});
     return state;
   }
 
@@ -218,33 +300,47 @@ function createStore(options = {}) {
     return state.members.find((member) => member.id === state.currentMemberId);
   }
 
-  async function performCloudSync() {
+  async function performCloudSync(context) {
     if (!cloudSync || typeof cloudSync.load !== 'function') {
-      updateSyncStatus('local');
+      if (isCurrentFamilyContext(context)) updateSyncStatus('local');
       return { state, succeeded: true };
     }
     const localStateAtStart = state;
     try {
       await cloudSaveChain;
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      assertStateFamily(state, context.familyId);
       if (typeof cloudSync.bootstrap === 'function') {
-        await cloudSync.bootstrap(state, currentMember());
+        const bootstrapState = state;
+        const bootstrapMember = bootstrapState.members.find(
+          (member) => member.id === bootstrapState.currentMemberId
+        );
+        await cloudSync.bootstrap(bootstrapState, bootstrapMember);
+        if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
       }
-      const remote = await cloudSync.load(state.family.id);
+      const remote = await cloudSync.load(context.familyId);
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
       const latestLocalState = state;
+      assertStateFamily(latestLocalState, context.familyId);
+      if (remote) assertStateFamily(remote, context.familyId);
       const merged = remote
         ? mergeFamilyStates(remote, latestLocalState)
         : latestLocalState;
+      assertStateFamily(merged, context.familyId);
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
       state = normalizePersistedState(merged, latestLocalState);
       state.currentMemberId = latestLocalState.currentMemberId;
       storage.saveState(state);
       notify();
       if (!remote || !sharedStatesEqual(remote, merged)) {
-        await queueCloudSave(state, localRevision);
+        await queueCloudSave(state, localRevision, context);
+        if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
       }
       failedCloudSyncRevision = null;
       updateSyncStatus('ready');
       return { state, succeeded: true };
     } catch (error) {
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
       // Keep the newest local state, including edits made while the request was in flight.
       state = state || localStateAtStart;
       storage.saveState(state);
@@ -260,16 +356,24 @@ function createStore(options = {}) {
     },
     syncFromCloud({ force = false } = {}) {
       if (syncPromise) return syncPromise;
+      if (activeFamilyTransitionGeneration === familyGeneration) return Promise.resolve(state);
       if (!force && lastSuccessfulSyncAt !== null && clock() - lastSuccessfulSyncAt < syncIntervalMs) {
         return Promise.resolve(state);
       }
-      syncPromise = performCloudSync()
+      const context = captureFamilyContext();
+      let request = null;
+      request = performCloudSync(context)
         .then((result) => {
-          if (result.succeeded) lastSuccessfulSyncAt = clock();
+          if (result.succeeded && !result.stale && isCurrentFamilyContext(context)) {
+            lastSuccessfulSyncAt = clock();
+          }
           return result.state;
         })
-        .finally(() => { syncPromise = null; });
-      return syncPromise;
+        .finally(() => {
+          if (syncPromise === request) syncPromise = null;
+        });
+      syncPromise = request;
+      return request;
     },
     hydrateFromCloud() {
       return this.syncFromCloud({ force: true });
@@ -278,23 +382,37 @@ function createStore(options = {}) {
       if (!cloudSync || typeof cloudSync.acceptInvite !== 'function') {
         throw new Error('当前还没有配置家庭云端同步');
       }
-      const result = await cloudSync.acceptInvite(code, member);
-      const remote = result && result.state ? result.state : null;
-      if (!remote) throw new Error('没有找到这个家庭空间');
-      const memberId = result.member && result.member.memberId
-        ? result.member.memberId
-        : member.id;
-      state = normalizePersistedState({ ...remote, currentMemberId: memberId }, state);
-      state.currentMemberId = memberId;
-      if (!state.members.some((item) => item.id === memberId)) {
-        state = addMember(state, { id: memberId, displayName: member.displayName });
+      const transition = beginFamilyTransition();
+      try {
+        await cloudSaveChain;
+        if (!isCurrentFamilyContext(transition)) return state;
+        const result = await cloudSync.acceptInvite(code, member);
+        if (!isCurrentFamilyContext(transition)) return state;
+        const remote = result && result.state ? result.state : null;
+        if (!remote) throw new Error('没有找到这个家庭空间');
+        const remoteFamilyId = familyIdOf(remote);
+        if (!remoteFamilyId) throw new Error('没有找到这个家庭空间');
+        const memberId = result.member && result.member.memberId
+          ? result.member.memberId
+          : member.id;
+        state = normalizePersistedState({ ...remote, currentMemberId: memberId }, state);
+        assertStateFamily(state, remoteFamilyId);
+        state.currentMemberId = memberId;
+        if (!state.members.some((item) => item.id === memberId)) {
+          state = addMember(state, { id: memberId, displayName: member.displayName });
+        }
+        localRevision += 1;
+        invite = null;
+        imageUrlCache.clear();
+        storage.saveState(state);
+        updateSyncStatus('ready');
+        notify();
+        return state;
+      } finally {
+        if (activeFamilyTransitionGeneration === transition.generation) {
+          activeFamilyTransitionGeneration = null;
+        }
       }
-      localRevision += 1;
-      invite = null;
-      storage.saveState(state);
-      updateSyncStatus('ready');
-      notify();
-      return state;
     },
     async getInvite() {
       if (!cloudSync || typeof cloudSync.getInvite !== 'function') return null;

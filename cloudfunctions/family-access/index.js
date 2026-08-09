@@ -180,8 +180,20 @@ function purgeDishReferences(state) {
   };
 }
 
+function assertSameFamily(remote, local) {
+  const remoteFamilyId = String(remote && remote.family && remote.family.id || '').trim();
+  const localFamilyId = String(local && local.family && local.family.id || '').trim();
+  if (!remoteFamilyId || !localFamilyId || remoteFamilyId !== localFamilyId) {
+    const error = new Error('不能合并不同家庭的状态');
+    error.code = 'FAMILY_MISMATCH';
+    throw error;
+  }
+  return remoteFamilyId;
+}
+
 function mergeFamilyStates(remote, local) {
   if (!remote) return purgeDishReferences(clone(local));
+  assertSameFamily(remote, local);
   const merged = {
     ...clone(remote),
     ...clone(local),
@@ -397,20 +409,23 @@ async function acceptInvite(event, context, db, config, now) {
   const familyId = invite.familyId;
   const state = await readFamilyState(db, config, familyId);
   if (!state) throw createAccessError('FAMILY_NOT_FOUND', '找不到这个家庭空间');
-  const memberId = requireValue(event.memberId, 'MEMBER_REQUIRED', '缺少成员信息');
+  const requestedMemberId = requireValue(event.memberId, 'MEMBER_REQUIRED', '缺少成员信息');
   const displayName = String(event.displayName || '').trim() || '家庭成员';
+  let member = await findMember(db, config, familyId, openid);
+  const memberId = member
+    ? requireValue(member.memberId, 'MEMBER_REQUIRED', '缺少成员信息')
+    : requestedMemberId;
   const memberDocumentId = `${familyId}|${memberId}`;
   const existingById = await getDocument(db, config.memberCollection, memberDocumentId);
   if (existingById && existingById.openid !== openid) {
     throw createAccessError('MEMBER_ID_CONFLICT', '成员信息冲突，请重新打开小程序后再试');
   }
-  let member = await findMember(db, config, familyId, openid);
   if (!member) {
     member = createMemberRecord({ familyId, memberId, openid, displayName }, now);
   } else {
     member = { ...member, displayName, updatedAt: timestamp(now), status: 'active' };
   }
-  await setDocument(db, config.memberCollection, member._id, member);
+  await setDocument(db, config.memberCollection, memberDocumentId, member);
   const nextState = clone(state);
   nextState.members = Array.isArray(nextState.members) ? nextState.members : [];
   const existingMember = nextState.members.find((item) => item.id === memberId);

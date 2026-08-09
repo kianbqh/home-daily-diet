@@ -188,6 +188,16 @@ test('cloudbase sync merges append-only family changes before saving', async () 
   assert.equal(merged.cookingRecords.length, 2);
 });
 
+test('family-state merge rejects snapshots from different families', () => {
+  const familyA = createInitialState({ familyId: 'family-a' });
+  const familyB = createInitialState({ familyId: 'family-b' });
+
+  assert.throws(
+    () => mergeFamilyStates(familyA, familyB),
+    (error) => error && error.code === 'FAMILY_MISMATCH'
+  );
+});
+
 test('newer remote family and member profiles beat stale local defaults', () => {
   const remote = createInitialState({
     familyId: 'family-profile',

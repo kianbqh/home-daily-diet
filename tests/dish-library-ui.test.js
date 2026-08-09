@@ -119,6 +119,9 @@ test('dish detail uses five complete visual stars and a modal profile editor', (
   assert.match(script, /cancelProfileEdit\s*\(/);
   assert.match(styles, /\.detail-actions\s+button\s*\{[\s\S]*height:\s*84rpx/);
   assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible\}\}" class="card-surface record-fields-card"/);
+  assert.match(template, /wx:if="\{\{item\.displayImage\}\}"[^>]*src="\{\{item\.displayImage\}\}"/);
+  assert.match(template, /wx:if="\{\{item\.displayRecordImage\}\}"[^>]*[\s\S]*src="\{\{item\.displayRecordImage\}\}"/);
+  assert.doesNotMatch(template, /src="\{\{item\.(?:image|recordImage)\}\}"/);
 });
 
 test('cloud image helper delegates CloudBase file IDs to the Store without changing local URLs', async () => {

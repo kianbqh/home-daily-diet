@@ -43,7 +43,7 @@
     </view>
     <view wx:for="{{history}}" wx:key="id" class="history-card">
       <view class="history-media">
-        <image wx:if="{{item.image}}" class="history-image" src="{{item.image}}" mode="aspectFill" />
+        <image wx:if="{{item.displayImage}}" class="history-image" src="{{item.displayImage}}" mode="aspectFill" />
         <view wx:else class="history-placeholder">🍽</view>
       </view>
       <view class="history-content">
@@ -93,8 +93,8 @@
           <text class="review-stars-label">{{item.starsLabel}}</text>
         </view>
         <text wx:if="{{item.text}}" class="review-text">{{item.text}}</text>
-        <view wx:if="{{item.recordImage}}" class="review-record-photo">
-          <image src="{{item.recordImage}}" mode="aspectFill" />
+        <view wx:if="{{item.displayRecordImage}}" class="review-record-photo">
+          <image src="{{item.displayRecordImage}}" mode="aspectFill" />
           <text>这次制作</text>
         </view>
       </view>

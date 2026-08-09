@@ -14,6 +14,18 @@ function showToast(title, icon = 'none') {
   }
 }
 
+function withHistoryDisplayImages(detail = {}) {
+  const history = (Array.isArray(detail.history) ? detail.history : []).map((record) => ({
+    ...record,
+    displayImage: isCloudFileId(record.image) ? '' : record.image || '',
+  }));
+  const reviews = (Array.isArray(detail.reviews) ? detail.reviews : []).map((review) => ({
+    ...review,
+    displayRecordImage: isCloudFileId(review.recordImage) ? '' : review.recordImage || '',
+  }));
+  return { history, reviews };
+}
+
 Page({
   data: {
     isExisting: false,
@@ -94,6 +106,7 @@ Page({
     const isArchived = dish.status === 'deleted';
     const isEditingProfile = options.mode === 'edit' && !isArchived;
     const detail = buildDishDetailViewModel(store.getState(), dish.id);
+    const displayDetail = withHistoryDisplayImages(detail);
     const image = isEditingProfile ? dish.coverImage || '' : '';
     const visibleImage = isCloudFileId(image) ? '' : image;
     const visibleCover = isCloudFileId(dish.coverImage || '') ? '' : dish.coverImage || '';
@@ -113,8 +126,8 @@ Page({
       selectedCategory: dish.category || '',
       selectedTags: Array.isArray(dish.tags) ? dish.tags : [],
       tagOptions: this.makeTagOptions(Array.isArray(dish.tags) ? dish.tags : []),
-      history: detail.history,
-      reviews: detail.reviews,
+      history: displayDetail.history,
+      reviews: displayDetail.reviews,
       reviewStats: detail.reviewStats,
       reviewStars: 0,
       reviewText: '',
@@ -124,7 +137,7 @@ Page({
     const historyGeneration = this.beginImageResolution('history');
     this.resolveCloudImage(dish.coverImage, 'dishCover', 'cover', coverGeneration);
     this.resolveCloudImage(image, 'displayImage', 'profilePreview', profilePreviewGeneration);
-    this.resolveHistoryImages(detail.history, historyGeneration);
+    this.resolveHistoryImages(displayDetail.history, displayDetail.reviews, historyGeneration);
   },
 
   onShow() {
@@ -133,6 +146,12 @@ Page({
 
   onPullDownRefresh() {
     return syncPageFromCloud(this, { force: true, manual: true });
+  },
+
+  onUnload() {
+    this.beginImageResolution('cover');
+    this.beginImageResolution('profilePreview');
+    this.beginImageResolution('history');
   },
 
   refresh() {
@@ -144,6 +163,7 @@ Page({
     if (!dish) return;
 
     const detail = buildDishDetailViewModel(state, dish.id);
+    const displayDetail = withHistoryDisplayImages(detail);
     const isArchived = dish.status === 'deleted';
     const coverImage = dish.coverImage || '';
     this.setData({
@@ -158,14 +178,14 @@ Page({
       selectedCategory: dish.category || '',
       selectedTags: Array.isArray(dish.tags) ? dish.tags : [],
       tagOptions: this.makeTagOptions(Array.isArray(dish.tags) ? dish.tags : []),
-      history: detail.history,
-      reviews: detail.reviews,
+      history: displayDetail.history,
+      reviews: displayDetail.reviews,
       reviewStats: detail.reviewStats,
     });
     const coverGeneration = this.beginImageResolution('cover');
     const historyGeneration = this.beginImageResolution('history');
     this.resolveCloudImage(coverImage, 'dishCover', 'cover', coverGeneration);
-    this.resolveHistoryImages(detail.history, historyGeneration);
+    this.resolveHistoryImages(displayDetail.history, displayDetail.reviews, historyGeneration);
   },
 
   onNameInput(event) {
@@ -249,18 +269,28 @@ Page({
       });
   },
 
-  resolveHistoryImages(history, generation) {
-    const cloudImages = history.filter((record) => record.image && record.image.indexOf('cloud://') === 0);
+  resolveHistoryImages(history, reviews, generation) {
+    const cloudFileIds = [
+      ...history.map((record) => record.image),
+      ...reviews.map((review) => review.recordImage),
+    ].filter(isCloudFileId);
     const store = this.getStore();
-    if (!cloudImages.length || !store) return;
-    resolveCloudFileUrls(cloudImages.map((record) => record.image), store)
+    if (!cloudFileIds.length || !store) return;
+    resolveCloudFileUrls(cloudFileIds, store)
       .then((urls) => {
         if (!this.isCurrentImageResolution('history', generation)) return;
         this.setData({
-          history: history.map((record) => ({ ...record, image: urls.get(record.image) || record.image })),
-          reviews: this.data.reviews.map((review) => ({
+          history: history.map((record) => ({
+            ...record,
+            displayImage: isCloudFileId(record.image)
+              ? urls.get(record.image) || ''
+              : record.displayImage,
+          })),
+          reviews: reviews.map((review) => ({
             ...review,
-            recordImage: urls.get(review.recordImage) || review.recordImage,
+            displayRecordImage: isCloudFileId(review.recordImage)
+              ? urls.get(review.recordImage) || ''
+              : review.displayRecordImage,
           })),
         });
       })
@@ -313,14 +343,17 @@ Page({
         text: String(this.data.reviewText || '').trim(),
       });
       const detail = buildDishDetailViewModel(store.getState(), this.data.dishId);
+      const displayDetail = withHistoryDisplayImages(detail);
+      const historyGeneration = this.beginImageResolution('history');
       this.setData({
-        history: detail.history,
-        reviews: detail.reviews,
+        history: displayDetail.history,
+        reviews: displayDetail.reviews,
         reviewStats: detail.reviewStats,
         reviewingRecordId: '',
         reviewStars: 0,
         reviewText: '',
       });
+      this.resolveHistoryImages(displayDetail.history, displayDetail.reviews, historyGeneration);
       showToast('评价已保存', 'success');
     } catch (error) {
       showToast(error.message || '评价暂时无法保存');
@@ -456,7 +489,9 @@ Page({
         });
         const updatedDish = store.getState().dishes.find((item) => item.id === this.data.dishId);
         const detail = buildDishDetailViewModel(store.getState(), this.data.dishId);
+        const displayDetail = withHistoryDisplayImages(detail);
         const coverImage = updatedDish ? updatedDish.coverImage || '' : '';
+        const historyGeneration = this.beginImageResolution('history');
         this.setData({
           isEditingProfile: false,
           editProfileVisible: false,
@@ -468,13 +503,14 @@ Page({
           selectedCategory: updatedDish ? updatedDish.category || '' : this.data.selectedCategory,
           selectedTags: updatedDish && Array.isArray(updatedDish.tags) ? updatedDish.tags : tags,
           tagOptions: this.makeTagOptions(updatedDish && Array.isArray(updatedDish.tags) ? updatedDish.tags : tags),
-          history: detail.history,
-          reviews: detail.reviews,
+          history: displayDetail.history,
+          reviews: displayDetail.reviews,
           reviewStats: detail.reviewStats,
         });
         this.beginImageResolution('profilePreview');
         const generation = this.beginImageResolution('cover');
         this.resolveCloudImage(coverImage, 'dishCover', 'cover', generation);
+        this.resolveHistoryImages(displayDetail.history, displayDetail.reviews, historyGeneration);
         showToast('菜品信息已更新', 'success');
         return;
       }

@@ -2,7 +2,13 @@ const fs = require('node:fs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { addDish, createInitialState } = require('../services/domain');
+const {
+  addCookingRecord,
+  addDish,
+  createInitialState,
+  updateDishProfile,
+  upsertRecordReview,
+} = require('../services/domain');
 
 function loadPage(relativePath) {
   const modulePath = require.resolve(`../${relativePath}`);
@@ -146,7 +152,7 @@ test('dish detail lifecycle refreshes server fields without clearing review or r
     assert.deepEqual({
       name: page.data.name,
       dishCover: page.data.dishCover,
-      recordImage: page.data.history[0].image,
+      recordImage: page.data.history[0].displayImage,
       reviewingRecordId: page.data.reviewingRecordId,
       reviewStars: page.data.reviewStars,
       reviewText: page.data.reviewText,
@@ -168,7 +174,7 @@ test('dish detail lifecycle refreshes server fields without clearing review or r
     assert.deepEqual({
       name: page.data.name,
       dishCover: page.data.dishCover,
-      recordImage: page.data.history[0].image,
+      recordImage: page.data.history[0].displayImage,
       reviewingRecordId: page.data.reviewingRecordId,
       reviewStars: page.data.reviewStars,
       reviewText: page.data.reviewText,
@@ -249,31 +255,35 @@ test('dish detail ignores late image resolutions from an older snapshot', async 
 
     page.onShow();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(requests.slice(2).map((request) => request.ids), [
+    assert.deepEqual(requests.slice(-2).map((request) => request.ids), [
       [newCoverId],
       [newRecordId],
     ]);
 
-    requests[2].resolve(new Map([[newCoverId, 'https://cdn/new/new-cover.jpg']]));
-    requests[3].resolve(new Map([[newRecordId, 'https://cdn/new/new-record.jpg']]));
+    requests[requests.length - 2].resolve(new Map([[newCoverId, 'https://cdn/new/new-cover.jpg']]));
+    requests[requests.length - 1].resolve(new Map([[newRecordId, 'https://cdn/new/new-record.jpg']]));
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual({
       name: page.data.name,
       dishCover: page.data.dishCover,
-      recordImage: page.data.history[0].image,
+      recordImage: page.data.history[0].displayImage,
     }, {
       name: '新菜名',
       dishCover: 'https://cdn/new/new-cover.jpg',
       recordImage: 'https://cdn/new/new-record.jpg',
     });
 
-    requests[0].resolve(new Map([['cloud://family-meals/family-1/old-cover.jpg', 'https://cdn/old/old-cover.jpg']]));
-    requests[1].resolve(new Map([['cloud://family-meals/family-1/old-cover.jpg', 'https://cdn/old/old-record.jpg']]));
+    requests.slice(0, -2).forEach((request, index) => {
+      request.resolve(new Map([[
+        'cloud://family-meals/family-1/old-cover.jpg',
+        index % 2 === 0 ? 'https://cdn/old/old-cover.jpg' : 'https://cdn/old/old-record.jpg',
+      ]]));
+    });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual({
       name: page.data.name,
       dishCover: page.data.dishCover,
-      recordImage: page.data.history[0].image,
+      recordImage: page.data.history[0].displayImage,
       reviewingRecordId: page.data.reviewingRecordId,
       reviewStars: page.data.reviewStars,
       reviewText: page.data.reviewText,
@@ -330,9 +340,232 @@ test('profile edit transitions do not stale an in-flight history image resolutio
     });
     await new Promise((resolve) => setImmediate(resolve));
 
-    assert.equal(page.data.history[0].image, authorizedImageUrl);
-    assert.match(page.data.history[0].image, /^https:\/\//);
+    assert.equal(page.data.history[0].image, cloudImageId);
+    assert.equal(page.data.history[0].displayImage, authorizedImageUrl);
+    assert.match(page.data.history[0].displayImage, /^https:\/\//);
   } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail keeps durable history image ids and empty display URLs when initial resolution fails', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/history-failure.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Resolution failure dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  const recordId = state.cookingRecords[0].id;
+  state = upsertRecordReview(state, {
+    dishId: 'dish-1',
+    recordId,
+    memberId: 'member-1',
+    stars: 4.5,
+    text: 'Still private',
+  }, '2026-08-09T11:00:00.000Z');
+  const store = {
+    getState() { return state; },
+    async resolveImageUrls() { throw new Error('temporary URL unavailable'); },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual({
+      historyFileId: page.data.history[0].image,
+      historyDisplayUrl: page.data.history[0].displayImage,
+      reviewFileId: page.data.reviews[0].recordImage,
+      reviewDisplayUrl: page.data.reviews[0].displayRecordImage,
+    }, {
+      historyFileId: cloudImageId,
+      historyDisplayUrl: '',
+      reviewFileId: cloudImageId,
+      reviewDisplayUrl: '',
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail partial history resolution never falls back to unresolved cloud ids', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const firstImageId = 'cloud://env/family-meals/family-1/first.jpg';
+  const secondImageId = 'cloud://env/family-meals/family-1/second.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Partial resolution dish',
+    image: firstImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  state = addCookingRecord(state, {
+    dishId: 'dish-1',
+    image: secondImageId,
+    recordedAt: '2026-08-10T10:00:00.000Z',
+  }, '2026-08-10T10:00:00.000Z');
+  state = state.cookingRecords.reduce((nextState, record, index) => upsertRecordReview(nextState, {
+    dishId: 'dish-1',
+    recordId: record.id,
+    memberId: 'member-1',
+    stars: index ? 4 : 5,
+    text: `Review ${index + 1}`,
+  }, `2026-08-${11 + index}T10:00:00.000Z`), state);
+  const store = {
+    getState() { return state; },
+    async resolveImageUrls() {
+      return new Map([[firstImageId, 'https://cdn.example/first.jpg']]);
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const expectedHistoryIds = state.cookingRecords
+      .map((record) => ({ id: record.id, image: record.image }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const actualHistoryIds = page.data.history
+      .map((record) => ({ id: record.id, image: record.image }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    assert.deepEqual(actualHistoryIds, expectedHistoryIds);
+    const historyByFileId = new Map(page.data.history.map((record) => [record.image, record]));
+    const reviewsByFileId = new Map(page.data.reviews.map((review) => [review.recordImage, review]));
+
+    assert.equal(historyByFileId.get(firstImageId).displayImage, 'https://cdn.example/first.jpg');
+    assert.equal(historyByFileId.get(secondImageId).displayImage, '');
+    assert.equal(reviewsByFileId.get(firstImageId).displayRecordImage, 'https://cdn.example/first.jpg');
+    assert.equal(reviewsByFileId.get(secondImageId).displayRecordImage, '');
+    assert.deepEqual([...historyByFileId.keys()].sort(), [firstImageId, secondImageId].sort());
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('submitting a review restarts history resolution and ignores the older request', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/review-history.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Review mutation dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  state = {
+    ...state,
+    dishes: state.dishes.map((dish) => ({ ...dish, coverImage: '' })),
+  };
+  const recordId = state.cookingRecords[0].id;
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    rateRecord(input) {
+      state = upsertRecordReview(state, {
+        ...input,
+        memberId: state.currentMemberId,
+      }, '2026-08-09T12:00:00.000Z');
+    },
+    resolveImageUrls(ids) {
+      let resolve;
+      const request = { ids, settled: false };
+      request.promise = new Promise((done) => {
+        resolve = (value) => {
+          request.settled = true;
+          done(value);
+        };
+      });
+      request.resolve = resolve;
+      requests.push(request);
+      return request.promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = { showToast() {} };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    page.setData({ reviewingRecordId: recordId, reviewStars: 4.5, reviewText: 'Fresh review' });
+    page.submitReview();
+
+    assert.equal(requests.length, 2);
+    requests[1].resolve(new Map([[cloudImageId, 'https://cdn.example/new-review-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    requests[0].resolve(new Map([[cloudImageId, 'https://cdn.example/stale-review-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.data.history[0].image, cloudImageId);
+    assert.equal(page.data.history[0].displayImage, 'https://cdn.example/new-review-history.jpg');
+    assert.equal(page.data.reviews[0].recordImage, cloudImageId);
+    assert.equal(page.data.reviews[0].displayRecordImage, 'https://cdn.example/new-review-history.jpg');
+  } finally {
+    requests.filter((request) => !request.settled).forEach((request) => request.resolve(new Map()));
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('saving a dish profile restarts history resolution and ignores the older request', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/profile-history.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Profile mutation dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  state = {
+    ...state,
+    dishes: state.dishes.map((dish) => ({ ...dish, coverImage: '' })),
+  };
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    updateDish(input) {
+      state = updateDishProfile(state, input);
+    },
+    resolveImageUrls(ids) {
+      let resolve;
+      const request = { ids, settled: false };
+      request.promise = new Promise((done) => {
+        resolve = (value) => {
+          request.settled = true;
+          done(value);
+        };
+      });
+      request.resolve = resolve;
+      requests.push(request);
+      return request.promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = { showToast() {} };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1', mode: 'edit' });
+    page.setData({ nameDraft: 'Updated profile mutation dish' });
+    await page.save();
+
+    assert.equal(requests.length, 2);
+    requests[1].resolve(new Map([[cloudImageId, 'https://cdn.example/new-profile-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    requests[0].resolve(new Map([[cloudImageId, 'https://cdn.example/stale-profile-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.data.history[0].image, cloudImageId);
+    assert.equal(page.data.history[0].displayImage, 'https://cdn.example/new-profile-history.jpg');
+  } finally {
+    requests.filter((request) => !request.settled).forEach((request) => request.resolve(new Map()));
     global.getApp = originalGetApp;
     global.wx = originalWx;
   }

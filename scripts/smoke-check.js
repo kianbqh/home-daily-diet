@@ -19,6 +19,7 @@ const requiredFiles = [
   'cloudfunctions/family-access/logic.js',
   'cloudfunctions/family-access/package.json',
   'utils/format.js',
+  'utils/page-refresh.js',
   'utils/view-model.js',
   'components/dish-card/dish-card.js',
   'components/dish-card/dish-card.wxml',

@@ -82,3 +82,88 @@ test('automatic page refresh remains silent when cloud sync fails', async () => 
     global.wx = originalWx;
   }
 });
+
+test('manual page refresh swallows a store lookup failure after rendering and stopping', async () => {
+  const calls = [];
+  const originalWx = global.wx;
+  global.wx = {
+    stopPullDownRefresh() { calls.push('stop'); },
+    showToast() { calls.push('toast'); },
+  };
+  const page = {
+    getStore() {
+      throw new Error('store failure');
+    },
+    refresh() { calls.push('render'); },
+  };
+
+  try {
+    await syncPageFromCloud(page, { force: true, manual: true });
+    assert.deepEqual(calls, ['toast', 'render', 'stop']);
+  } finally {
+    global.wx = originalWx;
+  }
+});
+
+test('manual page refresh rejects only after it stops the native animation when rendering fails', async () => {
+  const calls = [];
+  const originalWx = global.wx;
+  global.wx = {
+    stopPullDownRefresh() { calls.push('stop'); },
+    showToast() { calls.push('toast'); },
+  };
+  const page = {
+    getStore() {
+      return {
+        async syncFromCloud(options) { calls.push(options.force ? 'force' : 'auto'); },
+      };
+    },
+    refresh() {
+      calls.push('render');
+      throw new Error('render failure');
+    },
+  };
+
+  try {
+    await assert.rejects(
+      syncPageFromCloud(page, { force: true, manual: true }),
+      /render failure/
+    );
+    assert.deepEqual(calls, ['force', 'render', 'stop']);
+  } finally {
+    global.wx = originalWx;
+  }
+});
+
+test('manual page refresh stops the native animation when failure feedback throws', async () => {
+  const calls = [];
+  const originalWx = global.wx;
+  global.wx = {
+    stopPullDownRefresh() { calls.push('stop'); },
+    showToast() {
+      calls.push('toast');
+      throw new Error('toast failure');
+    },
+  };
+  const page = {
+    getStore() {
+      return {
+        async syncFromCloud(options) {
+          calls.push(options.force ? 'force' : 'auto');
+          throw new Error('network unavailable');
+        },
+      };
+    },
+    refresh() { calls.push('render'); },
+  };
+
+  try {
+    await assert.rejects(
+      syncPageFromCloud(page, { force: true, manual: true }),
+      /toast failure/
+    );
+    assert.deepEqual(calls, ['force', 'toast', 'render', 'stop']);
+  } finally {
+    global.wx = originalWx;
+  }
+});

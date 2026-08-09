@@ -1,9 +1,9 @@
 async function syncPageFromCloud(page, options = {}) {
   const force = Boolean(options.force);
   const manual = Boolean(options.manual);
-  const store = page && typeof page.getStore === 'function' ? page.getStore() : null;
 
   try {
+    const store = page && typeof page.getStore === 'function' ? page.getStore() : null;
     if (store && typeof store.syncFromCloud === 'function') {
       await store.syncFromCloud({ force });
       if (manual && store.getSyncStatus && store.getSyncStatus().status === 'error') {
@@ -15,9 +15,12 @@ async function syncPageFromCloud(page, options = {}) {
       wx.showToast({ title: '云端同步失败，请稍后重试', icon: 'none' });
     }
   } finally {
-    if (page && typeof page.refresh === 'function') page.refresh();
-    if (manual && typeof wx !== 'undefined' && typeof wx.stopPullDownRefresh === 'function') {
-      wx.stopPullDownRefresh();
+    try {
+      if (page && typeof page.refresh === 'function') page.refresh();
+    } finally {
+      if (manual && typeof wx !== 'undefined' && typeof wx.stopPullDownRefresh === 'function') {
+        wx.stopPullDownRefresh();
+      }
     }
   }
 }

@@ -45,6 +45,90 @@ test('refreshable pages expose pull-down lifecycle methods and enable native ref
   });
 });
 
+test('refreshable page onShow handlers run their automatic sync paths', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const state = createInitialState({ memberId: 'member-1' });
+  const summary = {
+    id: 'family-1',
+    name: '我们家',
+    memberCount: 1,
+    members: [{ id: 'member-1', displayName: '我' }],
+    inviteCode: '',
+    syncStatus: 'ready',
+  };
+  let syncCalls = 0;
+  const store = {
+    async syncFromCloud() { syncCalls += 1; },
+    getState() { return state; },
+    getFamilySummary() { return summary; },
+    async getInvite() { return null; },
+    getMeal() { return null; },
+    ensureMeal() {},
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const pagePaths = [
+    'pages/index/index.js',
+    'pages/dishes/dishes.js',
+    'pages/dish-edit/dish-edit.js',
+    'pages/meal/meal.js',
+    'pages/family/family.js',
+    'pages/trash/trash.js',
+  ];
+
+  try {
+    pagePaths.forEach((pagePath) => {
+      const page = createPageInstance(loadPage(pagePath));
+      assert.doesNotThrow(() => page.onShow(), `${pagePath} should start automatic sync`);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(syncCalls, pagePaths.length);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('meal pull-down during invite joining stops native refresh without syncing or creating a meal', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const state = addDish(
+    createInitialState({ memberId: 'member-1' }),
+    { name: '番茄炒蛋' },
+    '2026-08-09T10:00:00.000Z'
+  );
+  let syncCalls = 0;
+  let ensuredMeals = 0;
+  let stopCalls = 0;
+  const store = {
+    async syncFromCloud() { syncCalls += 1; },
+    getState() { return state; },
+    getMeal() { return null; },
+    ensureMeal() { ensuredMeals += 1; },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {
+    stopPullDownRefresh() { stopCalls += 1; },
+  };
+  const page = createPageInstance(loadPage('pages/meal/meal.js'), {
+    date: '2026-08-09',
+    joining: true,
+  });
+
+  try {
+    await page.onPullDownRefresh();
+    assert.deepEqual({ syncCalls, ensuredMeals, stopCalls }, {
+      syncCalls: 0,
+      ensuredMeals: 0,
+      stopCalls: 1,
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('existing dish page saves a member rating and exposes removal separately from recording', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

@@ -59,6 +59,13 @@ Page({
     syncPageFromCloud(this).catch(() => {});
   },
   onPullDownRefresh() {
+    if (this.data.joining) {
+      return Promise.resolve().then(() => {
+        if (typeof wx !== 'undefined' && typeof wx.stopPullDownRefresh === 'function') {
+          wx.stopPullDownRefresh();
+        }
+      });
+    }
     return syncPageFromCloud(this, { force: true, manual: true });
   },
   confirmJoinFromMeal(inviteCode, sessionId, fallbackDate) {

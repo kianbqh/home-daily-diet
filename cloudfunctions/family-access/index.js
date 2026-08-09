@@ -261,24 +261,29 @@ async function requireMember(db, config, familyId, openid) {
   return member;
 }
 
-function uniqueFileIds(fileIds) {
+function normalizeFileIds(fileIds) {
   const values = Array.isArray(fileIds) ? fileIds : [fileIds];
-  return [...new Set(values.map((fileId) => String(fileId || '').trim()).filter(Boolean))];
+  return values.map((fileId) => String(fileId || '').trim()).filter(Boolean);
+}
+
+function uniqueFileIds(fileIds) {
+  return [...new Set(normalizeFileIds(fileIds))];
 }
 
 function familyFileAllowed(fileID, familyId, prefix = 'family-meals/') {
-  return String(fileID || '').startsWith('cloud://')
-    && String(fileID).includes(`/${prefix}${familyId}/`);
+  const match = /^cloud:\/\/[^/]+\/(.+)$/.exec(String(fileID || ''));
+  return Boolean(match && match[1].startsWith(`${prefix}${familyId}/`));
 }
 
 async function resolveFiles(event, context, db, config, options) {
   const familyId = requireValue(event.familyId, 'FAMILY_REQUIRED', '缺少家庭信息');
   await requireMember(db, config, familyId, context.OPENID);
-  const fileIds = uniqueFileIds(event.fileIds);
-  if (fileIds.length > MAX_RESOLVE_FILES) {
+  const requestedFileIds = normalizeFileIds(event.fileIds);
+  const uniqueIds = uniqueFileIds(requestedFileIds);
+  if (uniqueIds.length > MAX_RESOLVE_FILES) {
     throw createAccessError('FILE_LIMIT_EXCEEDED', '单次最多解析 50 个文件');
   }
-  const allowedIds = fileIds.filter((fileID) => familyFileAllowed(fileID, familyId));
+  const allowedIds = uniqueIds.filter((fileID) => familyFileAllowed(fileID, familyId));
   const resolved = new Map();
   if (allowedIds.length && options.fileApi && typeof options.fileApi.getTempFileURL === 'function') {
     try {
@@ -293,7 +298,7 @@ async function resolveFiles(event, context, db, config, options) {
     }
   }
   return {
-    files: fileIds.map((fileID) => {
+    files: requestedFileIds.map((fileID) => {
       if (!familyFileAllowed(fileID, familyId)) {
         return { fileID, tempFileURL: '', code: 'FILE_ACCESS_DENIED' };
       }

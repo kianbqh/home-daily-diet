@@ -63,6 +63,75 @@ test('reuses a successful resolved image URL from the thirty-minute memory cache
   assert.equal(resolveCalls, 1);
 });
 
+test('refetches a resolved image URL at the exact thirty-minute expiration boundary', async () => {
+  let clockMs = 0;
+  let resolveCalls = 0;
+  const fileId = 'cloud://env/family-meals/family-images/photo.jpg';
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-images' }),
+    clock: () => clockMs,
+    cloudSync: {
+      async resolveFiles() {
+        resolveCalls += 1;
+        return [{ fileID: fileId, tempFileURL: `https://cdn.example/photo-${resolveCalls}.jpg` }];
+      },
+    },
+  });
+
+  const first = await store.resolveImageUrls([fileId]);
+  clockMs = 30 * 60 * 1000;
+  const second = await store.resolveImageUrls([fileId]);
+
+  assert.equal(first.get(fileId), 'https://cdn.example/photo-1.jpg');
+  assert.equal(second.get(fileId), 'https://cdn.example/photo-2.jpg');
+  assert.equal(resolveCalls, 2);
+});
+
+test('splits more than fifty unresolved image IDs into bounded cloud requests', async () => {
+  const batches = [];
+  const fileIds = Array.from({ length: 51 }, (_, index) => `cloud://env/family-meals/family-images/${index}.jpg`);
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-images' }),
+    cloudSync: {
+      async resolveFiles(familyId, ids) {
+        assert.equal(familyId, 'family-images');
+        batches.push(ids);
+        return ids.map((fileID) => ({ fileID, tempFileURL: `https://cdn.example/${fileID.split('/').pop()}` }));
+      },
+    },
+  });
+
+  const urls = await store.resolveImageUrls(fileIds);
+
+  assert.deepEqual(batches.map((batch) => batch.length), [50, 1]);
+  assert.equal(urls.size, 51);
+  assert.equal(urls.get(fileIds[50]), 'https://cdn.example/50.jpg');
+});
+
+test('does not cache an authorized file that the cloud function failed to resolve', async () => {
+  let resolveCalls = 0;
+  const fileId = 'cloud://env/family-meals/family-images/missing.jpg';
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState: createInitialState({ familyId: 'family-images' }),
+    cloudSync: {
+      async resolveFiles() {
+        resolveCalls += 1;
+        return [{ fileID: fileId, tempFileURL: '', code: 'FILE_RESOLVE_FAILED' }];
+      },
+    },
+  });
+
+  const first = await store.resolveImageUrls([fileId]);
+  const second = await store.resolveImageUrls([fileId]);
+
+  assert.equal(first.has(fileId), false);
+  assert.equal(second.has(fileId), false);
+  assert.equal(resolveCalls, 2);
+});
+
 test('repairs an incomplete persisted state before the family page reads it', () => {
   const storage = createMemoryStorage({ version: 1 });
   const store = createStore({

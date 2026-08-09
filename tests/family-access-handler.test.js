@@ -378,6 +378,149 @@ test('resolves only a member family image path and denies other requested files'
   assert.equal(resolved.data.files[1].code, 'FILE_ACCESS_DENIED');
 });
 
+test('rejects prefixed and nested family roots without calling the file SDK', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  let fileApiCalls = 0;
+  const fileIds = [
+    'cloud://env/other/family-meals/family-1/photo.jpg',
+    'cloud://env/family-meals/family-2/nested/family-meals/family-1/private.jpg',
+  ];
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds,
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL() {
+        fileApiCalls += 1;
+        return { fileList: [] };
+      },
+    },
+  });
+
+  assert.equal(fileApiCalls, 0);
+  assert.deepEqual(resolved.data.files, fileIds.map((fileID) => ({
+    fileID,
+    tempFileURL: '',
+    code: 'FILE_ACCESS_DENIED',
+  })));
+});
+
+test('preserves duplicate resolveFiles results in original request order', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const first = 'cloud://env/family-meals/family-1/first.jpg';
+  const second = 'cloud://env/family-meals/family-1/second.jpg';
+  let requestedFromSdk = [];
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [first, second, first],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL({ fileList }) {
+        requestedFromSdk = fileList;
+        return {
+          fileList: fileList.map((fileID) => ({
+            fileID,
+            tempFileURL: `https://cdn/${fileID.split('/').pop()}`,
+          })),
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(requestedFromSdk, [first, second]);
+  assert.deepEqual(resolved.data.files.map((file) => file.fileID), [first, second, first]);
+  assert.deepEqual(resolved.data.files.map((file) => file.tempFileURL), [
+    'https://cdn/first.jpg',
+    'https://cdn/second.jpg',
+    'https://cdn/first.jpg',
+  ]);
+});
+
+test('keeps denied files denied when the SDK returns only partial file results', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const successful = 'cloud://env/family-meals/family-1/photo.jpg';
+  const failed = 'cloud://env/family-meals/family-1/missing.jpg';
+  const denied = 'cloud://env/family-meals/family-2/private.jpg';
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [successful, failed, denied],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL() {
+        return {
+          fileList: [
+            { fileID: successful, tempFileURL: 'https://cdn/photo.jpg' },
+            { fileID: failed, code: 'FILE_NOT_FOUND', tempFileURL: '' },
+          ],
+        };
+      },
+    },
+  });
+
+  assert.equal(resolved.data.files[0].tempFileURL, 'https://cdn/photo.jpg');
+  assert.equal(resolved.data.files[1].code, 'FILE_RESOLVE_FAILED');
+  assert.equal(resolved.data.files[2].code, 'FILE_ACCESS_DENIED');
+});
+
+test('converts rejected SDK lookups into per-file failures without overriding denial', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const allowed = 'cloud://env/family-meals/family-1/photo.jpg';
+  const denied = 'cloud://env/family-meals/family-2/private.jpg';
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [allowed, denied],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL() {
+        throw new Error('storage unavailable');
+      },
+    },
+  });
+
+  assert.equal(resolved.data.files[0].code, 'FILE_RESOLVE_FAILED');
+  assert.equal(resolved.data.files[1].code, 'FILE_ACCESS_DENIED');
+});
+
 test('non-members cannot resolve family image URLs', async () => {
   const db = createMemoryDatabase({
     family_states: { 'family-1': familyState('family-1') },

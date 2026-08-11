@@ -124,6 +124,28 @@ test('dish detail uses five complete visual stars and a modal profile editor', (
   assert.doesNotMatch(template, /src="\{\{item\.(?:image|recordImage)\}\}"/);
 });
 
+test('dish detail display photos are wired to full-screen preview', () => {
+  const template = read('pages/dish-edit/dish-edit.wxml');
+
+  assert.match(template, /class="dish-hero-image"[^>]*data-src="\{\{dishCover\}\}"[^>]*bindtap="previewImage"/);
+  assert.match(template, /class="history-image"[^>]*data-src="\{\{item\.displayImage\}\}"[^>]*bindtap="previewImage"/);
+  assert.match(template, /class="review-detail-image"[^>]*data-src="\{\{item\.displayRecordImage\}\}"[^>]*bindtap="previewImage"/);
+});
+
+test('profile editor action buttons share a centered layout', () => {
+  const styles = read('pages/dish-edit/dish-edit.wxss');
+  const match = styles.match(/\.edit-profile-actions button\s*\{([^}]*)\}/);
+
+  assert.ok(match, 'profile editor action button rule should exist');
+  const rule = match[1];
+  assert.match(rule, /display:\s*flex/);
+  assert.match(rule, /align-items:\s*center/);
+  assert.match(rule, /justify-content:\s*center/);
+  assert.match(rule, /box-sizing:\s*border-box/);
+  assert.match(rule, /border-radius:\s*16rpx/);
+  assert.match(rule, /line-height:\s*1/);
+});
+
 test('cloud image helper delegates CloudBase file IDs to the Store without changing local URLs', async () => {
   const { resolveCloudFileUrls } = require('../utils/cloud-image');
   const store = {

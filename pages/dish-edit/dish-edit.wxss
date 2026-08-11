@@ -472,12 +472,17 @@
 }
 
 .edit-profile-actions button {
+  display: flex;
   flex: 1;
-  height: 82rpx;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 84rpx;
   margin: 0;
   padding: 0 18rpx;
+  border-radius: 16rpx;
   font-size: 26rpx;
-  line-height: 1.2;
+  line-height: 1;
 }
 
 .record-field + .record-field {

@@ -249,6 +249,34 @@ Page({
     });
   },
 
+  previewImage(event) {
+    const current = String(
+      event && event.currentTarget && event.currentTarget.dataset
+        ? event.currentTarget.dataset.src || ''
+        : ''
+    ).trim();
+    if (!current
+      || isCloudFileId(current)
+      || typeof wx === 'undefined'
+      || typeof wx.previewImage !== 'function') return;
+
+    const history = Array.isArray(this.data.history) ? this.data.history : [];
+    const reviews = Array.isArray(this.data.reviews) ? this.data.reviews : [];
+    const candidates = [
+      this.data.dishCover,
+      ...history.map((record) => record.displayImage),
+      ...reviews.map((review) => review.displayRecordImage),
+    ];
+    const urls = [...new Set(candidates
+      .map((url) => String(url || '').trim())
+      .filter((url) => url && !isCloudFileId(url)))];
+
+    wx.previewImage({
+      current,
+      urls: urls.includes(current) ? urls : [current, ...urls],
+    });
+  },
+
   resolveCloudImage(fileId, field, scope, generation) {
     if (!fileId) return;
     if (!isCloudFileId(fileId)) {

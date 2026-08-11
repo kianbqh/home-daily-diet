@@ -4,7 +4,7 @@
   <view class="page-subtitle">{{isArchived ? '这道菜已在回收站，历史制作记录和评价仍可查看。' : (isExisting ? '每次制作都单独留一条记录，评价也对应这一次。' : '先记下菜名，照片、分类和餐次都可以按需要补充。')}}</view>
 
   <view wx:if="{{isExisting}}" class="card-surface dish-hero-card">
-    <image wx:if="{{dishCover}}" class="dish-hero-image" src="{{dishCover}}" mode="aspectFill" />
+    <image wx:if="{{dishCover}}" class="dish-hero-image" data-src="{{dishCover}}" bindtap="previewImage" src="{{dishCover}}" mode="aspectFill" />
     <view wx:else class="dish-hero-placeholder">
       <text class="dish-hero-icon">🥢</text>
       <text>还没有封面照片</text>
@@ -43,7 +43,7 @@
     </view>
     <view wx:for="{{history}}" wx:key="id" class="history-card">
       <view class="history-media">
-        <image wx:if="{{item.displayImage}}" class="history-image" src="{{item.displayImage}}" mode="aspectFill" />
+        <image wx:if="{{item.displayImage}}" class="history-image" data-src="{{item.displayImage}}" bindtap="previewImage" src="{{item.displayImage}}" mode="aspectFill" />
         <view wx:else class="history-placeholder">🍽</view>
       </view>
       <view class="history-content">
@@ -94,7 +94,7 @@
         </view>
         <text wx:if="{{item.text}}" class="review-text">{{item.text}}</text>
         <view wx:if="{{item.displayRecordImage}}" class="review-record-photo">
-          <image src="{{item.displayRecordImage}}" mode="aspectFill" />
+          <image class="review-detail-image" data-src="{{item.displayRecordImage}}" bindtap="previewImage" src="{{item.displayRecordImage}}" mode="aspectFill" />
           <text>这次制作</text>
         </view>
       </view>

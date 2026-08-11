@@ -96,6 +96,42 @@ test('refreshable page onShow handlers run their automatic sync paths', async ()
   }
 });
 
+test('dish detail previews the tapped photo with all resolved detail photos', () => {
+  const originalWx = global.wx;
+  let previewOptions = null;
+  global.wx = {
+    previewImage(options) {
+      previewOptions = options;
+    },
+  };
+  const coverUrl = 'https://cdn.example/cover.jpg';
+  const recordUrl = 'https://cdn.example/record.jpg';
+  const reviewUrl = 'https://cdn.example/review.jpg';
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'), {
+    dishCover: coverUrl,
+    history: [
+      { id: 'record-1', displayImage: recordUrl },
+      { id: 'record-2', displayImage: '' },
+    ],
+    reviews: [
+      { id: 'review-1', displayRecordImage: reviewUrl },
+      { id: 'review-2', displayRecordImage: recordUrl },
+      { id: 'review-3', displayRecordImage: 'cloud://env/unresolved.jpg' },
+    ],
+  });
+
+  try {
+    page.previewImage({ currentTarget: { dataset: { src: recordUrl } } });
+
+    assert.deepEqual(previewOptions, {
+      current: recordUrl,
+      urls: [coverUrl, recordUrl, reviewUrl],
+    });
+  } finally {
+    global.wx = originalWx;
+  }
+});
+
 test('dish detail lifecycle refreshes server fields without clearing review or record-photo drafts', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

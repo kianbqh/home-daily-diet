@@ -8,6 +8,7 @@ const {
   RECORD_ACTION_CONTRACTS,
   RECORD_ID_ACTIONS,
   RECORD_SCOPED_ACTIONS,
+  createCloudFileApi,
   handleAction,
   main,
 } = require('../cloudfunctions/recipe-assistant');
@@ -1166,6 +1167,23 @@ function recordingServices(overrides = {}) {
   };
 }
 
+function createMpeg2Layer3Frames(frameCount = 4) {
+  const bitrateKbps = 48;
+  const sampleRateHz = 16000;
+  const frameLength = Math.floor((72000 * bitrateKbps) / sampleRateHz);
+  const header = 0xffe00000
+    | (0b10 << 19)
+    | (0b01 << 17)
+    | (1 << 16)
+    | (6 << 12)
+    | (2 << 10);
+  return Buffer.concat(Array.from({ length: frameCount }, () => {
+    const frame = Buffer.alloc(frameLength);
+    frame.writeUInt32BE(header >>> 0, 0);
+    return frame;
+  }));
+}
+
 async function reserveOwnedRecording(db, services = recordingServices(), extra = {}) {
   const result = await invoke(db, {
     action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1',
@@ -1408,6 +1426,161 @@ test('deletion while ASR submission is pending prevents a late result from resur
   const stored = db.records('recipe_recordings').get('recording-race');
   assert.equal(stored.status, 'deleted');
   assert.notEqual(stored.asrTaskId, 'late-task');
+});
+
+test('production file adapter downloads and parses trusted MP3 bytes without retaining client metadata', async () => {
+  const content = createMpeg2Layer3Frames(4);
+  const downloads = [];
+  const fileApi = createCloudFileApi({
+    async downloadFile(input) {
+      downloads.push(input);
+      return { fileContent: content };
+    },
+  });
+
+  const metadata = await fileApi.getFileInfo({ fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3' });
+
+  assert.deepEqual(downloads, [{ fileID: 'cloud://env/families/family-a/recipe-audio/audio.mp3' }]);
+  assert.deepEqual(metadata, {
+    fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3',
+    byteLength: 864,
+    format: 'mp3',
+    durationMs: 144,
+  });
+});
+
+test('production file adapter fails closed without trustworthy bounded MP3 bytes', async () => {
+  const cases = [
+    ['missing downloadFile', {}, 'FILE_METADATA_UNAVAILABLE'],
+    ['missing content', { async downloadFile() { return {}; } }, 'FILE_METADATA_UNAVAILABLE'],
+    ['non-buffer content', { async downloadFile() { return { fileContent: new Uint8Array([1, 2, 3]) }; } }, 'FILE_METADATA_UNAVAILABLE'],
+    ['non-MP3 bytes', { async downloadFile() { return { fileContent: Buffer.from('not an mp3') }; } }, 'FILE_METADATA_UNAVAILABLE'],
+    ['oversized bytes', { async downloadFile() { return { fileContent: Buffer.alloc(5 * 1024 * 1024 + 1) }; } }, 'FILE_TOO_LARGE'],
+  ];
+
+  for (const [label, cloud, expectedCode] of cases) {
+    const fileApi = createCloudFileApi(cloud);
+    await assert.rejects(
+      fileApi.getFileInfo({ fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3' }),
+      (error) => error && error.code === expectedCode,
+      label
+    );
+  }
+});
+
+test('attachRecordWorkspace cannot clear expiration or resurrect a recording deleted after listing', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'reserved', draftExpiresAt: 700, fileId: '',
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const baseRepository = createRecipeRepository(db, DEFAULT_CONFIG);
+  let raced = false;
+  const repository = {
+    ...baseRepository,
+    async listRecordings(...args) {
+      const listed = await baseRepository.listRecordings(...args);
+      if (!raced) {
+        raced = true;
+        await baseRepository.setRecording('audio', {
+          ...listed[0], status: 'deleted', deletedAt: 99, audioDeletePending: false,
+        });
+      }
+      return listed;
+    },
+  };
+
+  const result = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', { repository });
+
+  assert.equal(result.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'deleted');
+  assert.equal(stored.deletedAt, 99);
+  assert.equal(stored.draftExpiresAt, 700);
+});
+
+test('tombstone cleanup targets the fileId committed after the initial delete read', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'reserved', draftExpiresAt: 700, fileId: '', durationMs: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const baseRepository = createRecipeRepository(db, DEFAULT_CONFIG);
+  let reads = 0;
+  const uploadedFileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const repository = {
+    ...baseRepository,
+    async getRecording(...args) {
+      const stale = await baseRepository.getRecording(...args);
+      reads += 1;
+      if (reads === 2) {
+        await baseRepository.setRecording('audio', {
+          ...stale, status: 'transcribing', fileId: uploadedFileId, byteLength: 864,
+          durationMs: 144, durationCommitted: true,
+        });
+      }
+      return stale;
+    },
+  };
+  const services = recordingServices();
+
+  const result = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', { ...services, repository });
+
+  assert.equal(result.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'deleted');
+  assert.equal(services.deleted.includes(uploadedFileId) || stored.audioDeletePending === true, true);
+  assert.equal(stored.fileId === '' || stored.fileId === uploadedFileId, true);
+});
+
+test('deleteRecordingAudio re-reads current text and file state before marking deletion pending', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'ready', fileId: 'cloud://env/families/family-a/recipe-audio/old.mp3',
+      rawTranscript: '原文字', editedTranscript: '原文字', transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const baseRepository = createRecipeRepository(db, DEFAULT_CONFIG);
+  const currentFileId = 'cloud://env/families/family-a/recipe-audio/current.mp3';
+  let reads = 0;
+  const repository = {
+    ...baseRepository,
+    async getRecording(...args) {
+      const stale = await baseRepository.getRecording(...args);
+      reads += 1;
+      if (reads === 2) {
+        await baseRepository.setRecording('audio', {
+          ...stale, fileId: currentFileId, editedTranscript: '家人刚修订的文字', transcriptRevision: 1,
+        });
+      }
+      return stale;
+    },
+  };
+  const services = recordingServices();
+
+  const result = await invoke(db, {
+    action: 'deleteRecordingAudio', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', { ...services, repository });
+
+  assert.equal(result.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.editedTranscript, '家人刚修订的文字');
+  assert.equal(stored.transcriptRevision, 1);
+  assert.deepEqual(services.deleted, [currentFileId]);
+  assert.equal(stored.fileId, '');
 });
 
 test('workspace counters serialize concurrent reservations and release duration on tombstone deletion', async () => {

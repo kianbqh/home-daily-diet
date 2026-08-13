@@ -411,12 +411,22 @@ async function attachRecordWorkspace(repository, member, familyId, dishId, rawRe
   const recordId = requireValue(rawRecordId, 'RECORD_REQUIRED', '缺少制作记录');
   const recordings = await repository.listRecordings(familyId, dishId, recordId);
   for (const recording of recordings) {
-    if (recording.status !== 'deleted' && recording.draftExpiresAt != null) {
-      await repository.setRecording(recording._id, { ...recording, draftExpiresAt: null, updatedBy: member.memberId, updatedAt: now });
-    }
+    await repository.runTransaction(async (transaction) => {
+      const current = await transaction.getRecording(familyId, dishId, recording._id);
+      if (!current || current.status === 'deleted' || current.draftExpiresAt == null) return current;
+      return transaction.setRecording(current._id, {
+        ...current, draftExpiresAt: null, updatedBy: member.memberId, updatedAt: now,
+      });
+    });
   }
   const draft = await repository.getDraft({ familyId, dishId, recordId });
-  if (draft && draft.draftExpiresAt != null) await repository.setDraft(draft._id, { ...draft, draftExpiresAt: null, updatedAt: now });
+  if (draft) {
+    await repository.runTransaction(async (transaction) => {
+      const current = await transaction.getDraft({ familyId, dishId, draftId: draft._id, recordId });
+      if (!current || current.status === 'cancelled' || current.draftExpiresAt == null) return current;
+      return transaction.setDraft(current._id, { ...current, draftExpiresAt: null, updatedAt: now });
+    });
+  }
   return { attached: true };
 }
 
@@ -435,19 +445,31 @@ async function deleteRecordingAudio(repository, member, familyId, dishId, event,
   const recordingId = requireValue(event.recordingId, 'RECORDING_REQUIRED', '缺少录音片段');
   const recording = await repository.getRecording(familyId, dishId, recordingId);
   if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
-  if (recording.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
-  if (!String(recording.editedTranscript || recording.rawTranscript || '').trim()) {
-    throw createRecipeError('TRANSCRIPT_REQUIRED', '删除语音前请先保留文字内容');
-  }
-  const fileId = String(recording.fileId || '');
-  if (!fileId) return { recording };
-  let pending = await repository.setRecording(recordingId, {
-    ...recording, audioDeletePending: true, updatedBy: member.memberId, updatedAt: now,
+  const prepared = await repository.runTransaction(async (transaction) => {
+    const current = await transaction.getRecording(familyId, dishId, recordingId);
+    if (!current) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
+    if (current.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
+    if (!String(current.editedTranscript || current.rawTranscript || '').trim()) {
+      throw createRecipeError('TRANSCRIPT_REQUIRED', '删除语音前请先保留文字内容');
+    }
+    const cleanupFileId = String(current.fileId || '');
+    if (!cleanupFileId) return { recording: current, cleanupFileId };
+    const pending = await transaction.setRecording(recordingId, {
+      ...current, audioDeletePending: true, updatedBy: member.memberId, updatedAt: now,
+    });
+    return { recording: pending, cleanupFileId };
   });
+  if (!prepared.cleanupFileId) return { recording: prepared.recording };
+  let pending = prepared.recording;
   try {
-    await deleteCloudFile(fileApi, fileId);
-    pending = await repository.setRecording(recordingId, {
-      ...pending, fileId: '', audioDeletedAt: now, audioDeletePending: false, updatedBy: member.memberId, updatedAt: now,
+    await deleteCloudFile(fileApi, prepared.cleanupFileId);
+    pending = await repository.runTransaction(async (transaction) => {
+      const current = await transaction.getRecording(familyId, dishId, recordingId);
+      if (!current || current.fileId !== prepared.cleanupFileId) return current || pending;
+      return transaction.setRecording(recordingId, {
+        ...current, fileId: '', audioDeletedAt: now, audioDeletePending: false,
+        updatedBy: member.memberId, updatedAt: now,
+      });
     });
   } catch (_) {
     // The durable pending flag makes the next call a safe retry.
@@ -476,10 +498,11 @@ async function deleteRecording(repository, member, familyId, dishId, event, file
 }
 
 async function tombstoneRecording(repository, member, recording, fileApi, now) {
-  const fileId = String(recording.fileId || '');
-  let tombstone = await repository.runTransaction(async (transaction) => {
+  const prepared = await repository.runTransaction(async (transaction) => {
     const current = await transaction.getRecording(recording.familyId, recording.dishId, recording._id);
-    if (!current || current.status === 'deleted') return current || recording;
+    if (!current) return { tombstone: recording, cleanupFileId: '' };
+    const cleanupFileId = String(current.fileId || '');
+    if (current.status === 'deleted') return { tombstone: current, cleanupFileId };
     const state = await transaction.getWorkspaceState(current.familyId, current.dishId, current.recordId);
     if (state) {
       await transaction.setWorkspaceState(current.familyId, current.dishId, current.recordId, {
@@ -490,17 +513,23 @@ async function tombstoneRecording(repository, member, recording, fileApi, now) {
         updatedAt: now,
       });
     }
-    return transaction.setRecording(current._id, {
-      ...current, status: 'deleted', deletedAt: now, audioDeletePending: Boolean(fileId),
+    const tombstone = await transaction.setRecording(current._id, {
+      ...current, status: 'deleted', deletedAt: now, audioDeletePending: Boolean(cleanupFileId),
       updatedBy: member.memberId, updatedAt: now,
     });
+    return { tombstone, cleanupFileId };
   });
-  if (fileId) {
+  let tombstone = prepared.tombstone;
+  if (prepared.cleanupFileId) {
     try {
-      await deleteCloudFile(fileApi, fileId);
-      tombstone = await repository.setRecording(recording._id, {
-        ...tombstone, fileId: '', audioDeletedAt: now, audioDeletePending: false,
-        updatedBy: member.memberId, updatedAt: now,
+      await deleteCloudFile(fileApi, prepared.cleanupFileId);
+      tombstone = await repository.runTransaction(async (transaction) => {
+        const current = await transaction.getRecording(recording.familyId, recording.dishId, recording._id);
+        if (!current || current.fileId !== prepared.cleanupFileId) return current || tombstone;
+        return transaction.setRecording(recording._id, {
+          ...current, fileId: '', audioDeletedAt: now, audioDeletePending: false,
+          updatedBy: member.memberId, updatedAt: now,
+        });
       });
     } catch (_) {
       // Keep the tombstone and retry marker; never resurrect deleted content.
@@ -774,14 +803,24 @@ async function main(event = {}, context = {}) {
 }
 
 function createCloudFileApi(cloud) {
-  const api = {};
-  if (cloud && typeof cloud.getFileInfo === 'function') {
-    api.getFileInfo = async ({ fileId }) => {
-      const result = await cloud.getFileInfo({ fileList: [fileId] });
-      const list = result && result.fileList;
-      return Array.isArray(list) && list[0] ? list[0] : result;
-    };
-  }
+  const api = {
+    async getFileInfo({ fileId }) {
+      if (!cloud || typeof cloud.downloadFile !== 'function') {
+        throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+      }
+      try {
+        const result = await cloud.downloadFile({ fileID: fileId });
+        const content = Buffer.isBuffer(result) ? result : result && result.fileContent;
+        if (!Buffer.isBuffer(content)) throw new Error('downloaded content is not a Buffer');
+        if (content.length > MAX_AUDIO_BYTES) throw createRecipeError('FILE_TOO_LARGE', '录音文件不能超过 5 MB');
+        const durationMs = parseMp3Duration(content);
+        return { fileId, byteLength: content.length, format: 'mp3', durationMs };
+      } catch (error) {
+        if (error && error.name === 'RecipeAssistantError') throw error;
+        throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+      }
+    },
+  };
   if (cloud && typeof cloud.getTempFileURL === 'function') {
     api.getTempFileURL = (input) => cloud.getTempFileURL(input);
   }
@@ -791,11 +830,74 @@ function createCloudFileApi(cloud) {
   return api;
 }
 
+function parseMp3Duration(content) {
+  let offset = skipId3v2(content);
+  let frameCount = 0;
+  let durationMs = 0;
+  while (offset < content.length) {
+    if (content.length - offset === 128 && content.toString('ascii', offset, offset + 3) === 'TAG') {
+      offset = content.length;
+      break;
+    }
+    const frame = parseMp3FrameHeader(content, offset);
+    if (!frame || offset + frame.byteLength > content.length) {
+      throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+    }
+    frameCount += 1;
+    durationMs += (frame.samplesPerFrame * 1000) / frame.sampleRateHz;
+    offset += frame.byteLength;
+  }
+  if (frameCount < 2 || offset !== content.length) {
+    throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+  }
+  return Math.round(durationMs);
+}
+
+function skipId3v2(content) {
+  if (content.length < 3 || content.toString('ascii', 0, 3) !== 'ID3') return 0;
+  if (content.length < 10) throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+  const sizeBytes = [content[6], content[7], content[8], content[9]];
+  if (sizeBytes.some((value) => value > 0x7f)) throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+  const tagSize = sizeBytes.reduce((size, value) => (size << 7) | value, 0);
+  const footerSize = (content[5] & 0x10) !== 0 ? 10 : 0;
+  const offset = 10 + tagSize + footerSize;
+  if (offset > content.length) throw createRecipeError('FILE_METADATA_UNAVAILABLE', '无法验证录音文件');
+  return offset;
+}
+
+function parseMp3FrameHeader(content, offset) {
+  if (offset + 4 > content.length) return null;
+  const header = content.readUInt32BE(offset);
+  if ((header >>> 21) !== 0x7ff) return null;
+  const versionBits = (header >>> 19) & 0x3;
+  const layerBits = (header >>> 17) & 0x3;
+  const bitrateIndex = (header >>> 12) & 0xf;
+  const sampleRateIndex = (header >>> 10) & 0x3;
+  const padding = (header >>> 9) & 0x1;
+  if (versionBits === 0x1 || layerBits !== 0x1 || bitrateIndex === 0 || bitrateIndex === 0xf || sampleRateIndex === 0x3) {
+    return null;
+  }
+  const version = versionBits === 0x3 ? 1 : versionBits === 0x2 ? 2 : 2.5;
+  const bitrateTable = version === 1
+    ? [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+    : [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+  const sampleRateTable = version === 1
+    ? [44100, 48000, 32000]
+    : version === 2 ? [22050, 24000, 16000] : [11025, 12000, 8000];
+  const bitrateKbps = bitrateTable[bitrateIndex];
+  const sampleRateHz = sampleRateTable[sampleRateIndex];
+  const samplesPerFrame = version === 1 ? 1152 : 576;
+  const coefficient = version === 1 ? 144000 : 72000;
+  const byteLength = Math.floor((coefficient * bitrateKbps) / sampleRateHz) + padding;
+  return byteLength >= 4 ? { byteLength, sampleRateHz, samplesPerFrame } : null;
+}
+
 module.exports = {
   DEFAULT_CONFIG,
   RECORD_ACTION_CONTRACTS,
   RECORD_ID_ACTIONS,
   RECORD_SCOPED_ACTIONS,
+  createCloudFileApi,
   createGuards,
   handleAction,
   main,

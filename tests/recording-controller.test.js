@@ -410,6 +410,25 @@ test('cancel waits for its stop callback before allowing a replacement recording
   controller.destroy();
 });
 
+test('a pathless interruption after cancel keeps the terminal gate until stop', async () => {
+  const { controller, recorderManager, storage } = createController();
+
+  controller.start('family-1|dish-1|record-b');
+  controller.cancel();
+  await recorderManager.interrupt({});
+  controller.start('family-1|dish-1|record-c');
+
+  assert.equal(recorderManager.startCalls.length, 1);
+  assert.deepEqual(storage.entries(), []);
+
+  await recorderManager.finish({ tempFilePath: 'wxfile://tmp/b.mp3', duration: 500 });
+  assert.deepEqual(storage.entries(), []);
+
+  controller.start('family-1|dish-1|record-c');
+  assert.equal(recorderManager.startCalls.length, 2);
+  controller.destroy();
+});
+
 test('a cancelled recorder error clears only its terminal gate', () => {
   const { controller, recorderManager, storage } = createController();
   const states = [];

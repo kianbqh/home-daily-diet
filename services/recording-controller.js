@@ -209,6 +209,7 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     const session = active;
     clearTimer();
     if (session.discarded) {
+      // Interruption begin is non-terminal; retain the gate so a late stop cannot bind to a replacement.
       if (!interrupted) active = null;
       return;
     }

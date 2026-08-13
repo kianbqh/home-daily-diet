@@ -3,6 +3,7 @@
 .codex-downloads/
 .wechat-devtools-data/
 .wechat-devtools-profile/
+.worktrees/
 project.private.config.json
 docs/superpowers/plans/
 

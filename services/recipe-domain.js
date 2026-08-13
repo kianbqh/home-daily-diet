@@ -100,8 +100,12 @@ function validateRecipe(value) {
     validateTextFields(item, `ingredients[${index}]`, ['name', 'amountText', 'note'], errors);
   });
   recipe.steps.forEach((item, index) => {
-    requireFields(list(input.steps)[index], `steps[${index}]`, ['order', 'instruction', 'heat', 'durationText', 'keyPoint', 'uncertain'], errors);
-    requireTypes(list(input.steps)[index], `steps[${index}]`, { order: 'number', instruction: 'string', heat: 'string', durationText: 'string', keyPoint: 'string', uncertain: 'boolean' }, errors);
+    const original = list(input.steps)[index];
+    requireFields(original, `steps[${index}]`, ['order', 'instruction', 'heat', 'durationText', 'keyPoint', 'uncertain'], errors);
+    requireTypes(original, `steps[${index}]`, { order: 'number', instruction: 'string', heat: 'string', durationText: 'string', keyPoint: 'string', uncertain: 'boolean' }, errors);
+    if (Number.isInteger(object(original).order) && object(original).order < 1) {
+      errors.push(`steps[${index}].order must be at least 1`);
+    }
     if (!item.instruction) errors.push(`steps[${index}].instruction must not be blank`);
     validateTextFields(item, `steps[${index}]`, ['instruction', 'heat', 'durationText', 'keyPoint'], errors);
   });

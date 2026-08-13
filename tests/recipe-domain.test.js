@@ -68,6 +68,18 @@ for (const [name, contract] of implementations) {
     assert.ok(result.errors.some((error) => error.includes('tips[0]')));
   });
 
+  test(`${name} rejects zero and negative original step orders before normalization`, () => {
+    [-1, 0].forEach((order) => {
+      const result = contract.validateRecipe({
+        ...fixture,
+        steps: [{ ...fixture.steps[0], order }],
+      });
+
+      assert.equal(result.ok, false);
+      assert.ok(result.errors.some((error) => error.includes('steps[0].order')));
+    });
+  });
+
   test(`${name} rejects a recipe with 51 ingredients`, () => {
     const result = contract.validateRecipe({
       ...fixture,

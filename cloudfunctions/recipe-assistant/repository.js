@@ -71,6 +71,10 @@ function createRecipeRepository(db, config) {
     });
   }
 
+  async function createVersion(data) {
+    return addDocument(config.versionCollection, data);
+  }
+
   async function getRecording(familyIdOrInput, dishIdArg, recordingIdArg) {
     const { familyId, dishId, recordingId, recordId } = normalizeOwnedLookup(
       familyIdOrInput, dishIdArg, recordingIdArg, 'recordingId'
@@ -97,6 +101,7 @@ function createRecipeRepository(db, config) {
     setRecipePointer,
     getVersion,
     listVersions,
+    createVersion,
     getRecording,
     listRecordings,
     runTransaction,

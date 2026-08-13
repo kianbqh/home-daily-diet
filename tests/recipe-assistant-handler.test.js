@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
+const validRecipe = require('./fixtures/recipe-contract.json');
 
 const {
   DEFAULT_CONFIG,
@@ -18,6 +19,7 @@ function clone(value) {
 
 function createMemoryDatabase(seed = {}, options = {}) {
   const collections = new Map();
+  let transactionCount = 0;
   Object.entries(seed).forEach(([name, records]) => {
     collections.set(name, new Map(Object.entries(records).map(([id, data]) => [id, clone(data)])));
   });
@@ -77,10 +79,17 @@ function createMemoryDatabase(seed = {}, options = {}) {
   const db = {
     collection,
     async runTransaction(callback) {
+      transactionCount += 1;
+      if (typeof options.beforeTransaction === 'function') {
+        await options.beforeTransaction(db, transactionCount);
+      }
       return callback(db);
     },
     records(name) {
       return collections.get(name) || new Map();
+    },
+    transactionCount() {
+      return transactionCount;
     },
   };
   return db;
@@ -189,19 +198,22 @@ test('defines every record-scoped action and the actions whose contract carries 
     recordingId: [
       'submitRecording', 'updateTranscript', 'deleteRecordingAudio', 'deleteRecording',
     ],
-    draftId: ['organizeDraft'],
+    draftId: ['organizeDraft', 'getDraft', 'updateDraft', 'confirmDraft'],
   });
   assert.deepEqual([...RECORD_SCOPED_ACTIONS].sort(), [
     'addManualText',
     'attachRecordWorkspace',
     'cancelRecordWorkspace',
+    'confirmDraft',
     'deleteRecording',
     'deleteRecordingAudio',
+    'getDraft',
     'getRecordWorkspace',
     'organizeDraft',
     'refreshWorkspace',
     'reserveRecording',
     'submitRecording',
+    'updateDraft',
     'updateTranscript',
   ]);
   assert.deepEqual([...RECORD_ID_ACTIONS].sort(), [
@@ -313,6 +325,333 @@ test('organizeDraft derives optional record ownership from the owned draft and i
     });
     assert.equal(result.error.code, expectedCode, label);
   }
+});
+
+test('manual drafts clone the current main recipe and use only trusted member identity', async () => {
+  const seed = baseSeed();
+  seed.family_recipes = {
+    'family-a|dish-1': {
+      _id: 'family-a|dish-1', familyId: 'family-a', dishId: 'dish-1',
+      currentVersionId: 'version-main', currentVersionNumber: 7,
+    },
+  };
+  seed.recipe_versions = {
+    'version-main': {
+      _id: 'version-main', familyId: 'family-a', dishId: 'dish-1', versionNumber: 7,
+      recipe: {
+        ...clone(validRecipe),
+        ingredients: [{ ...validRecipe.ingredients[0], name: ' 鸡蛋 ', ignored: 'discard' }],
+      },
+    },
+  };
+  const db = createMemoryDatabase(seed);
+
+  const created = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1',
+    sourceType: 'edit_main', memberId: 'forged-member', openid: 'forged-openid',
+  });
+  const fetched = await invoke(db, {
+    action: 'getDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+  });
+
+  assert.equal(created.ok, true);
+  assert.equal(created.data.draft.sourceType, 'edit_main');
+  assert.equal(created.data.draft.status, 'editing');
+  assert.equal(created.data.draft.baseMainVersionId, 'version-main');
+  assert.equal(created.data.draft.revision, 0);
+  assert.equal(created.data.draft.createdBy, 'member-a');
+  assert.equal(created.data.draft.updatedBy, 'member-a');
+  assert.equal(created.data.draft.modelProvider, '');
+  assert.equal(created.data.draft.modelName, '');
+  assert.deepEqual(created.data.draft.sourceRecordingIds, []);
+  assert.equal(created.data.draft.recipe.ingredients[0].name, '鸡蛋');
+  assert.equal(Object.hasOwn(created.data.draft.recipe.ingredients[0], 'ignored'), false);
+  assert.deepEqual(fetched.data.draft, created.data.draft);
+});
+
+test('manual draft creation rejects non-manual sources and cross-scope record bindings', async () => {
+  const db = createMemoryDatabase(baseSeed());
+
+  const nonManual = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'recording',
+  });
+  const crossDishRecord = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1',
+    sourceType: 'manual', recordId: 'record-deleted',
+  });
+
+  assert.equal(nonManual.error.code, 'SOURCE_TYPE_INVALID');
+  assert.equal(crossDishRecord.error.code, 'RECORD_NOT_FOUND');
+  assert.equal(db.records('recipe_drafts').size, 0);
+});
+
+test('draft actions never use a draft id across family or dish scopes', async () => {
+  const seed = baseSeed();
+  seed.recipe_drafts = {
+    'draft-other-family': {
+      _id: 'draft-other-family', familyId: 'family-b', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+    },
+    'draft-other-dish': {
+      _id: 'draft-other-dish', familyId: 'family-a', dishId: 'dish-deleted', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+
+  for (const draftId of ['draft-other-family', 'draft-other-dish']) {
+    for (const action of ['getDraft', 'updateDraft', 'confirmDraft']) {
+      const result = await invoke(db, {
+        action, familyId: 'family-a', dishId: 'dish-1', draftId,
+        revision: 0, recipe: clone(validRecipe), publishAsMain: true, baseMainVersionId: '',
+      });
+      assert.equal(result.error.code, 'DRAFT_NOT_FOUND', `${action}: ${draftId}`);
+    }
+  }
+});
+
+test('updateDraft normalizes valid recipes, increments revision, and rejects a stale revision', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const created = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
+  });
+  const draft = created.data.draft;
+  const recipe = {
+    ...clone(validRecipe),
+    ingredients: [{ ...validRecipe.ingredients[0], name: ' 鸡蛋 ', ignored: 'discard' }],
+  };
+
+  const saved = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: draft._id,
+    revision: 0, recipe, memberId: 'forged-member',
+  });
+  const stale = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: draft._id,
+    revision: 0, recipe: clone(validRecipe),
+  });
+
+  assert.equal(saved.data.draft.revision, 1);
+  assert.equal(saved.data.draft.updatedBy, 'member-a');
+  assert.equal(saved.data.draft.recipe.ingredients[0].name, '鸡蛋');
+  assert.equal(Object.hasOwn(saved.data.draft.recipe.ingredients[0], 'ignored'), false);
+  assert.equal(stale.error.code, 'DRAFT_CONFLICT');
+});
+
+test('updateDraft re-reads and compares revision inside runTransaction', async () => {
+  const seed = baseSeed();
+  seed.recipe_drafts = {
+    'draft-race': {
+      _id: 'draft-race', familyId: 'family-a', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+      createdBy: 'member-a', createdAt: 1, updatedBy: 'member-a', updatedAt: 1,
+    },
+  };
+  const db = createMemoryDatabase(seed, {
+    async beforeTransaction(database) {
+      await database.collection('recipe_drafts').doc('draft-race').set({
+        data: { ...seed.recipe_drafts['draft-race'], revision: 1 },
+      });
+    },
+  });
+
+  const result = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'draft-race',
+    revision: 0, recipe: clone(validRecipe),
+  });
+
+  assert.equal(result.error.code, 'DRAFT_CONFLICT');
+  assert.equal(db.transactionCount(), 1);
+  assert.equal(db.records('recipe_drafts').get('draft-race').revision, 1);
+});
+
+test('recipe validation errors do not echo raw recipe content in responses or logs', async () => {
+  const logs = [];
+  const db = createMemoryDatabase(baseSeed());
+  const created = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
+  });
+  const secret = 'private-recipe-content-must-not-leak';
+  const result = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+    revision: 0,
+    recipe: { ...clone(validRecipe), ingredients: [{ ...validRecipe.ingredients[0], name: '', note: secret }] },
+  }, 'openid-a', { logger: { error(value) { logs.push(value); } } });
+  const serialized = JSON.stringify({ result, logs });
+
+  assert.equal(result.error.code, 'RECIPE_INVALID');
+  assert.equal(serialized.includes(secret), false);
+  assert.deepEqual(Object.keys(logs[0]).sort(), ['action', 'code', 'durationMs', 'requestId', 'stage'].sort());
+});
+
+test('first confirmation publishes once and an identical retry returns the same immutable version', async () => {
+  const db = createMemoryDatabase(baseSeed(), { rejectSystemId: true });
+  const created = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
+  });
+  const saved = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+    revision: 0, recipe: clone(validRecipe),
+  });
+  const request = {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: saved.data.draft._id,
+    revision: 1, publishAsMain: false, baseMainVersionId: '', memberId: 'forged-member',
+  };
+
+  const confirmed = await invoke(db, request);
+  const retried = await invoke(db, request);
+
+  assert.equal(confirmed.data.draft.status, 'confirmed');
+  assert.equal(confirmed.data.draft.revision, 1);
+  assert.equal(confirmed.data.draft.confirmedVersionId, confirmed.data.version._id);
+  assert.equal(confirmed.data.version.versionNumber, 1);
+  assert.equal(confirmed.data.version.publishedAsMain, true);
+  assert.equal(confirmed.data.version.previousMainVersionId, '');
+  assert.equal(confirmed.data.version.confirmedBy, 'member-a');
+  assert.equal(confirmed.data.pointer.currentVersionId, confirmed.data.version._id);
+  assert.equal(confirmed.data.pointer.currentVersionNumber, 1);
+  assert.equal(confirmed.data.pointer.updatedBy, 'member-a');
+  assert.equal(retried.data.version._id, confirmed.data.version._id);
+  assert.equal(retried.data.draft.confirmedVersionId, confirmed.data.version._id);
+  assert.equal(db.records('recipe_versions').size, 1);
+});
+
+test('later confirmations preserve main by default and allocate monotonic versions before an explicit publish', async () => {
+  const db = createMemoryDatabase(baseSeed());
+
+  async function saveDraft() {
+    const created = await invoke(db, {
+      action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
+    });
+    return invoke(db, {
+      action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+      revision: 0, recipe: clone(validRecipe),
+    });
+  }
+
+  const first = await saveDraft();
+  const firstConfirmed = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: first.data.draft._id,
+    revision: 1, publishAsMain: false, baseMainVersionId: '',
+  });
+  const firstVersionId = firstConfirmed.data.version._id;
+
+  const savedOnly = await saveDraft();
+  const secondConfirmed = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: savedOnly.data.draft._id,
+    revision: 1, publishAsMain: false, baseMainVersionId: firstVersionId,
+  });
+
+  const published = await saveDraft();
+  const thirdConfirmed = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: published.data.draft._id,
+    revision: 1, publishAsMain: true, baseMainVersionId: firstVersionId,
+  });
+
+  assert.equal(secondConfirmed.data.version.versionNumber, 2);
+  assert.equal(secondConfirmed.data.version.publishedAsMain, false);
+  assert.equal(secondConfirmed.data.pointer.currentVersionId, firstVersionId);
+  assert.equal(thirdConfirmed.data.version.versionNumber, 3);
+  assert.equal(thirdConfirmed.data.version.publishedAsMain, true);
+  assert.equal(thirdConfirmed.data.pointer.currentVersionId, thirdConfirmed.data.version._id);
+  assert.deepEqual(
+    [...db.records('recipe_versions').values()].map((item) => item.versionNumber).sort(),
+    [1, 2, 3]
+  );
+});
+
+test('confirmDraft rejects a stale main base without creating a version or changing the draft', async () => {
+  const db = createMemoryDatabase(baseSeed());
+
+  async function createSavedDraft() {
+    const created = await invoke(db, {
+      action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
+    });
+    return invoke(db, {
+      action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+      revision: 0, recipe: clone(validRecipe),
+    });
+  }
+
+  const initial = await createSavedDraft();
+  const initialConfirmation = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: initial.data.draft._id,
+    revision: 1, publishAsMain: false, baseMainVersionId: '',
+  });
+  const oldMainId = initialConfirmation.data.version._id;
+  const stale = await createSavedDraft();
+  const winner = await createSavedDraft();
+  await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: winner.data.draft._id,
+    revision: 1, publishAsMain: true, baseMainVersionId: oldMainId,
+  });
+  const versionCount = db.records('recipe_versions').size;
+
+  const conflict = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: stale.data.draft._id,
+    revision: 1, publishAsMain: true, baseMainVersionId: oldMainId,
+  });
+
+  assert.equal(conflict.error.code, 'MAIN_RECIPE_CONFLICT');
+  assert.equal(db.records('recipe_versions').size, versionCount);
+  assert.equal(db.records('recipe_drafts').get(stale.data.draft._id).status, 'editing');
+  assert.equal(db.records('recipe_drafts').get(stale.data.draft._id).confirmedVersionId, '');
+});
+
+test('confirmDraft re-reads and compares revision inside runTransaction', async () => {
+  const seed = baseSeed();
+  seed.recipe_drafts = {
+    'draft-confirm-race': {
+      _id: 'draft-confirm-race', familyId: 'family-a', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+      baseMainVersionId: '', confirmedVersionId: '', createdBy: 'member-a', createdAt: 1,
+      updatedBy: 'member-a', updatedAt: 1,
+    },
+  };
+  const db = createMemoryDatabase(seed, {
+    async beforeTransaction(database) {
+      await database.collection('recipe_drafts').doc('draft-confirm-race').set({
+        data: { ...seed.recipe_drafts['draft-confirm-race'], revision: 1 },
+      });
+    },
+  });
+
+  const result = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'draft-confirm-race',
+    revision: 0, publishAsMain: false, baseMainVersionId: '',
+  });
+
+  assert.equal(result.error.code, 'DRAFT_CONFLICT');
+  assert.equal(db.transactionCount(), 1);
+  assert.equal(db.records('recipe_versions').size, 0);
+});
+
+test('confirmation validates the stored recipe and recipe versions expose no update route', async () => {
+  const seed = baseSeed();
+  seed.recipe_drafts = {
+    'draft-invalid': {
+      _id: 'draft-invalid', familyId: 'family-a', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: { ingredients: [{ name: 'secret-raw-recipe' }] },
+      revision: 0, baseMainVersionId: '', confirmedVersionId: '',
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const repository = createRecipeRepository(db, DEFAULT_CONFIG);
+
+  const invalid = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'draft-invalid',
+    revision: 0, publishAsMain: false, baseMainVersionId: '',
+  });
+  const updateVersion = await invoke(db, {
+    action: 'updateVersion', familyId: 'family-a', dishId: 'dish-1', versionId: 'version-1',
+    recipe: clone(validRecipe),
+  });
+
+  assert.equal(invalid.error.code, 'RECIPE_INVALID');
+  assert.equal(JSON.stringify(invalid).includes('secret-raw-recipe'), false);
+  assert.equal(typeof repository.setVersion, 'undefined');
+  assert.equal(typeof repository.updateVersion, 'undefined');
+  assert.equal(updateVersion.error.code, 'ACTION_INVALID');
+  assert.equal(db.records('recipe_versions').size, 0);
 });
 
 test('purged tombstones deny every implemented and pending recipe action', async () => {

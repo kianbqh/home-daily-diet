@@ -1,7 +1,9 @@
 const { createRecipeRepository } = require('./repository');
+const { normalizeRecipe, validateRecipe } = require('./recipe-schema');
 const {
   createRecipeError,
   publicMessage,
+  requireRevision,
   requireValue,
   runtimeErrorCode,
   sanitize,
@@ -25,7 +27,7 @@ const RECORD_ACTION_CONTRACTS = Object.freeze({
   recordingId: Object.freeze([
     'submitRecording', 'updateTranscript', 'deleteRecordingAudio', 'deleteRecording',
   ]),
-  draftId: Object.freeze(['organizeDraft']),
+  draftId: Object.freeze(['organizeDraft', 'getDraft', 'updateDraft', 'confirmDraft']),
 });
 
 const RECORD_ID_ACTIONS = RECORD_ACTION_CONTRACTS.recordId;
@@ -112,7 +114,7 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
     stage = 'authorize';
     const openid = String(context.OPENID || '').trim();
     if (!openid) throw createRecipeError('AUTH_REQUIRED', '无法确认登录身份', 'authorize');
-    await guards.requireMember(familyId, openid);
+    const member = await guards.requireMember(familyId, openid);
     const allowArchived = ['getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace'].includes(requiredAction);
     await guards.requireActiveDish(familyId, dishId, { allowArchived });
     await authorizeRecordScope(requiredAction, event, familyId, dishId, repository, guards);
@@ -131,6 +133,18 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         break;
       case 'getRecordWorkspace':
         data = await getRecordWorkspace(repository, familyId, dishId, event.recordId);
+        break;
+      case 'createManualDraft':
+        data = await createManualDraft(repository, guards, member, familyId, dishId, event, nowMs(dependencies));
+        break;
+      case 'getDraft':
+        data = await getDraft(repository, familyId, dishId, event.draftId);
+        break;
+      case 'updateDraft':
+        data = await updateDraft(repository, member, familyId, dishId, event, nowMs(dependencies));
+        break;
+      case 'confirmDraft':
+        data = await confirmDraft(repository, member, familyId, dishId, event, nowMs(dependencies));
         break;
       default:
         throw createRecipeError('ACTION_INVALID', '不支持这个操作', 'action');
@@ -173,6 +187,151 @@ async function getRecordWorkspace(repository, familyId, dishId, rawRecordId) {
     repository.getDraft({ familyId, dishId, recordId }),
   ]);
   return { recordings, draft };
+}
+
+async function createManualDraft(repository, guards, member, familyId, dishId, event, now) {
+  const sourceType = String(event.sourceType || 'manual').trim() || 'manual';
+  if (!['manual', 'edit_main'].includes(sourceType)) {
+    throw createRecipeError('SOURCE_TYPE_INVALID', '手动菜谱来源类型无效', 'validate');
+  }
+  const recordId = String(event.recordId || '').trim();
+  if (recordId) await guards.requireCookingRecord(familyId, dishId, recordId);
+
+  const pointer = await repository.getRecipePointer(familyId, dishId);
+  const currentVersionId = String(pointer && pointer.currentVersionId || '');
+  let recipe = emptyRecipe();
+  if (sourceType === 'edit_main' && currentVersionId) {
+    const currentVersion = await repository.getVersion(familyId, dishId, currentVersionId);
+    if (!currentVersion) throw createRecipeError('VERSION_NOT_FOUND', '找不到当前菜谱版本');
+    recipe = normalizeAndValidateRecipe(currentVersion.recipe);
+  }
+  const draft = await repository.setDraft('', {
+    familyId,
+    dishId,
+    recordId,
+    sourceRecordingIds: [],
+    sourceType,
+    status: 'editing',
+    recipe,
+    baseMainVersionId: currentVersionId,
+    revision: 0,
+    inputHash: '',
+    modelProvider: '',
+    modelName: '',
+    promptVersion: '',
+    lastErrorCode: '',
+    confirmedVersionId: '',
+    createdBy: member.memberId,
+    createdAt: now,
+    updatedBy: member.memberId,
+    updatedAt: now,
+  });
+  return { draft };
+}
+
+async function getDraft(repository, familyId, dishId, rawDraftId) {
+  const draftId = requireValue(rawDraftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
+  const draft = await repository.getDraft({ familyId, dishId, draftId });
+  if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+  return { draft };
+}
+
+async function updateDraft(repository, member, familyId, dishId, event, now) {
+  const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
+  const revision = requireRevision(event.revision);
+  const recipe = normalizeAndValidateRecipe(event.recipe);
+  return repository.runTransaction(async (transaction) => {
+    const draft = await transaction.getDraft({ familyId, dishId, draftId });
+    if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+    if (draft.revision !== revision || draft.status === 'confirmed') {
+      throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试');
+    }
+    const updated = await transaction.setDraft(draftId, {
+      ...draft,
+      recipe,
+      revision: revision + 1,
+      updatedBy: member.memberId,
+      updatedAt: now,
+    });
+    return { draft: updated };
+  });
+}
+
+async function confirmDraft(repository, member, familyId, dishId, event, now) {
+  const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
+  const revision = requireRevision(event.revision);
+  const publishAsMain = event.publishAsMain === true;
+  const baseMainVersionId = String(event.baseMainVersionId || '').trim();
+  return repository.runTransaction(async (transaction) => {
+    const draft = await transaction.getDraft({ familyId, dishId, draftId });
+    const pointer = await transaction.getRecipePointer(familyId, dishId);
+    if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+    if (draft.revision !== revision) {
+      throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试');
+    }
+    if (draft.status === 'confirmed' && draft.confirmedVersionId) {
+      const version = await transaction.getVersion(familyId, dishId, draft.confirmedVersionId);
+      if (!version) throw createRecipeError('VERSION_NOT_FOUND', '找不到已确认的菜谱版本');
+      return { draft, version, pointer };
+    }
+
+    const recipe = normalizeAndValidateRecipe(draft.recipe);
+    const previousMainVersionId = String(pointer && pointer.currentVersionId || '');
+    const updatesExistingMain = Boolean(pointer && previousMainVersionId && publishAsMain);
+    if (updatesExistingMain && baseMainVersionId !== previousMainVersionId) {
+      throw createRecipeError('MAIN_RECIPE_CONFLICT', '主菜谱已被更新，请刷新后重试');
+    }
+
+    const latestVersions = await transaction.listVersions(familyId, dishId, 1);
+    const latestVersionNumber = latestVersions[0] ? Number(latestVersions[0].versionNumber) || 0 : 0;
+    const pointerVersionNumber = pointer ? Number(pointer.currentVersionNumber) || 0 : 0;
+    const versionNumber = Math.max(latestVersionNumber, pointerVersionNumber) + 1;
+    const shouldPublishAsMain = !pointer || !previousMainVersionId || publishAsMain;
+    const version = await transaction.createVersion({
+      familyId,
+      dishId,
+      recordId: String(draft.recordId || ''),
+      versionNumber,
+      recipe,
+      sourceDraftId: draftId,
+      publishedAsMain: shouldPublishAsMain,
+      previousMainVersionId,
+      confirmedBy: member.memberId,
+      confirmedAt: now,
+    });
+
+    let nextPointer = pointer;
+    if (shouldPublishAsMain) {
+      nextPointer = await transaction.setRecipePointer(familyId, dishId, {
+        familyId,
+        dishId,
+        currentVersionId: version._id,
+        currentVersionNumber: versionNumber,
+        createdAt: pointer && pointer.createdAt != null ? pointer.createdAt : now,
+        updatedBy: member.memberId,
+        updatedAt: now,
+      });
+    }
+    const confirmedDraft = await transaction.setDraft(draftId, {
+      ...draft,
+      recipe,
+      status: 'confirmed',
+      confirmedVersionId: version._id,
+      updatedBy: member.memberId,
+      updatedAt: now,
+    });
+    return { draft: confirmedDraft, version, pointer: nextPointer };
+  });
+}
+
+function emptyRecipe() {
+  return { ingredients: [], steps: [], tips: [], failures: [], familyNotes: [], uncertainties: [] };
+}
+
+function normalizeAndValidateRecipe(value) {
+  const validation = validateRecipe(value);
+  if (!validation.ok) throw createRecipeError('RECIPE_INVALID', '菜谱内容不符合要求', 'validate');
+  return normalizeRecipe(value);
 }
 
 async function authorizeRecordScope(action, event, familyId, dishId, repository, guards) {

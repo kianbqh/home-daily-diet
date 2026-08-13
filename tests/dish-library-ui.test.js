@@ -118,7 +118,7 @@ test('dish detail uses five complete visual stars and a modal profile editor', (
   assert.match(script, /editProfileVisible/);
   assert.match(script, /cancelProfileEdit\s*\(/);
   assert.match(styles, /\.detail-actions\s+button\s*\{[\s\S]*height:\s*84rpx/);
-  assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible\}\}" class="card-surface record-fields-card"/);
+  assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible && \(!isExisting \|\| recordFormVisible\)\}\}" class="card-surface record-fields-card"/);
   assert.match(template, /wx:if="\{\{item\.displayImage\}\}"[^>]*src="\{\{item\.displayImage\}\}"/);
   assert.match(template, /wx:if="\{\{item\.displayRecordImage\}\}"[^>]*[\s\S]*src="\{\{item\.displayRecordImage\}\}"/);
   assert.doesNotMatch(template, /src="\{\{item\.(?:image|recordImage)\}\}"/);
@@ -144,6 +144,16 @@ test('profile editor action buttons share a centered layout', () => {
   assert.match(rule, /box-sizing:\s*border-box/);
   assert.match(rule, /border-radius:\s*16rpx/);
   assert.match(rule, /line-height:\s*1/);
+});
+
+test('existing dish details gate the append-record form behind one button', () => {
+  const template = read('pages/dish-edit/dish-edit.wxml');
+
+  assert.match(template, /wx:if="\{\{isExisting && !isArchived && !editProfileVisible && !recordFormVisible\}\}" class="card-surface record-entry-card"/);
+  assert.match(template, /class="primary-button" bindtap="startRecordEntry">追加新记录<\/button>/);
+  assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible && \(!isExisting \|\| recordFormVisible\)\}\}" class="card-surface record-fields-card"/);
+  assert.match(template, /wx:if="\{\{isExisting && recordFormVisible\}\}" class="secondary-button" bindtap="cancelRecordEntry">取消<\/button>/);
+  assert.match(template, /\{\{isExisting \? '保存这次记录' : '保存这道菜'\}\}/);
 });
 
 test('cloud image helper delegates CloudBase file IDs to the Store without changing local URLs', async () => {

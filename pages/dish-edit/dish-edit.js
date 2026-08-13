@@ -31,6 +31,7 @@ Page({
     isExisting: false,
     isEditingProfile: false,
     editProfileVisible: false,
+    recordFormVisible: false,
     isArchived: false,
     canAddRecord: true,
     canEditProfile: false,
@@ -114,6 +115,7 @@ Page({
       isExisting: true,
       isEditingProfile,
       editProfileVisible: isEditingProfile,
+      recordFormVisible: false,
       isArchived,
       canAddRecord: !isArchived,
       canEditProfile: !isArchived,
@@ -221,6 +223,28 @@ Page({
 
   onRecordDateChange(event) {
     this.setData({ recordDate: event.detail.value });
+  },
+
+  startRecordEntry() {
+    if (!this.data.isExisting || this.data.isArchived || this.data.editProfileVisible) return;
+    this.setData({
+      recordFormVisible: true,
+      recordDate: todayString(),
+    });
+  },
+
+  cancelRecordEntry() {
+    if (!this.data.isExisting) return;
+    this.setData({
+      recordFormVisible: false,
+      image: '',
+      displayImage: '',
+      recordDate: todayString(),
+      mealType: '',
+      mealTypeLabel: '未指定餐次',
+      customMealType: '',
+      customMealTypeDraft: '',
+    });
   },
 
   chooseImage() {
@@ -553,7 +577,7 @@ Page({
       };
       if (this.data.isExisting) {
         store.addCookingRecord({ ...payload, dishId: this.data.dishId });
-        this.setData({ image: '', displayImage: '' });
+        this.setData({ image: '', displayImage: '', recordFormVisible: false });
         this.finishAndGoBack('这次记录已追加');
         return;
       }

@@ -428,6 +428,15 @@
   padding: 30rpx;
 }
 
+.record-entry-card {
+  margin-top: 22rpx;
+  padding: 18rpx;
+}
+
+.record-entry-card button {
+  width: 100%;
+}
+
 .edit-profile-mask {
   position: fixed;
   top: 0;
@@ -588,6 +597,24 @@
 
 .dish-actions-card {
   padding: 18rpx;
+}
+
+.record-form-actions {
+  display: flex;
+  gap: 16rpx;
+}
+
+.record-form-actions button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 0;
+  height: 84rpx;
+  margin: 0;
+  padding: 0 18rpx;
+  line-height: 1;
 }
 
 .sticky-action {

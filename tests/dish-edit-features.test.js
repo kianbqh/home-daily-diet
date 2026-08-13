@@ -130,6 +130,61 @@ test('saving an appended record clears only the current record photo after uploa
   global.wx = originalWx;
 });
 
+test('existing dish details open and cancel the append-record form without keeping drafts', () => {
+  const page = createPageInstance(loadPage(), {
+    isExisting: true,
+    isArchived: false,
+    recordFormVisible: false,
+    image: '',
+    displayImage: '',
+    mealType: '',
+    mealTypeLabel: '未指定餐次',
+    customMealType: '',
+    customMealTypeDraft: '',
+  });
+
+  page.startRecordEntry();
+  assert.equal(page.data.recordFormVisible, true);
+
+  page.setData({
+    image: 'wxfile://draft.jpg',
+    displayImage: 'wxfile://draft.jpg',
+    mealType: 'custom',
+    mealTypeLabel: '其他餐次',
+    customMealType: '夜宵',
+    customMealTypeDraft: '夜宵',
+  });
+  page.cancelRecordEntry();
+
+  assert.deepEqual({
+    recordFormVisible: page.data.recordFormVisible,
+    image: page.data.image,
+    displayImage: page.data.displayImage,
+    mealType: page.data.mealType,
+    mealTypeLabel: page.data.mealTypeLabel,
+    customMealType: page.data.customMealType,
+    customMealTypeDraft: page.data.customMealTypeDraft,
+  }, {
+    recordFormVisible: false,
+    image: '',
+    displayImage: '',
+    mealType: '',
+    mealTypeLabel: '未指定餐次',
+    customMealType: '',
+    customMealTypeDraft: '',
+  });
+});
+
+test('new dish pages ignore append-record form controls', () => {
+  const page = createPageInstance(loadPage(), {
+    isExisting: false,
+    recordFormVisible: false,
+  });
+
+  page.startRecordEntry();
+  assert.equal(page.data.recordFormVisible, false);
+});
+
 test('category and characteristic tag selection is chip based', () => {
   const state = addDish(createInitialState(), { name: 'Tomato eggs' });
   const page = createPageInstance(loadPage(), {

@@ -31,9 +31,13 @@
     </view>
   </view>
 
-  <view wx:if="{{isExisting && !isArchived}}" class="detail-actions">
+  <view wx:if="{{isExisting && !isArchived && !recordFormVisible}}" class="detail-actions">
     <button class="secondary-button" bindtap="startProfileEdit">编辑菜品信息</button>
     <button class="danger-button" bindtap="deleteCurrentDish">移入回收站</button>
+  </view>
+
+  <view wx:if="{{isExisting && !isArchived && !editProfileVisible && !recordFormVisible}}" class="card-surface record-entry-card">
+    <button class="primary-button" bindtap="startRecordEntry">追加新记录</button>
   </view>
 
   <view wx:if="{{isExisting && history.length}}" class="card-surface history-section">
@@ -145,7 +149,7 @@
     </scroll-view>
   </view>
 
-  <view wx:if="{{!isArchived && !editProfileVisible}}" class="card-surface record-fields-card">
+  <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible)}}" class="card-surface record-fields-card">
     <view class="record-field">
       <text class="form-label">菜名 <text class="required">*</text></text>
       <input class="visible-native-input {{isExisting && !isEditingProfile ? 'readonly' : ''}}" value="{{nameDraft}}" disabled="{{isExisting && !isEditingProfile}}" placeholder="例如：番茄炒蛋" bindinput="onNameInput" />
@@ -191,7 +195,10 @@
     </view>
   </view>
 
-  <view wx:if="{{!isArchived && !editProfileVisible}}" class="card-surface dish-actions-card sticky-action">
-    <button class="primary-button" bindtap="save">{{isEditingProfile ? '保存菜品信息' : (isExisting ? '追加这次记录' : '保存这道菜')}}</button>
+  <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible)}}" class="card-surface dish-actions-card sticky-action">
+    <view class="record-form-actions">
+      <button wx:if="{{isExisting && recordFormVisible}}" class="secondary-button" bindtap="cancelRecordEntry">取消</button>
+      <button class="primary-button" bindtap="save">{{isExisting ? '保存这次记录' : '保存这道菜'}}</button>
+    </view>
   </view>
 </view>

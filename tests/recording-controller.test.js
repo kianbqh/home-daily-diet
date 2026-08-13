@@ -435,7 +435,7 @@ test('loaded negative durations count as zero and cannot increase workspace allo
   controller.destroy();
 });
 
-test('cancelling during deferred saveFile invalidates the pending metadata write', async () => {
+test('cancelling with no active recording invalidates only the most recent pending capture', async () => {
   const deferredSave = createDeferred();
   const fileSystem = createFileSystem();
   fileSystem.saveFile = async () => deferredSave.promise;
@@ -608,5 +608,91 @@ test('cancelling active clip B does not discard earlier pending clip A', async (
   deferredA.resolve({ savedFilePath: 'wxfile://saved/a.mp3' });
   await finishA;
   assert.deepEqual(storage.entries().map((entry) => entry.savedFilePath), ['wxfile://saved/a.mp3']);
+  controller.destroy();
+});
+
+test('pending captures count toward the ten-clip workspace limit before their saves resolve', async () => {
+  const pendingSaves = [];
+  const fileSystem = createFileSystem();
+  fileSystem.saveFile = async () => {
+    const deferred = createDeferred();
+    pendingSaves.push(deferred);
+    return deferred.promise;
+  };
+  const { controller, recorderManager } = createController({ fileSystem });
+  const states = [];
+  controller.on('state', (state) => states.push(state));
+  for (let index = 0; index < 10; index += 1) {
+    controller.start('family-1|dish-1|record-1');
+    recorderManager.finish({ tempFilePath: `wxfile://tmp/pending-${index}.mp3`, duration: 1000 });
+    await Promise.resolve();
+  }
+  controller.start('family-1|dish-1|record-1');
+  assert.equal(recorderManager.startCalls.length, 10);
+  assert.equal(states.at(-1).errorCode, 'RECORDING_LIMIT_EXCEEDED');
+  controller.destroy();
+});
+
+test('pending capture duration reduces the next workspace recording duration', async () => {
+  const pendingSaves = [];
+  const fileSystem = createFileSystem();
+  fileSystem.saveFile = async () => {
+    const deferred = createDeferred();
+    pendingSaves.push(deferred);
+    return deferred.promise;
+  };
+  const { controller, recorderManager } = createController({ fileSystem });
+  for (let index = 0; index < 4; index += 1) {
+    controller.start('family-1|dish-1|record-1');
+    recorderManager.finish({ tempFilePath: `wxfile://tmp/long-${index}.mp3`, duration: 180000 });
+    await Promise.resolve();
+  }
+  controller.start('family-1|dish-1|record-1');
+  recorderManager.finish({ tempFilePath: 'wxfile://tmp/short.mp3', duration: 100000 });
+  await Promise.resolve();
+  controller.start('family-1|dish-1|record-1');
+  assert.equal(recorderManager.startCalls.at(-1).duration, 80000);
+  controller.destroy();
+});
+
+test('markUploaded re-finds its entry after deferred deletion when another entry is removed', async () => {
+  const removeA = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.removeSavedFile = async ({ filePath }) => {
+    fileSystem.calls.push(['removeSavedFile', filePath]);
+    if (filePath === 'wxfile://saved/a.mp3') return removeA.promise;
+  };
+  const entries = [
+    { localId: 'b', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: null, durationMs: 1, format: 'mp3', byteLength: 1, createdAt: 1, uploadStatus: 'pending' },
+    { localId: 'a', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: 'wxfile://saved/a.mp3', durationMs: 1, format: 'mp3', byteLength: 1, createdAt: 2, uploadStatus: 'pending' },
+  ];
+  const { controller, storage } = createController({ entries, fileSystem });
+  const uploading = controller.markUploaded('a');
+  await Promise.resolve();
+  await controller.remove('b');
+  removeA.resolve();
+  await uploading;
+  assert.deepEqual(storage.entries(), [{ ...entries[1], savedFilePath: null, uploadStatus: 'uploaded' }]);
+  controller.destroy();
+});
+
+test('remove re-finds its entry after deferred deletion when another entry is removed', async () => {
+  const removeA = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.removeSavedFile = async ({ filePath }) => {
+    fileSystem.calls.push(['removeSavedFile', filePath]);
+    if (filePath === 'wxfile://saved/a.mp3') return removeA.promise;
+  };
+  const entries = [
+    { localId: 'b', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: null, durationMs: 1, format: 'mp3', byteLength: 1, createdAt: 1, uploadStatus: 'pending' },
+    { localId: 'a', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: 'wxfile://saved/a.mp3', durationMs: 1, format: 'mp3', byteLength: 1, createdAt: 2, uploadStatus: 'pending' },
+  ];
+  const { controller, storage } = createController({ entries, fileSystem });
+  const removing = controller.remove('a');
+  await Promise.resolve();
+  await controller.remove('b');
+  removeA.resolve();
+  await removing;
+  assert.deepEqual(storage.entries(), []);
   controller.destroy();
 });

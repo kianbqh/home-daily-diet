@@ -99,7 +99,7 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   }
 
   async function markUploaded(localId) {
-    const index = entries.findIndex((entry) => entry.localId === localId);
+    const index = findEntryIndex(localId);
     if (index < 0) return;
     const entry = entries[index];
     entries[index] = { ...entry, uploadStatus: 'uploaded' };
@@ -107,7 +107,9 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     if (entry.savedFilePath) {
       try {
         await fileSystem.removeSavedFile({ filePath: entry.savedFilePath });
-        entries[index] = { ...entries[index], savedFilePath: null };
+        const currentIndex = findEntryIndex(localId);
+        if (currentIndex < 0) return;
+        entries[currentIndex] = { ...entries[currentIndex], savedFilePath: null };
         writeEntries();
       } catch (error) {
         emit(errorState('LOCAL_FILE_UNAVAILABLE'));
@@ -116,7 +118,7 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   }
 
   async function remove(localId) {
-    const index = entries.findIndex((entry) => entry.localId === localId);
+    const index = findEntryIndex(localId);
     if (index < 0) return;
     const entry = entries[index];
     if (entry.savedFilePath) {
@@ -127,7 +129,9 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
         return;
       }
     }
-    entries.splice(index, 1);
+    const currentIndex = findEntryIndex(localId);
+    if (currentIndex < 0) return;
+    entries.splice(currentIndex, 1);
     writeEntries();
   }
 
@@ -208,7 +212,7 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
       emit(errorState('RECORDING_LIMIT_EXCEEDED'));
       return;
     }
-    const capture = { discarded: false, localId: nextLocalId() };
+    const capture = { discarded: false, localId: nextLocalId(), workspaceKey: session.workspaceKey, durationMs };
     pendingCaptures.push(capture);
     let clip;
     try {
@@ -271,12 +275,16 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   }
 
   function workspaceClipCount(workspaceKey) {
-    return entries.filter((entry) => entry.workspaceKey === workspaceKey).length;
+    return entries.filter((entry) => entry.workspaceKey === workspaceKey).length
+      + pendingCaptures.filter((capture) => !capture.discarded && capture.workspaceKey === workspaceKey).length;
   }
   function remainingWorkspaceDuration(workspaceKey) {
     const usedMs = entries
       .filter((entry) => entry.workspaceKey === workspaceKey)
-      .reduce((total, entry) => total + (entry.durationMs || 0), 0);
+      .reduce((total, entry) => total + (entry.durationMs || 0), 0)
+      + pendingCaptures
+        .filter((capture) => !capture.discarded && capture.workspaceKey === workspaceKey)
+        .reduce((total, capture) => total + capture.durationMs, 0);
     return Math.min(MAX_DURATION_MS, Math.max(0, MAX_WORKSPACE_DURATION_MS - usedMs));
   }
   function nextLocalId() {
@@ -286,6 +294,10 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     const localId = `${timestamp}-${sequence}`;
     reservedLocalIds.add(localId);
     return localId;
+  }
+
+  function findEntryIndex(localId) {
+    return entries.findIndex((entry) => entry.localId === localId);
   }
 
   function isInvalidCapture(capture) { return destroyed || capture.discarded; }

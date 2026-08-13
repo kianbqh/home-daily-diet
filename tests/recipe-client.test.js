@@ -17,7 +17,7 @@ function createFakeApi(result = { result: { ok: true, data: { recipe: { id: 'dis
         },
         async uploadFile(request) {
           uploads.push(request);
-          return { fileID: 'cloud://env/families/family-1/recipe-audio/audio-1.m4a' };
+          return { fileID: 'cloud://env/families/family-1/recipe-audio/recording-1.mp3' };
         },
       },
     },
@@ -86,14 +86,30 @@ test('recording upload uses only a matching server reservation and returns its f
 
   const fileID = await service.uploadRecording({
     familyId: 'family-1',
-    cloudPath: 'families/family-1/recipe-audio/reserved-audio.m4a',
-  }, 'wxfile://recording.m4a');
+    recordingId: 'recording-1',
+    cloudPath: 'families/family-1/recipe-audio/recording-1.mp3',
+  }, 'wxfile://recording.mp3');
 
-  assert.equal(fileID, 'cloud://env/families/family-1/recipe-audio/audio-1.m4a');
+  assert.equal(fileID, 'cloud://env/families/family-1/recipe-audio/recording-1.mp3');
   assert.deepEqual(fake.uploads, [{
-    cloudPath: 'families/family-1/recipe-audio/reserved-audio.m4a',
-    filePath: 'wxfile://recording.m4a',
+    cloudPath: 'families/family-1/recipe-audio/recording-1.mp3',
+    filePath: 'wxfile://recording.mp3',
   }]);
+});
+
+test('recording upload requires the reserved MP3 path to match its recording id', async () => {
+  const fake = createFakeApi();
+  const service = createRecipeAssistant(fake.api, { envId: 'env-test' });
+
+  for (const reservation of [
+    { familyId: 'family-1', recordingId: 'recording-1', cloudPath: 'families/family-1/recipe-audio/other.mp3' },
+    { familyId: 'family-1', recordingId: 'recording-1', cloudPath: 'families/family-1/recipe-audio/recording-1.m4a' },
+  ]) {
+    await assert.rejects(service.uploadRecording(reservation, 'wxfile://recording.mp3'), {
+      code: 'INVALID_RECORDING_RESERVATION', action: 'uploadRecording',
+    });
+  }
+  assert.equal(fake.uploads.length, 0);
 });
 
 test('recording upload rejects a reservation outside its family audio namespace', async () => {
@@ -124,8 +140,9 @@ test('recording upload normalizes transport failure without exposing reservation
   await assert.rejects(
     service.uploadRecording({
       familyId: 'family-1',
-      cloudPath: 'families/family-1/recipe-audio/reserved-audio.m4a',
-    }, 'wxfile://recording.m4a'),
+      recordingId: 'recording-private',
+      cloudPath: 'families/family-1/recipe-audio/recording-private.mp3',
+    }, 'wxfile://recording.mp3'),
     (error) => error instanceof Error
       && error.code === 'RECIPE_AUDIO_UPLOAD_FAILED'
       && error.action === 'uploadRecording'
@@ -141,8 +158,9 @@ test('recording upload normalizes a response without a file id', async () => {
   await assert.rejects(
     service.uploadRecording({
       familyId: 'family-1',
-      cloudPath: 'families/family-1/recipe-audio/reserved-audio.m4a',
-    }, 'wxfile://recording.m4a'),
+      recordingId: 'recording-empty',
+      cloudPath: 'families/family-1/recipe-audio/recording-empty.mp3',
+    }, 'wxfile://recording.mp3'),
     (error) => error instanceof Error
       && error.code === 'RECIPE_AUDIO_UPLOAD_FAILED'
       && error.action === 'uploadRecording'

@@ -54,9 +54,10 @@ function createRecipeAssistant(api, options = {}) {
 
   async function uploadRecording(reservation, filePath) {
     const familyId = reservation && reservation.familyId;
+    const recordingId = reservation && reservation.recordingId;
     const cloudPath = reservation && reservation.cloudPath;
-    const expectedPrefix = `families/${familyId}/recipe-audio/`;
-    if (!familyId || typeof cloudPath !== 'string' || !cloudPath.startsWith(expectedPrefix)) {
+    const expectedPath = `families/${familyId}/recipe-audio/${recordingId}.mp3`;
+    if (!familyId || !recordingId || cloudPath !== expectedPath) {
       throw createUploadError('INVALID_RECORDING_RESERVATION');
     }
     if (typeof api.cloud.uploadFile !== 'function') {

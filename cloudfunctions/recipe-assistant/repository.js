@@ -91,12 +91,33 @@ function createRecipeRepository(db, config) {
       familyIdOrInput, dishIdArg, recordingIdArg, 'recordingId'
     );
     const recording = await getDocument(config.recordingCollection, recordingId);
-    return owned(recording, familyId, dishId) && (recordId == null || recording.recordId === recordId) ? recording : null;
+    return owned(recording, familyId, dishId)
+      && recording.sourceType !== 'workspace_state'
+      && (recordId == null || recording.recordId === recordId) ? recording : null;
   }
 
   async function listRecordings(familyId, dishId, recordId) {
-    return query(config.recordingCollection, { familyId, dishId, recordId }, {
+    const recordings = await query(config.recordingCollection, { familyId, dishId, recordId }, {
       orderBy: 'sequence', order: 'asc', limit: 100,
+    });
+    return recordings.filter((item) => item.sourceType !== 'workspace_state');
+  }
+
+  async function setRecording(id, data) {
+    return id
+      ? setDocument(config.recordingCollection, id, data)
+      : addDocument(config.recordingCollection, data);
+  }
+
+  async function getWorkspaceState(familyId, dishId, recordId) {
+    const state = await getDocument(config.recordingCollection, workspaceStateDocumentId(familyId, dishId, recordId));
+    return owned(state, familyId, dishId) && state.recordId === recordId && state.sourceType === 'workspace_state'
+      ? state : null;
+  }
+
+  async function setWorkspaceState(familyId, dishId, recordId, data) {
+    return setDocument(config.recordingCollection, workspaceStateDocumentId(familyId, dishId, recordId), {
+      ...data, familyId, dishId, recordId, sourceType: 'workspace_state',
     });
   }
 
@@ -115,6 +136,9 @@ function createRecipeRepository(db, config) {
     createVersion,
     getRecording,
     listRecordings,
+    setRecording,
+    getWorkspaceState,
+    setWorkspaceState,
     runTransaction,
   };
   return api;
@@ -131,6 +155,10 @@ function normalizeOwnedLookup(familyIdOrInput, dishId, documentId, documentKey =
 
 function versionDocumentId(familyId, dishId, versionNumber) {
   return `${familyId}|${dishId}|${versionNumber}`;
+}
+
+function workspaceStateDocumentId(familyId, dishId, recordId) {
+  return `workspace-${familyId}-${dishId}-${recordId}`;
 }
 
 function sameDocument(existing, expected) {

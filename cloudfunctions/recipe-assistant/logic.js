@@ -30,6 +30,11 @@ function requireRevision(value) {
   throw createRecipeError('REVISION_INVALID', '草稿版本号无效', 'validate');
 }
 
+function requireTranscriptRevision(value) {
+  if (Number.isInteger(value) && value >= 0) return value;
+  throw createRecipeError('TRANSCRIPT_REVISION_INVALID', '转写版本号无效', 'validate');
+}
+
 function withoutSystemId(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
   const payload = { ...data };
@@ -47,6 +52,7 @@ function sanitize(value) {
 
 function sensitiveKey(key) {
   const normalized = String(key || '').toLowerCase();
+  if (normalized === 'audiourls') return false;
   return normalized.includes('openid') || /urls?$/.test(normalized);
 }
 
@@ -54,6 +60,7 @@ module.exports = {
   createRecipeError,
   publicMessage,
   requireRevision,
+  requireTranscriptRevision,
   requireValue,
   runtimeErrorCode,
   sanitize,

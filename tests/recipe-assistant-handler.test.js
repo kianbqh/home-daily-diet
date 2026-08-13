@@ -314,11 +314,11 @@ test('pending direct-record actions verify cross-dish and cross-family record ow
   const db = createMemoryDatabase(seed);
   const actions = [
     ['getRecordWorkspace', 'success'],
-    ['reserveRecording', 'ACTION_INVALID'],
+    ['reserveRecording', 'RECORDING_FORMAT_INVALID'],
     ['refreshWorkspace', 'ACTION_INVALID'],
-    ['addManualText', 'ACTION_INVALID'],
-    ['attachRecordWorkspace', 'ACTION_INVALID'],
-    ['cancelRecordWorkspace', 'ACTION_INVALID'],
+    ['addManualText', 'TEXT_REQUIRED'],
+    ['attachRecordWorkspace', 'success'],
+    ['cancelRecordWorkspace', 'success'],
   ];
 
   for (const [action, ownedOutcome] of actions) {
@@ -348,9 +348,14 @@ test('recordingId actions derive record ownership from the owned recording and i
     'recording-broken-binding': { _id: 'recording-broken-binding', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-deleted' },
   };
   const db = createMemoryDatabase(seed);
-  const actions = ['submitRecording', 'updateTranscript', 'deleteRecordingAudio', 'deleteRecording'];
+  const actions = [
+    ['submitRecording', 'FILE_REQUIRED'],
+    ['updateTranscript', 'TRANSCRIPT_REVISION_INVALID'],
+    ['deleteRecordingAudio', 'TRANSCRIPT_REQUIRED'],
+    ['deleteRecording', 'success'],
+  ];
 
-  for (const action of actions) {
+  for (const [action, ownedOutcome] of actions) {
     const missing = await invoke(db, {
       action, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
     });
@@ -374,7 +379,8 @@ test('recordingId actions derive record ownership from the owned recording and i
       action, familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-owned',
       recordId: 'record-deleted',
     });
-    assert.equal(owned.error.code, 'ACTION_INVALID', `${action}: forged recordId ignored`);
+    assert.equal(ownedOutcome === 'success' ? owned.ok : owned.error.code,
+      ownedOutcome === 'success' ? true : ownedOutcome, `${action}: forged recordId ignored`);
   }
 });
 
@@ -1129,4 +1135,357 @@ test('main trusts only getWXContext OPENID and emits only the permitted error lo
     Module._load = originalLoad;
     console.error = originalError;
   }
+});
+
+function recordingServices(overrides = {}) {
+  const deleted = [];
+  const submitted = [];
+  return {
+    deleted,
+    submitted,
+    fileApi: {
+      async getFileInfo({ fileId }) {
+        return { fileId, byteLength: 1024, format: 'mp3', durationMs: 60_000 };
+      },
+      async getTempFileURL({ fileList }) {
+        return { fileList: fileList.map((fileId) => ({ fileID: fileId, tempFileURL: `https://temp.example/${encodeURIComponent(fileId)}` })) };
+      },
+      async deleteFile({ fileList }) {
+        deleted.push(...fileList);
+        return { fileList };
+      },
+    },
+    asrProvider: {
+      async submit(input) {
+        submitted.push(input);
+        return { taskId: 'task-1', requestId: 'asr-request-1', submittedAt: 100, expiresAt: 200 };
+      },
+    },
+    idGenerator: () => 'recording-fixed',
+    ...overrides,
+  };
+}
+
+async function reserveOwnedRecording(db, services = recordingServices(), extra = {}) {
+  const result = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordId: 'record-1', format: 'mp3', ...extra,
+  }, 'openid-a', services);
+  return { result, services };
+}
+
+test('reserves an owned MP3 upload path and rejects format, clip-count, and family scope violations', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices();
+  const reserved = await reserveOwnedRecording(db, services);
+
+  assert.equal(reserved.result.ok, true);
+  assert.deepEqual(reserved.result.data, {
+    recordingId: 'recording-fixed',
+    cloudPath: 'families/family-a/recipe-audio/recording-fixed.mp3',
+    expiresAt: 604800100,
+  });
+  assert.equal(db.records('recipe_recordings').get('recording-fixed').status, 'reserved');
+  assert.equal(db.records('recipe_recordings').get('recording-fixed').sequence, 1);
+
+  const badFormat = await reserveOwnedRecording(createMemoryDatabase(baseSeed()), recordingServices(), { format: 'm4a' });
+  assert.equal(badFormat.result.error.code, 'RECORDING_FORMAT_INVALID');
+
+  const fullSeed = baseSeed();
+  fullSeed.recipe_recordings = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`clip-${index}`, {
+    _id: `clip-${index}`, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+    sequence: index + 1, status: 'ready', durationMs: 1,
+  }]));
+  const full = await reserveOwnedRecording(createMemoryDatabase(fullSeed), recordingServices());
+  assert.equal(full.result.error.code, 'RECORDING_LIMIT_EXCEEDED');
+
+  const foreign = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-b', dishId: 'dish-1', recordId: 'record-1', format: 'mp3',
+  }, 'openid-a', services);
+  assert.equal(foreign.error.code, 'NOT_MEMBER');
+});
+
+test('submitRecording accepts only its exact reserved file and trusted MP3 metadata', async () => {
+  const cases = [
+    ['forged path', { fileId: 'cloud://env/families/family-b/recipe-audio/other.mp3' }, {}, 'FILE_ACCESS_DENIED'],
+    ['oversize', {}, { fileApi: { async getFileInfo() { return { byteLength: 5 * 1024 * 1024 + 1, format: 'mp3', durationMs: 1 }; } } }, 'FILE_TOO_LARGE'],
+    ['too long', {}, { fileApi: { async getFileInfo() { return { byteLength: 10, format: 'mp3', durationMs: 180_001 }; } } }, 'RECORDING_LIMIT_EXCEEDED'],
+    ['wrong metadata format', {}, { fileApi: { async getFileInfo() { return { byteLength: 10, format: 'm4a', durationMs: 1 }; } } }, 'RECORDING_FORMAT_INVALID'],
+    ['metadata unavailable', {}, { fileApi: { async getFileInfo() { throw new Error('private provider failure'); } } }, 'FILE_METADATA_UNAVAILABLE'],
+  ];
+  for (const [label, eventPatch, servicePatch, code] of cases) {
+    const db = createMemoryDatabase(baseSeed());
+    const base = recordingServices();
+    const services = { ...base, ...servicePatch };
+    await reserveOwnedRecording(db, services);
+    const submitted = await invoke(db, {
+      action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+      fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3', byteLength: 1,
+      ...eventPatch,
+    }, 'openid-a', services);
+    assert.equal(submitted.error.code, code, label);
+  }
+
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices();
+  await reserveOwnedRecording(db, services);
+  const submitted = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3', byteLength: 99_999_999,
+  }, 'openid-a', services);
+  assert.equal(submitted.ok, true);
+  const stored = db.records('recipe_recordings').get('recording-fixed');
+  assert.equal(stored.byteLength, 1024);
+  assert.equal(stored.durationMs, 60_000);
+  assert.equal(stored.status, 'transcribing');
+  assert.equal(stored.asrTaskId, 'task-1');
+});
+
+test('submitRecording rejects a trusted duration that would exceed fifteen minutes', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    prior: { _id: 'prior', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1, status: 'ready', durationMs: 850_000 },
+  };
+  const services = recordingServices({
+    idGenerator: () => 'recording-next',
+    fileApi: { async getFileInfo() { return { byteLength: 1024, format: 'mp3', durationMs: 60_000 }; } },
+  });
+  const db = createMemoryDatabase(seed);
+  await reserveOwnedRecording(db, services);
+  const result = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-next',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-next.mp3',
+  }, 'openid-a', services);
+  assert.equal(result.error.code, 'RECORDING_LIMIT_EXCEEDED');
+});
+
+test('manual text, transcript revisions, attachment, and workspace audio URLs follow the workspace contract', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices({ idGenerator: () => 'manual-fixed' });
+  const added = await invoke(db, {
+    action: 'addManualText', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', text: ' 少放盐 ',
+  }, 'openid-a', services);
+  assert.equal(added.data.recording.sourceType, 'manual_text');
+  assert.equal(added.data.recording.editedTranscript, '少放盐');
+  assert.equal(added.data.recording.transcriptRevision, 0);
+
+  const updated = await invoke(db, {
+    action: 'updateTranscript', familyId: 'family-a', dishId: 'dish-1', recordingId: 'manual-fixed',
+    transcriptRevision: 0, text: '少放一点盐',
+  }, 'openid-a', services);
+  assert.equal(updated.data.recording.transcriptRevision, 1);
+  const stale = await invoke(db, {
+    action: 'updateTranscript', familyId: 'family-a', dishId: 'dish-1', recordingId: 'manual-fixed',
+    transcriptRevision: 0, text: '覆盖别人修改',
+  }, 'openid-a', services);
+  assert.equal(stale.error.code, 'TRANSCRIPT_CONFLICT');
+
+  const reserved = recordingServices({ idGenerator: () => 'recording-audio-fixed' });
+  await reserveOwnedRecording(db, reserved);
+  await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-audio-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-audio-fixed.mp3',
+  }, 'openid-a', reserved);
+  const attached = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', reserved);
+  assert.equal(attached.ok, true);
+  assert.equal(db.records('recipe_recordings').get('recording-audio-fixed').draftExpiresAt, null);
+
+  const workspace = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', reserved);
+  assert.deepEqual(workspace.data.recordings.map((item) => item.sequence), [1, 2]);
+  assert.equal(workspace.data.audioUrls['recording-audio-fixed'].startsWith('https://temp.example/'), true);
+  assert.equal(JSON.stringify([...db.records('recipe_recordings').values()]).includes('temp.example'), false);
+});
+
+test('audio deletion requires text, persists before deleting, and keeps retry state on provider failure', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: { _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1, sourceType: 'audio', status: 'ready', fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3', rawTranscript: '', editedTranscript: '', transcriptRevision: 0 },
+  };
+  const db = createMemoryDatabase(seed);
+  const denied = await invoke(db, {
+    action: 'deleteRecordingAudio', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', recordingServices());
+  assert.equal(denied.error.code, 'TRANSCRIPT_REQUIRED');
+
+  db.records('recipe_recordings').get('audio').editedTranscript = '保留文字';
+  const failing = recordingServices({ fileApi: {
+    async deleteFile() { throw new Error('delete failed'); },
+  } });
+  const pending = await invoke(db, {
+    action: 'deleteRecordingAudio', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', failing);
+  assert.equal(pending.ok, true);
+  assert.equal(db.records('recipe_recordings').get('audio').audioDeletePending, true);
+  assert.equal(db.records('recipe_recordings').get('audio').fileId.includes('audio.mp3'), true);
+
+  const retry = recordingServices();
+  const deleted = await invoke(db, {
+    action: 'deleteRecordingAudio', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', retry);
+  assert.equal(deleted.ok, true);
+  assert.equal(db.records('recipe_recordings').get('audio').fileId, '');
+  assert.equal(db.records('recipe_recordings').get('audio').audioDeletePending, false);
+});
+
+test('deleting a transcribing recording leaves a tombstone that rejects late transcript writes', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: { _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1, sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3', transcriptRevision: 0 },
+  };
+  const db = createMemoryDatabase(seed);
+  const services = recordingServices();
+  const removed = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', services);
+  assert.equal(removed.ok, true);
+  assert.equal(db.records('recipe_recordings').get('audio').status, 'deleted');
+
+  const late = await invoke(db, {
+    action: 'updateTranscript', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+    transcriptRevision: 0, text: '迟到的识别结果',
+  }, 'openid-a', services);
+  assert.equal(late.error.code, 'RECORDING_DELETED');
+  assert.equal(db.records('recipe_recordings').get('audio').editedTranscript || '', '');
+});
+
+test('a tombstoned recording retries a previously failed cloud-file deletion', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: { _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3',
+      transcriptRevision: 0 },
+  };
+  const db = createMemoryDatabase(seed);
+  const failed = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', recordingServices({ fileApi: { async deleteFile() { throw new Error('offline'); } } }));
+  assert.equal(failed.ok, true);
+  assert.equal(failed.data.recording.audioDeletePending, true);
+
+  const retry = recordingServices();
+  const cleaned = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio',
+  }, 'openid-a', retry);
+  assert.equal(cleaned.ok, true);
+  assert.equal(cleaned.data.recording.audioDeletePending, false);
+  assert.equal(cleaned.data.recording.fileId, '');
+  assert.deepEqual(retry.deleted, ['cloud://env/families/family-a/recipe-audio/audio.mp3']);
+});
+
+test('deletion while ASR submission is pending prevents a late result from resurrecting the recording', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  let releaseSubmit;
+  let submitStarted;
+  const started = new Promise((resolve) => { submitStarted = resolve; });
+  const services = recordingServices({
+    idGenerator: () => 'recording-race',
+    asrProvider: {
+      submit() {
+        submitStarted();
+        return new Promise((resolve) => { releaseSubmit = resolve; });
+      },
+    },
+  });
+  await reserveOwnedRecording(db, services);
+  const submitting = invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-race',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-race.mp3',
+  }, 'openid-a', services);
+  await started;
+
+  const deleted = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-race',
+  }, 'openid-a', services);
+  assert.equal(deleted.ok, true);
+  releaseSubmit({ taskId: 'late-task', requestId: 'late-request' });
+  const late = await submitting;
+
+  assert.equal(late.error.code, 'RECORDING_DELETED');
+  const stored = db.records('recipe_recordings').get('recording-race');
+  assert.equal(stored.status, 'deleted');
+  assert.notEqual(stored.asrTaskId, 'late-task');
+});
+
+test('workspace counters serialize concurrent reservations and release duration on tombstone deletion', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`clip-${index}`, {
+    _id: `clip-${index}`, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+    sequence: index + 1, sourceType: 'audio', status: 'ready', durationMs: 100_000,
+    durationCommitted: true,
+  }]));
+  const db = createMemoryDatabase(seed);
+  const first = recordingServices({ idGenerator: () => 'recording-ten' });
+  const second = recordingServices({ idGenerator: () => 'recording-eleven' });
+
+  const [ten, eleven] = await Promise.all([
+    reserveOwnedRecording(db, first),
+    reserveOwnedRecording(db, second),
+  ]);
+  assert.deepEqual([ten.result.ok, eleven.result.ok].sort(), [false, true]);
+  assert.equal([ten.result, eleven.result].find((item) => !item.ok).error.code, 'RECORDING_LIMIT_EXCEEDED');
+
+  const successful = [ten.result, eleven.result].find((item) => item.ok);
+  const recordingId = successful.data.recordingId;
+  const selected = recordingId === 'recording-ten' ? first : second;
+  await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId,
+    fileId: `cloud://env/families/family-a/recipe-audio/${recordingId}.mp3`,
+  }, 'openid-a', selected);
+  const deleted = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId,
+  }, 'openid-a', selected);
+  assert.equal(deleted.ok, true);
+
+  const state = db.records('recipe_recordings').get('workspace-family-a-dish-1-record-1');
+  assert.equal(state.activeCount, 9);
+  assert.equal(state.totalDurationMs, 900_000);
+
+  const replacement = await reserveOwnedRecording(db, recordingServices({ idGenerator: () => 'recording-replacement' }));
+  assert.equal(replacement.result.ok, true);
+});
+
+test('manual text shares the ten-segment workspace quota', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`clip-${index}`, {
+    _id: `clip-${index}`, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+    sequence: index + 1, sourceType: 'manual_text', status: 'ready', durationMs: 0,
+  }]));
+  const result = await invoke(createMemoryDatabase(seed), {
+    action: 'addManualText', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', text: '第十一段',
+  }, 'openid-a', recordingServices({ idGenerator: () => 'manual-eleven' }));
+  assert.equal(result.error.code, 'RECORDING_LIMIT_EXCEEDED');
+});
+
+test('workspace state documents are not addressable as recordings and foreign audio never gets a temporary URL', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    'workspace-family-a-dish-1-record-1': {
+      _id: 'workspace-family-a-dish-1-record-1', familyId: 'family-a', dishId: 'dish-1',
+      recordId: 'record-1', sourceType: 'workspace_state', status: 'active', activeCount: 1,
+    },
+    foreign: {
+      _id: 'foreign', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'ready', fileId: 'cloud://env/families/family-b/recipe-audio/foreign.mp3',
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const internal = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordingId: 'workspace-family-a-dish-1-record-1',
+  }, 'openid-a', recordingServices());
+  assert.equal(internal.error.code, 'RECORDING_NOT_FOUND');
+
+  let requested = null;
+  const workspace = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', recordingServices({ fileApi: {
+    async getTempFileURL(input) { requested = input; return { fileList: [] }; },
+  } }));
+  assert.equal(workspace.ok, true);
+  assert.deepEqual(workspace.data.audioUrls, {});
+  assert.equal(requested, null);
 });

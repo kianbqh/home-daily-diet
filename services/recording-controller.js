@@ -23,9 +23,10 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   let destroyed = false;
   let timerId = null;
   let active = null;
-  let localIdSequence = 0;
+  let lifecycleVersion = 0;
   const listeners = new Set();
   let state = idleState();
+  const recorderHandlers = {};
 
   const currentTime = () => clock.now();
 
@@ -65,10 +66,13 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   }
 
   function cancel() {
-    if (destroyed || !active) return;
+    if (destroyed) return;
+    lifecycleVersion += 1;
+    const recording = active;
     active = null;
     clearTimer();
-    if (typeof recorderManager.cancel === 'function') recorderManager.cancel();
+    if (recording && typeof recorderManager.cancel === 'function') recorderManager.cancel();
+    else if (recording && typeof recorderManager.stop === 'function') recorderManager.stop();
     emit(idleState());
   }
 
@@ -99,6 +103,8 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     if (entry.savedFilePath) {
       try {
         await fileSystem.removeSavedFile({ filePath: entry.savedFilePath });
+        entries[index] = { ...entries[index], savedFilePath: null };
+        writeEntries();
       } catch (error) {
         emit(errorState('LOCAL_FILE_UNAVAILABLE'));
       }
@@ -123,27 +129,45 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
 
   function destroy() {
     if (destroyed) return;
+    lifecycleVersion += 1;
     destroyed = true;
     clearTimer();
     active = null;
+    unbindRecorderHandlers();
     listeners.clear();
   }
 
   function bindRecorderHandlers() {
     if (typeof recorderManager.onStop === 'function') {
-      recorderManager.onStop((result) => handleFinished(result, false));
+      recorderHandlers.stop = (result) => handleFinished(result, false);
+      recorderManager.onStop(recorderHandlers.stop);
     }
     if (typeof recorderManager.onError === 'function') {
-      recorderManager.onError((error) => {
+      recorderHandlers.error = (error) => {
         if (destroyed || !active) return;
         active = null;
         clearTimer();
         emit(errorState(isMicrophoneDenied(error) ? 'MICROPHONE_DENIED' : 'RECORDING_INTERRUPTED'));
-      });
+      };
+      recorderManager.onError(recorderHandlers.error);
     }
     if (typeof recorderManager.onInterruptionBegin === 'function') {
-      recorderManager.onInterruptionBegin((result) => handleFinished(result, true));
+      recorderHandlers.interruption = (result) => handleFinished(result, true);
+      recorderManager.onInterruptionBegin(recorderHandlers.interruption);
     }
+  }
+
+  function unbindRecorderHandlers() {
+    const mappings = [
+      ['offStop', 'stop'],
+      ['offError', 'error'],
+      ['offInterruptionBegin', 'interruption'],
+    ];
+    mappings.forEach(([offMethod, handlerName]) => {
+      if (recorderHandlers[handlerName] && typeof recorderManager[offMethod] === 'function') {
+        recorderManager[offMethod](recorderHandlers[handlerName]);
+      }
+    });
   }
 
   async function handleFinished(result, interrupted) {
@@ -160,23 +184,32 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
       return;
     }
     active = null;
-    const durationMs = Number.isFinite(result.duration)
-      ? result.duration
-      : Math.min(session.durationLimit, Math.max(0, currentTime() - session.startedAt));
+    const reportedDuration = Number(result.duration);
+    const elapsedMs = Math.min(session.durationLimit, Math.max(0, currentTime() - session.startedAt));
+    const durationMs = Number.isFinite(reportedDuration) && reportedDuration > 0
+      ? reportedDuration
+      : elapsedMs;
+    if (durationMs <= 0) {
+      emit(errorState('LOCAL_FILE_UNAVAILABLE'));
+      return;
+    }
     if (durationMs > session.durationLimit || durationMs > remainingWorkspaceDuration(session.workspaceKey)) {
       emit(errorState('RECORDING_LIMIT_EXCEEDED'));
       return;
     }
-    const clip = await persistClip(session.workspaceKey, result.tempFilePath, durationMs, result.fileSize);
+    const captureVersion = lifecycleVersion;
+    const clip = await persistClip(
+      session.workspaceKey, result.tempFilePath, durationMs, result.fileSize, captureVersion
+    );
     if (destroyed) return;
     if (clip) {
       emit({ status: 'idle', elapsedMs: 0, remainingMs: MAX_DURATION_MS, localClip: clone(clip), errorCode: null });
     }
   }
 
-  async function persistClip(workspaceKey, tempFilePath, durationMs, fallbackByteLength) {
+  async function persistClip(workspaceKey, tempFilePath, durationMs, fallbackByteLength, captureVersion) {
     const base = {
-      localId: `${currentTime()}-${++localIdSequence}`,
+      localId: nextLocalId(),
       workspaceKey,
       durationMs,
       format: 'mp3',
@@ -186,20 +219,24 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     };
     try {
       const saved = await fileSystem.saveFile({ tempFilePath });
+      if (destroyed || captureVersion !== lifecycleVersion) return null;
       const savedFilePath = saved && saved.savedFilePath;
       if (!savedFilePath) throw new Error('saved file path unavailable');
       let byteLength = base.byteLength;
       try {
         const info = await fileSystem.getFileInfo({ filePath: savedFilePath });
+        if (destroyed || captureVersion !== lifecycleVersion) return null;
         if (info && Number.isFinite(info.size)) byteLength = info.size;
       } catch (error) {
         // A saved file remains recoverable even if its size cannot be read.
       }
       const clip = { ...base, savedFilePath, byteLength };
+      if (destroyed || captureVersion !== lifecycleVersion) return null;
       entries.push(clip);
       writeEntries();
       return clip;
     } catch (error) {
+      if (destroyed || captureVersion !== lifecycleVersion) return null;
       const clip = { ...base, savedFilePath: null, tempFilePath, sessionOnly: true };
       entries.push(clip);
       writeEntries();
@@ -215,6 +252,12 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
       .filter((entry) => entry.workspaceKey === workspaceKey)
       .reduce((total, entry) => total + (entry.durationMs || 0), 0);
     return Math.min(MAX_DURATION_MS, Math.max(0, MAX_WORKSPACE_DURATION_MS - usedMs));
+  }
+  function nextLocalId() {
+    const timestamp = currentTime();
+    let sequence = 1;
+    while (entries.some((entry) => entry.localId === `${timestamp}-${sequence}`)) sequence += 1;
+    return `${timestamp}-${sequence}`;
   }
 
   function isActive(token) { return !destroyed && active && active.token === token; }
@@ -244,7 +287,7 @@ function normalizeEntry(entry) {
     localId: entry.localId,
     workspaceKey: entry.workspaceKey,
     savedFilePath: typeof entry.savedFilePath === 'string' ? entry.savedFilePath : null,
-    durationMs: Number.isFinite(entry.durationMs) ? entry.durationMs : 0,
+    durationMs: Number.isFinite(entry.durationMs) ? Math.max(0, entry.durationMs) : 0,
     format: 'mp3',
     byteLength: Number.isFinite(entry.byteLength) ? entry.byteLength : 0,
     createdAt: entry.createdAt,

@@ -23,10 +23,11 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   let destroyed = false;
   let timerId = null;
   let active = null;
-  let lifecycleVersion = 0;
   const listeners = new Set();
   let state = idleState();
   const recorderHandlers = {};
+  const reservedLocalIds = new Set(entries.map((entry) => entry.localId));
+  const pendingCaptures = [];
 
   const currentTime = () => clock.now();
 
@@ -47,7 +48,9 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     }
     const startedAt = currentTime();
     const token = {};
-    active = { token, workspaceKey, startedAt, durationLimit, stopping: false };
+    active = {
+      token, workspaceKey, startedAt, durationLimit, stopping: false, discarded: false,
+    };
     emit(recordingState(0, durationLimit));
     timerId = timerApi.setInterval(() => {
       if (!isActive(token)) return;
@@ -67,8 +70,9 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
 
   function cancel() {
     if (destroyed) return;
-    lifecycleVersion += 1;
     const recording = active;
+    if (recording) recording.discarded = true;
+    if (!recording && pendingCaptures.length) pendingCaptures.at(-1).discarded = true;
     active = null;
     clearTimer();
     if (recording && typeof recorderManager.cancel === 'function') recorderManager.cancel();
@@ -129,10 +133,17 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
 
   function destroy() {
     if (destroyed) return;
-    lifecycleVersion += 1;
+    const recording = active;
+    if (recording) recording.discarded = true;
     destroyed = true;
     clearTimer();
     active = null;
+    try {
+      if (recording && typeof recorderManager.cancel === 'function') recorderManager.cancel();
+      else if (recording && typeof recorderManager.stop === 'function') recorderManager.stop();
+    } catch (error) {
+      // Shutdown is best effort; listener/timer cleanup must still complete.
+    }
     unbindRecorderHandlers();
     listeners.clear();
   }
@@ -197,19 +208,25 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
       emit(errorState('RECORDING_LIMIT_EXCEEDED'));
       return;
     }
-    const captureVersion = lifecycleVersion;
-    const clip = await persistClip(
-      session.workspaceKey, result.tempFilePath, durationMs, result.fileSize, captureVersion
-    );
+    const capture = { discarded: false, localId: nextLocalId() };
+    pendingCaptures.push(capture);
+    let clip;
+    try {
+      clip = await persistClip(
+        session.workspaceKey, result.tempFilePath, durationMs, result.fileSize, capture
+      );
+    } finally {
+      pendingCaptures.splice(pendingCaptures.indexOf(capture), 1);
+    }
     if (destroyed) return;
     if (clip) {
       emit({ status: 'idle', elapsedMs: 0, remainingMs: MAX_DURATION_MS, localClip: clone(clip), errorCode: null });
     }
   }
 
-  async function persistClip(workspaceKey, tempFilePath, durationMs, fallbackByteLength, captureVersion) {
+  async function persistClip(workspaceKey, tempFilePath, durationMs, fallbackByteLength, capture) {
     const base = {
-      localId: nextLocalId(),
+      localId: capture.localId,
       workspaceKey,
       durationMs,
       format: 'mp3',
@@ -219,24 +236,33 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     };
     try {
       const saved = await fileSystem.saveFile({ tempFilePath });
-      if (destroyed || captureVersion !== lifecycleVersion) return null;
       const savedFilePath = saved && saved.savedFilePath;
+      if (isInvalidCapture(capture)) {
+        await removeOrphan(savedFilePath);
+        return null;
+      }
       if (!savedFilePath) throw new Error('saved file path unavailable');
       let byteLength = base.byteLength;
       try {
         const info = await fileSystem.getFileInfo({ filePath: savedFilePath });
-        if (destroyed || captureVersion !== lifecycleVersion) return null;
+        if (isInvalidCapture(capture)) {
+          await removeOrphan(savedFilePath);
+          return null;
+        }
         if (info && Number.isFinite(info.size)) byteLength = info.size;
       } catch (error) {
         // A saved file remains recoverable even if its size cannot be read.
       }
       const clip = { ...base, savedFilePath, byteLength };
-      if (destroyed || captureVersion !== lifecycleVersion) return null;
+      if (isInvalidCapture(capture)) {
+        await removeOrphan(savedFilePath);
+        return null;
+      }
       entries.push(clip);
       writeEntries();
       return clip;
     } catch (error) {
-      if (destroyed || captureVersion !== lifecycleVersion) return null;
+      if (isInvalidCapture(capture)) return null;
       const clip = { ...base, savedFilePath: null, tempFilePath, sessionOnly: true };
       entries.push(clip);
       writeEntries();
@@ -256,8 +282,20 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   function nextLocalId() {
     const timestamp = currentTime();
     let sequence = 1;
-    while (entries.some((entry) => entry.localId === `${timestamp}-${sequence}`)) sequence += 1;
-    return `${timestamp}-${sequence}`;
+    while (reservedLocalIds.has(`${timestamp}-${sequence}`)) sequence += 1;
+    const localId = `${timestamp}-${sequence}`;
+    reservedLocalIds.add(localId);
+    return localId;
+  }
+
+  function isInvalidCapture(capture) { return destroyed || capture.discarded; }
+  async function removeOrphan(savedFilePath) {
+    if (!savedFilePath) return;
+    try {
+      await fileSystem.removeSavedFile({ filePath: savedFilePath });
+    } catch (error) {
+      // Best-effort orphan cleanup cannot re-enable a destroyed or discarded capture.
+    }
   }
 
   function isActive(token) { return !destroyed && active && active.token === token; }

@@ -501,3 +501,112 @@ test('workspace cap remains enforced after a derived invalid duration', async ()
   assert.equal(recorderManager.startCalls.length, 1);
   controller.destroy();
 });
+
+test('destroy stops an active recorder without cancel and leaves no timer, callback, or storage effect', async () => {
+  const recorderManager = createRecorder({ withoutCancel: true });
+  const { controller, timerApi, storage } = createController({ recorderManager });
+  const states = [];
+  controller.on('state', (state) => states.push(state));
+  controller.start('family-1|dish-1|record-1');
+  controller.destroy();
+  assert.equal(recorderManager.stopCalls, 1);
+  assert.equal(timerApi.activeCount(), 0);
+  await recorderManager.finish({ tempFilePath: 'wxfile://tmp/destroyed.mp3', duration: 500 });
+  assert.deepEqual(storage.entries(), []);
+  assert.equal(states.length, 1);
+});
+
+test('destroy cleans up even when recorder shutdown throws', () => {
+  const recorderManager = createRecorder({ withoutCancel: true, withOff: true });
+  recorderManager.stop = () => { recorderManager.stopCalls += 1; throw new Error('shutdown failure'); };
+  const { controller, timerApi } = createController({ recorderManager });
+  controller.start('family-1|dish-1|record-1');
+  assert.doesNotThrow(() => controller.destroy());
+  assert.equal(recorderManager.stopCalls, 1);
+  assert.equal(timerApi.activeCount(), 0);
+  assert.deepEqual(recorderManager.offCalls.sort(), ['error', 'interruption', 'stop']);
+});
+
+test('destroy removes a saved file when deferred saveFile resolves after invalidation', async () => {
+  const deferredSave = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.saveFile = async ({ tempFilePath }) => {
+    fileSystem.calls.push(['saveFile', tempFilePath]);
+    return deferredSave.promise;
+  };
+  const { controller, recorderManager, storage } = createController({ fileSystem });
+  controller.start('family-1|dish-1|record-1');
+  const finish = recorderManager.finish({ tempFilePath: 'wxfile://tmp/orphan-save.mp3', duration: 500 });
+  await Promise.resolve();
+  controller.destroy();
+  deferredSave.resolve({ savedFilePath: 'wxfile://saved/orphan-save.mp3' });
+  await finish;
+  assert.deepEqual(fileSystem.calls, [
+    ['saveFile', 'wxfile://tmp/orphan-save.mp3'],
+    ['removeSavedFile', 'wxfile://saved/orphan-save.mp3'],
+  ]);
+  assert.deepEqual(storage.writes, []);
+});
+
+test('destroy removes a saved file when invalidated after deferred getFileInfo', async () => {
+  const deferredInfo = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.getFileInfo = async ({ filePath }) => {
+    fileSystem.calls.push(['getFileInfo', filePath]);
+    return deferredInfo.promise;
+  };
+  const { controller, recorderManager, storage } = createController({ fileSystem });
+  controller.start('family-1|dish-1|record-1');
+  const finish = recorderManager.finish({ tempFilePath: 'wxfile://tmp/orphan-info.mp3', duration: 500 });
+  await Promise.resolve();
+  controller.destroy();
+  deferredInfo.resolve({ size: 321 });
+  await finish;
+  assert.deepEqual(fileSystem.calls, [
+    ['saveFile', 'wxfile://tmp/orphan-info.mp3'],
+    ['getFileInfo', 'wxfile://saved/orphan-info.mp3'],
+    ['removeSavedFile', 'wxfile://saved/orphan-info.mp3'],
+  ]);
+  assert.deepEqual(storage.writes, []);
+});
+
+test('reserves distinct local ids for overlapping saves at the same clock timestamp', async () => {
+  const firstSave = createDeferred();
+  const secondSave = createDeferred();
+  const saves = [firstSave, secondSave];
+  const fileSystem = createFileSystem();
+  fileSystem.saveFile = async ({ tempFilePath }) => {
+    fileSystem.calls.push(['saveFile', tempFilePath]);
+    return saves.shift().promise;
+  };
+  const { controller, recorderManager, storage } = createController({ fileSystem });
+  controller.start('family-1|dish-1|record-1');
+  const first = recorderManager.finish({ tempFilePath: 'wxfile://tmp/first.mp3', duration: 500 });
+  await Promise.resolve();
+  controller.start('family-1|dish-1|record-1');
+  const second = recorderManager.finish({ tempFilePath: 'wxfile://tmp/second.mp3', duration: 500 });
+  await Promise.resolve();
+  secondSave.resolve({ savedFilePath: 'wxfile://saved/second.mp3' });
+  firstSave.resolve({ savedFilePath: 'wxfile://saved/first.mp3' });
+  await Promise.all([first, second]);
+  assert.deepEqual(storage.entries().map((entry) => entry.localId).sort(), ['1700000000000-1', '1700000000000-2']);
+});
+
+test('cancelling active clip B does not discard earlier pending clip A', async () => {
+  const deferredA = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.saveFile = async ({ tempFilePath }) => {
+    fileSystem.calls.push(['saveFile', tempFilePath]);
+    return deferredA.promise;
+  };
+  const { controller, recorderManager, storage } = createController({ fileSystem });
+  controller.start('family-1|dish-1|record-1');
+  const finishA = recorderManager.finish({ tempFilePath: 'wxfile://tmp/a.mp3', duration: 500 });
+  await Promise.resolve();
+  controller.start('family-1|dish-1|record-1');
+  controller.cancel();
+  deferredA.resolve({ savedFilePath: 'wxfile://saved/a.mp3' });
+  await finishA;
+  assert.deepEqual(storage.entries().map((entry) => entry.savedFilePath), ['wxfile://saved/a.mp3']);
+  controller.destroy();
+});

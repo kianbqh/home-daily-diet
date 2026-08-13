@@ -1,0 +1,159 @@
+.recipe-draft-page {
+  padding-bottom: 80rpx;
+}
+
+.draft-state-card,
+.confirm-mode-card,
+.main-confirm-card {
+  margin-top: 26rpx;
+  padding: 30rpx;
+}
+
+.draft-state-card {
+  color: #777b74;
+  text-align: center;
+}
+
+.draft-error-card {
+  background: #fff8e9;
+  line-height: 1.6;
+}
+
+.draft-error-title {
+  color: #7b6040;
+  font-weight: 700;
+}
+
+.save-status {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-top: 24rpx;
+  color: #777b74;
+  font-size: 24rpx;
+}
+
+.save-dot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 50%;
+  background: #a4a79e;
+}
+
+.save-status.saving .save-dot {
+  background: #d0a15c;
+}
+
+.save-status.saved .save-dot {
+  background: #315b49;
+}
+
+.save-status.conflict,
+.save-status.error,
+.save-status.invalid {
+  color: #a64f3d;
+}
+
+.save-status.conflict .save-dot,
+.save-status.error .save-dot,
+.save-status.invalid .save-dot {
+  background: #b85c45;
+}
+
+.conflict-card,
+.validation-card {
+  margin-top: 18rpx;
+  padding: 24rpx;
+  border-radius: 20rpx;
+  background: #fff2ee;
+  color: #934735;
+  font-size: 24rpx;
+  line-height: 1.6;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 14rpx;
+  margin-top: 18rpx;
+}
+
+.conflict-actions button {
+  flex: 1;
+  padding: 20rpx 12rpx;
+  font-size: 23rpx;
+}
+
+.confirm-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 18rpx;
+  margin-top: 22rpx;
+  padding: 24rpx;
+  border: 2rpx solid #e9e4db;
+  border-radius: 18rpx;
+}
+
+.confirm-choice.selected {
+  border-color: #315b49;
+  background: #eaf2ed;
+}
+
+.confirm-choice.disabled {
+  opacity: .45;
+}
+
+.choice-radio {
+  flex: 0 0 24rpx;
+  width: 24rpx;
+  height: 24rpx;
+  margin-top: 5rpx;
+  border: 4rpx solid #d5d1c8;
+  border-radius: 50%;
+}
+
+.confirm-choice.selected .choice-radio {
+  border-color: #315b49;
+  background: #315b49;
+  box-shadow: inset 0 0 0 5rpx #fff;
+}
+
+.choice-title,
+.choice-copy {
+  display: block;
+}
+
+.choice-title {
+  color: #353a34;
+  font-weight: 700;
+}
+
+.choice-copy,
+.main-confirm-card text {
+  margin-top: 8rpx;
+  color: #777b74;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.publish-hint {
+  margin-top: 18rpx;
+  padding: 20rpx;
+  border-radius: 16rpx;
+  background: #fff8e9;
+  color: #7b6040;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.main-confirm-card text {
+  display: block;
+}
+
+.confirm-button {
+  width: 100%;
+  margin-top: 28rpx;
+}
+
+.confirm-button[disabled] {
+  opacity: .5;
+}

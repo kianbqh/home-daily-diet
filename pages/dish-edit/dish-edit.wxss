@@ -18,6 +18,68 @@
   text-align: center;
 }
 
+.family-recipe-card {
+  margin-top: 24rpx;
+  padding: 30rpx;
+}
+
+.recipe-card-heading {
+  margin: 0 0 18rpx;
+}
+
+.recipe-card-state,
+.recipe-empty-copy,
+.recipe-confirmed-meta,
+.recipe-card-support {
+  display: block;
+  color: #7b8078;
+  font-size: 24rpx;
+  line-height: 1.6;
+}
+
+.recipe-card-error {
+  color: #934735;
+}
+
+.recipe-card-support {
+  margin-top: 8rpx;
+  color: #7b8078;
+}
+
+.recipe-summary-counts {
+  display: flex;
+  gap: 16rpx;
+}
+
+.recipe-summary-counts text {
+  padding: 12rpx 18rpx;
+  border-radius: 999rpx;
+  background: #eaf2ed;
+  color: #315b49;
+  font-size: 24rpx;
+  font-weight: 600;
+}
+
+.recipe-confirmed-meta {
+  margin-top: 16rpx;
+}
+
+.recipe-empty-title {
+  display: block;
+  color: #3f453e;
+  font-size: 28rpx;
+  font-weight: 700;
+}
+
+.recipe-empty-copy {
+  margin-top: 10rpx;
+}
+
+.recipe-card-button {
+  width: 100%;
+  margin-top: 22rpx;
+}
+
 .dish-hero-image,
 .dish-hero-placeholder {
   display: block;

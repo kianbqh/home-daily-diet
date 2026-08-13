@@ -71,7 +71,20 @@ function normalizeRecipe(value) {
 }
 
 function recipeByteLength(value) {
-  return Buffer.byteLength(JSON.stringify(normalizeRecipe(value)), 'utf8');
+  const json = JSON.stringify(normalizeRecipe(value));
+  if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+    return Buffer.byteLength(json, 'utf8');
+  }
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(json).length;
+  let bytes = 0;
+  for (const character of json) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0x7f) bytes += 1;
+    else if (codePoint <= 0x7ff) bytes += 2;
+    else if (codePoint <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
 }
 
 function validateRecipe(value) {

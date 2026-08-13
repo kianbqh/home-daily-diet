@@ -156,6 +156,20 @@ test('existing dish details gate the append-record form behind one button', () =
   assert.match(template, /\{\{isExisting \? '保存这次记录' : '保存这道菜'\}\}/);
 });
 
+test('dish detail recipe card stays separate from reviews, photos, and cooking history', () => {
+  const template = read('pages/dish-edit/dish-edit.wxml');
+  const script = read('pages/dish-edit/dish-edit.js');
+
+  assert.match(template, /class="card-surface family-recipe-card"/);
+  assert.match(template, /recipeLoading/);
+  assert.match(template, /recipeError/);
+  assert.match(template, /bindtap="openFamilyRecipe"/);
+  assert.match(script, /refreshRecipeSummary\s*\(/);
+  assert.match(script, /recipeSummary/);
+  assert.match(script, /recipeLoading/);
+  assert.match(script, /recipeError/);
+});
+
 test('cloud image helper delegates CloudBase file IDs to the Store without changing local URLs', async () => {
   const { resolveCloudFileUrls } = require('../utils/cloud-image');
   const store = {

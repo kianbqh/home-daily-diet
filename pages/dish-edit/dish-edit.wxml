@@ -18,6 +18,31 @@
     <view wx:if="{{isArchived}}" class="archived-label">已移入回收站</view>
   </view>
 
+  <view wx:if="{{isExisting}}" class="card-surface family-recipe-card">
+    <view class="section-heading compact-heading recipe-card-heading">
+      <view class="section-title">家庭菜谱</view>
+      <text wx:if="{{recipeSummary.hasRecipe}}" class="section-count">第 {{recipeSummary.versionNumber}} 版</text>
+    </view>
+    <view wx:if="{{recipeLoading}}" class="recipe-card-state">正在读取菜谱…</view>
+    <view wx:elif="{{recipeError}}" class="recipe-card-state recipe-card-error">
+      <text>{{recipeError}}</text>
+      <text wx:if="{{recipeUnavailable}}" class="recipe-card-support">菜品、照片、评价和制作记录仍可正常使用。</text>
+    </view>
+    <block wx:elif="{{recipeSummary.hasRecipe}}">
+      <view class="recipe-summary-counts">
+        <text>{{recipeSummary.ingredientCount}} 种食材</text>
+        <text>{{recipeSummary.stepCount}} 个步骤</text>
+      </view>
+      <text class="recipe-confirmed-meta">{{recipeSummary.confirmedByLabel}} · {{recipeSummary.confirmedAtLabel}}</text>
+      <button class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">查看完整菜谱</button>
+    </block>
+    <block wx:else>
+      <text class="recipe-empty-title">还没有记录做法</text>
+      <text class="recipe-empty-copy">把家里的食材、步骤和经验整理成一份菜谱。</text>
+      <button wx:if="{{!isArchived}}" class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">手动创建菜谱</button>
+    </block>
+  </view>
+
   <view wx:if="{{isExisting}}" class="card-surface rating-section">
     <view class="section-title">家人评价</view>
     <view class="rating-summary">

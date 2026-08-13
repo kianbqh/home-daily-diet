@@ -1,0 +1,160 @@
+.recipe-page {
+  padding-bottom: 70rpx;
+}
+
+.state-card,
+.recipe-meta-card,
+.recipe-section,
+.history-version-section {
+  margin-top: 26rpx;
+  padding: 30rpx;
+}
+
+.state-card {
+  color: #777b74;
+  text-align: center;
+}
+
+.error-card {
+  background: #fff8e9;
+}
+
+.state-title {
+  color: #7b6040;
+  font-weight: 700;
+}
+
+.state-copy {
+  display: block;
+  margin-top: 12rpx;
+  line-height: 1.6;
+}
+
+.meta-counts {
+  display: flex;
+  justify-content: space-around;
+  text-align: center;
+}
+
+.meta-number,
+.meta-label {
+  display: block;
+}
+
+.meta-number {
+  color: #315b49;
+  font-size: 48rpx;
+  font-weight: 700;
+}
+
+.meta-label,
+.confirmed-meta,
+.section-empty,
+.version-meta {
+  color: #858a82;
+  font-size: 24rpx;
+}
+
+.confirmed-meta {
+  margin-top: 24rpx;
+  text-align: center;
+}
+
+.edit-main-button {
+  width: 100%;
+  margin-top: 24rpx;
+}
+
+.ingredient-row,
+.step-row,
+.failure-item,
+.version-row {
+  padding: 22rpx 0;
+  border-top: 1rpx solid #f0ece4;
+}
+
+.ingredient-row:first-of-type,
+.step-row:first-of-type,
+.failure-item:first-of-type,
+.version-row:first-of-type {
+  margin-top: 18rpx;
+}
+
+.ingredient-main,
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20rpx;
+}
+
+.ingredient-name,
+.step-instruction,
+.failure-title,
+.version-title {
+  color: #353a34;
+  font-weight: 650;
+}
+
+.ingredient-amount {
+  color: #9b6c4a;
+}
+
+.item-note,
+.step-meta,
+.bullet-item,
+.version-meta {
+  display: block;
+  margin-top: 8rpx;
+  color: #73786f;
+  line-height: 1.6;
+}
+
+.step-row {
+  display: flex;
+  gap: 20rpx;
+}
+
+.step-number {
+  display: flex;
+  flex: 0 0 52rpx;
+  align-items: center;
+  justify-content: center;
+  width: 52rpx;
+  height: 52rpx;
+  border-radius: 50%;
+  background: #e6f0ea;
+  color: #315b49;
+  font-weight: 700;
+}
+
+.step-content {
+  flex: 1;
+}
+
+.bullet-item {
+  margin-top: 16rpx;
+}
+
+.compact-heading {
+  margin: 0 0 8rpx;
+}
+
+.section-count {
+  color: #9b6c4a;
+  font-size: 24rpx;
+}
+
+.version-row {
+  padding-right: 4rpx;
+}
+
+.version-title,
+.version-meta {
+  display: block;
+}
+
+.version-arrow {
+  color: #9b6c4a;
+  font-size: 42rpx;
+}

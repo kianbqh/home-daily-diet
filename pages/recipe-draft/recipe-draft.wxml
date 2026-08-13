@@ -1,0 +1,49 @@
+<view class="page recipe-draft-page">
+  <view class="eyebrow">RECIPE DRAFT</view>
+  <view class="page-title">整理家庭菜谱</view>
+  <view class="page-subtitle">补全食材、步骤和家里最在意的经验，确认后会生成只读版本。</view>
+
+  <view wx:if="{{loading}}" class="card-surface draft-state-card">正在读取草稿…</view>
+  <view wx:elif="{{error}}" class="card-surface draft-state-card draft-error-card">
+    <view class="draft-error-title">{{error}}</view>
+    <text>{{unavailable ? '现有菜品、制作记录和评价仍可继续使用。' : '请返回后稍后重试。'}}</text>
+  </view>
+
+  <block wx:else>
+    <view class="save-status {{saveState}}">
+      <text class="save-dot"></text>
+      <text>{{saveMessage || '等待修改'}}</text>
+    </view>
+
+    <view wx:if="{{localConflictRecipe}}" class="conflict-card">
+      <text>保存冲突，刷新后可重新应用本地内容</text>
+      <view class="conflict-actions">
+        <button class="secondary-button" bindtap="refreshAfterConflict">刷新草稿</button>
+        <button class="secondary-button" bindtap="reapplyLocalConflict">重新应用本地内容</button>
+      </view>
+    </view>
+
+    <recipe-editor value="{{recipe}}" bind:change="onRecipeChange" bind:validation="onRecipeValidation" />
+
+    <view wx:if="{{confirmMode === 'record'}}" class="card-surface confirm-mode-card">
+      <view class="section-title">这次确认后怎么保存</view>
+      <view class="confirm-choice {{!publishAsMain ? 'selected' : ''}} {{publishLocked ? 'disabled' : ''}}" bindtap="chooseRecordOnly">
+        <view class="choice-radio"></view>
+        <view><text class="choice-title">仅保存本次做法</text><text class="choice-copy">保留为这次制作记录对应的版本</text></view>
+      </view>
+      <view class="confirm-choice {{publishAsMain ? 'selected' : ''}}" bindtap="choosePublishMain">
+        <view class="choice-radio"></view>
+        <view><text class="choice-title">同时更新主菜谱</text><text class="choice-copy">家人以后默认看到这份做法</text></view>
+      </view>
+      <view wx:if="{{publishLocked}}" class="publish-hint">当前还没有主菜谱，本次确认将同时建立家庭主菜谱。</view>
+    </view>
+
+    <view wx:else class="card-surface main-confirm-card">
+      <view class="section-title">发布新的主菜谱版本</view>
+      <text>确认后家人会看到这份最新做法，之前的版本仍保留在历史中。</text>
+    </view>
+
+    <view wx:if="{{!validation.ok}}" class="validation-card">菜谱还有必填内容没有补全，请检查食材名称和步骤说明。</view>
+    <button class="primary-button confirm-button" loading="{{confirming}}" disabled="{{confirming || !validation.ok}}" bindtap="confirmRecipe">确认保存</button>
+  </block>
+</view>

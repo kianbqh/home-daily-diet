@@ -17,28 +17,19 @@ const DEFAULT_CONFIG = Object.freeze({
   usageCollection: 'recipe_usage_daily',
 });
 
-const RECORD_SCOPED_ACTIONS = Object.freeze([
-  'getRecordWorkspace',
-  'reserveRecording',
-  'submitRecording',
-  'refreshWorkspace',
-  'updateTranscript',
-  'addManualText',
-  'deleteRecordingAudio',
-  'deleteRecording',
-  'attachRecordWorkspace',
-  'cancelRecordWorkspace',
-  'organizeDraft',
-]);
+const RECORD_ACTION_CONTRACTS = Object.freeze({
+  recordId: Object.freeze([
+    'getRecordWorkspace', 'reserveRecording', 'refreshWorkspace', 'addManualText',
+    'attachRecordWorkspace', 'cancelRecordWorkspace',
+  ]),
+  recordingId: Object.freeze([
+    'submitRecording', 'updateTranscript', 'deleteRecordingAudio', 'deleteRecording',
+  ]),
+  draftId: Object.freeze(['organizeDraft']),
+});
 
-const RECORD_ID_ACTIONS = Object.freeze([
-  'getRecordWorkspace',
-  'reserveRecording',
-  'refreshWorkspace',
-  'addManualText',
-  'attachRecordWorkspace',
-  'cancelRecordWorkspace',
-]);
+const RECORD_ID_ACTIONS = RECORD_ACTION_CONTRACTS.recordId;
+const RECORD_SCOPED_ACTIONS = Object.freeze(Object.values(RECORD_ACTION_CONTRACTS).flat());
 
 function configFor(dependencies = {}) {
   return { ...DEFAULT_CONFIG, ...(dependencies.config || {}) };
@@ -124,10 +115,7 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
     await guards.requireMember(familyId, openid);
     const allowArchived = ['getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace'].includes(requiredAction);
     await guards.requireActiveDish(familyId, dishId, { allowArchived });
-    if (RECORD_ID_ACTIONS.includes(requiredAction)) {
-      const recordId = requireValue(event.recordId, 'RECORD_REQUIRED', '缺少制作记录');
-      await guards.requireCookingRecord(familyId, dishId, recordId);
-    }
+    await authorizeRecordScope(requiredAction, event, familyId, dishId, repository, guards);
 
     stage = 'action';
     let data;
@@ -187,6 +175,27 @@ async function getRecordWorkspace(repository, familyId, dishId, rawRecordId) {
   return { recordings, draft };
 }
 
+async function authorizeRecordScope(action, event, familyId, dishId, repository, guards) {
+  if (!RECORD_SCOPED_ACTIONS.includes(action)) return;
+  if (RECORD_ID_ACTIONS.includes(action)) {
+    const recordId = requireValue(event.recordId, 'RECORD_REQUIRED', '缺少制作记录');
+    await guards.requireCookingRecord(familyId, dishId, recordId);
+    return;
+  }
+  if (RECORD_ACTION_CONTRACTS.recordingId.includes(action)) {
+    const recordingId = requireValue(event.recordingId, 'RECORDING_REQUIRED', '缺少录音片段');
+    const recording = await repository.getRecording(familyId, dishId, recordingId);
+    if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
+    await guards.requireCookingRecord(familyId, dishId, recording.recordId);
+    return;
+  }
+  const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
+  const draft = await repository.getDraft(familyId, dishId, draftId);
+  if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+  const recordId = String(draft.recordId || '').trim();
+  if (recordId) await guards.requireCookingRecord(familyId, dishId, recordId);
+}
+
 function nowMs(dependencies) {
   const value = typeof dependencies.now === 'function' ? dependencies.now() : Date.now();
   return Number.isFinite(Number(value)) ? Number(value) : Date.now();
@@ -227,6 +236,7 @@ async function main(event = {}, context = {}) {
 
 module.exports = {
   DEFAULT_CONFIG,
+  RECORD_ACTION_CONTRACTS,
   RECORD_ID_ACTIONS,
   RECORD_SCOPED_ACTIONS,
   createGuards,

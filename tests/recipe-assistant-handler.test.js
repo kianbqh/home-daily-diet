@@ -4,6 +4,7 @@ const Module = require('node:module');
 
 const {
   DEFAULT_CONFIG,
+  RECORD_ACTION_CONTRACTS,
   RECORD_ID_ACTIONS,
   RECORD_SCOPED_ACTIONS,
   handleAction,
@@ -180,6 +181,16 @@ test('fails closed on blank trusted identity before an empty-openid member can a
 });
 
 test('defines every record-scoped action and the actions whose contract carries recordId', () => {
+  assert.deepEqual(RECORD_ACTION_CONTRACTS, {
+    recordId: [
+      'getRecordWorkspace', 'reserveRecording', 'refreshWorkspace', 'addManualText',
+      'attachRecordWorkspace', 'cancelRecordWorkspace',
+    ],
+    recordingId: [
+      'submitRecording', 'updateTranscript', 'deleteRecordingAudio', 'deleteRecording',
+    ],
+    draftId: ['organizeDraft'],
+  });
   assert.deepEqual([...RECORD_SCOPED_ACTIONS].sort(), [
     'addManualText',
     'attachRecordWorkspace',
@@ -209,19 +220,99 @@ test('pending direct-record actions verify cross-dish and cross-family record ow
     id: 'record-family-b-only', familyId: 'family-b', dishId: 'dish-1',
   });
   const db = createMemoryDatabase(seed);
+  const actions = [
+    ['getRecordWorkspace', 'success'],
+    ['reserveRecording', 'ACTION_INVALID'],
+    ['refreshWorkspace', 'ACTION_INVALID'],
+    ['addManualText', 'ACTION_INVALID'],
+    ['attachRecordWorkspace', 'ACTION_INVALID'],
+    ['cancelRecordWorkspace', 'ACTION_INVALID'],
+  ];
 
-  for (const recordId of ['record-deleted', 'record-family-b-only']) {
-    const result = await invoke(db, {
-      action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId,
+  for (const [action, ownedOutcome] of actions) {
+    const missing = await invoke(db, { action, familyId: 'family-a', dishId: 'dish-1' });
+    assert.equal(missing.error.code, 'RECORD_REQUIRED', `${action}: missing`);
+
+    for (const recordId of ['record-deleted', 'record-family-b-only']) {
+      const denied = await invoke(db, {
+        action, familyId: 'family-a', dishId: 'dish-1', recordId,
+      });
+      assert.equal(denied.error.code, 'RECORD_NOT_FOUND', `${action}: ${recordId}`);
+    }
+
+    const owned = await invoke(db, {
+      action, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
     });
-    assert.equal(result.ok, false, recordId);
-    assert.equal(result.error.code, 'RECORD_NOT_FOUND', recordId);
+    assert.equal(ownedOutcome === 'success' ? owned.ok : owned.error.code, ownedOutcome === 'success' ? true : ownedOutcome, action);
   }
+});
 
-  const owned = await invoke(db, {
-    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
-  });
-  assert.equal(owned.error.code, 'ACTION_INVALID');
+test('recordingId actions derive record ownership from the owned recording and ignore forged event.recordId', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    'recording-owned': { _id: 'recording-owned', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1' },
+    'recording-other-dish': { _id: 'recording-other-dish', familyId: 'family-a', dishId: 'dish-deleted', recordId: 'record-deleted' },
+    'recording-other-family': { _id: 'recording-other-family', familyId: 'family-b', dishId: 'dish-1', recordId: 'record-1' },
+    'recording-broken-binding': { _id: 'recording-broken-binding', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-deleted' },
+  };
+  const db = createMemoryDatabase(seed);
+  const actions = ['submitRecording', 'updateTranscript', 'deleteRecordingAudio', 'deleteRecording'];
+
+  for (const action of actions) {
+    const missing = await invoke(db, {
+      action, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+    });
+    assert.equal(missing.error.code, 'RECORDING_REQUIRED', `${action}: missing`);
+
+    for (const recordingId of ['recording-missing', 'recording-other-dish', 'recording-other-family']) {
+      const denied = await invoke(db, {
+        action, familyId: 'family-a', dishId: 'dish-1', recordingId,
+        recordId: 'record-1',
+      });
+      assert.equal(denied.error.code, 'RECORDING_NOT_FOUND', `${action}: ${recordingId}`);
+    }
+
+    const brokenBinding = await invoke(db, {
+      action, familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-broken-binding',
+      recordId: 'record-1',
+    });
+    assert.equal(brokenBinding.error.code, 'RECORD_NOT_FOUND', `${action}: trusted recording binding`);
+
+    const owned = await invoke(db, {
+      action, familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-owned',
+      recordId: 'record-deleted',
+    });
+    assert.equal(owned.error.code, 'ACTION_INVALID', `${action}: forged recordId ignored`);
+  }
+});
+
+test('organizeDraft derives optional record ownership from the owned draft and ignores forged authorization inputs', async () => {
+  const seed = baseSeed();
+  seed.recipe_drafts = {
+    'draft-manual': { _id: 'draft-manual', familyId: 'family-a', dishId: 'dish-1', recordId: '', revision: 0 },
+    'draft-record': { _id: 'draft-record', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', revision: 0 },
+    'draft-other-dish': { _id: 'draft-other-dish', familyId: 'family-a', dishId: 'dish-deleted', recordId: 'record-deleted', revision: 0 },
+    'draft-other-family': { _id: 'draft-other-family', familyId: 'family-b', dishId: 'dish-1', recordId: 'record-1', revision: 0 },
+    'draft-broken-binding': { _id: 'draft-broken-binding', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-deleted', revision: 0 },
+  };
+  const db = createMemoryDatabase(seed);
+
+  const cases = [
+    [{}, 'DRAFT_REQUIRED', 'missing'],
+    [{ draftId: 'draft-missing', recordId: 'record-1' }, 'DRAFT_NOT_FOUND', 'missing document'],
+    [{ draftId: 'draft-other-dish', recordId: 'record-1', sourceRecordingIds: ['recording-owned'] }, 'DRAFT_NOT_FOUND', 'foreign dish'],
+    [{ draftId: 'draft-other-family', recordId: 'record-1', sourceRecordingIds: ['recording-owned'] }, 'DRAFT_NOT_FOUND', 'foreign family'],
+    [{ draftId: 'draft-broken-binding', recordId: 'record-1' }, 'RECORD_NOT_FOUND', 'trusted draft binding'],
+    [{ draftId: 'draft-manual', recordId: 'record-deleted' }, 'ACTION_INVALID', 'manual draft'],
+    [{ draftId: 'draft-record', recordId: 'record-deleted' }, 'ACTION_INVALID', 'forged recordId ignored'],
+  ];
+
+  for (const [payload, expectedCode, label] of cases) {
+    const result = await invoke(db, {
+      action: 'organizeDraft', familyId: 'family-a', dishId: 'dish-1', ...payload,
+    });
+    assert.equal(result.error.code, expectedCode, label);
+  }
 });
 
 test('purged tombstones deny every implemented and pending recipe action', async () => {

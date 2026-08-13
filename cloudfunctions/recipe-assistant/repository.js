@@ -35,7 +35,8 @@ function createRecipeRepository(db, config) {
     return getDocument(name, result._id);
   }
 
-  async function getDraft({ familyId, dishId, draftId, recordId }) {
+  async function getDraft(familyIdOrInput, dishIdArg, draftIdArg) {
+    const { familyId, dishId, draftId, recordId } = normalizeOwnedLookup(familyIdOrInput, dishIdArg, draftIdArg);
     if (draftId) {
       const draft = await getDocument(config.draftCollection, draftId);
       return owned(draft, familyId, dishId) && (recordId == null || draft.recordId === recordId) ? draft : null;
@@ -70,9 +71,12 @@ function createRecipeRepository(db, config) {
     });
   }
 
-  async function getRecording({ familyId, dishId, recordId, recordingId }) {
+  async function getRecording(familyIdOrInput, dishIdArg, recordingIdArg) {
+    const { familyId, dishId, recordingId, recordId } = normalizeOwnedLookup(
+      familyIdOrInput, dishIdArg, recordingIdArg, 'recordingId'
+    );
     const recording = await getDocument(config.recordingCollection, recordingId);
-    return owned(recording, familyId, dishId) && recording.recordId === recordId ? recording : null;
+    return owned(recording, familyId, dishId) && (recordId == null || recording.recordId === recordId) ? recording : null;
   }
 
   async function listRecordings(familyId, dishId, recordId) {
@@ -102,6 +106,11 @@ function createRecipeRepository(db, config) {
 
 function owned(document, familyId, dishId) {
   return Boolean(document && document.familyId === familyId && document.dishId === dishId);
+}
+
+function normalizeOwnedLookup(familyIdOrInput, dishId, documentId, documentKey = 'draftId') {
+  if (familyIdOrInput && typeof familyIdOrInput === 'object') return familyIdOrInput;
+  return { familyId: familyIdOrInput, dishId, [documentKey]: documentId };
 }
 
 module.exports = { createRecipeRepository };

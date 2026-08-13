@@ -28,6 +28,7 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   const recorderHandlers = {};
   const reservedLocalIds = new Set(entries.map((entry) => entry.localId));
   const pendingCaptures = [];
+  const entryMutationQueues = new Map();
 
   const currentTime = () => clock.now();
 
@@ -71,13 +72,22 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   function cancel() {
     if (destroyed) return;
     const recording = active;
-    if (recording) recording.discarded = true;
-    if (!recording && pendingCaptures.length) pendingCaptures.at(-1).discarded = true;
-    active = null;
+    if (!recording) {
+      if (pendingCaptures.length) pendingCaptures.at(-1).discarded = true;
+      clearTimer();
+      emit(idleState());
+      return;
+    }
+    recording.discarded = true;
+    recording.stopping = true;
     clearTimer();
-    if (recording && typeof recorderManager.cancel === 'function') recorderManager.cancel();
-    else if (recording && typeof recorderManager.stop === 'function') recorderManager.stop();
     emit(idleState());
+    try {
+      recorderManager.stop();
+    } catch (error) {
+      if (active === recording) active = null;
+      emit(errorState('RECORDING_INTERRUPTED'));
+    }
   }
 
   function listRecoverable(workspaceKey) {
@@ -92,13 +102,17 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     const prefix = `${familyId}|${dishId}|`;
     const entry = entries
       .filter((item) => item.workspaceKey.startsWith(prefix))
-      .sort((left, right) => Number(right.createdAt) - Number(left.createdAt))[0];
+      .sort(compareWorkspaceEntries)[0];
     if (!entry) return null;
     const recordId = entry.workspaceKey.slice(prefix.length);
     return recordId ? { recordId, workspaceKey: entry.workspaceKey } : null;
   }
 
-  async function markUploaded(localId) {
+  function markUploaded(localId) {
+    return queueEntryMutation(localId, () => markUploadedNow(localId));
+  }
+
+  async function markUploadedNow(localId) {
     const index = findEntryIndex(localId);
     if (index < 0) return;
     const entry = entries[index];
@@ -117,7 +131,11 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     }
   }
 
-  async function remove(localId) {
+  function remove(localId) {
+    return queueEntryMutation(localId, () => removeNow(localId));
+  }
+
+  async function removeNow(localId) {
     const index = findEntryIndex(localId);
     if (index < 0) return;
     const entry = entries[index];
@@ -143,8 +161,7 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     clearTimer();
     active = null;
     try {
-      if (recording && typeof recorderManager.cancel === 'function') recorderManager.cancel();
-      else if (recording && typeof recorderManager.stop === 'function') recorderManager.stop();
+      if (recording && typeof recorderManager.stop === 'function') recorderManager.stop();
     } catch (error) {
       // Shutdown is best effort; listener/timer cleanup must still complete.
     }
@@ -160,8 +177,10 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     if (typeof recorderManager.onError === 'function') {
       recorderHandlers.error = (error) => {
         if (destroyed || !active) return;
+        const session = active;
         active = null;
         clearTimer();
+        if (session.discarded) return;
         emit(errorState(isMicrophoneDenied(error) ? 'MICROPHONE_DENIED' : 'RECORDING_INTERRUPTED'));
       };
       recorderManager.onError(recorderHandlers.error);
@@ -189,6 +208,10 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     if (destroyed || !active) return;
     const session = active;
     clearTimer();
+    if (session.discarded) {
+      if (!interrupted) active = null;
+      return;
+    }
     if (!result || !result.tempFilePath) {
       if (interrupted) {
         emit(errorState('RECORDING_INTERRUPTED'));
@@ -300,6 +323,15 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     return entries.findIndex((entry) => entry.localId === localId);
   }
 
+  function queueEntryMutation(localId, mutation) {
+    const previous = entryMutationQueues.get(localId) || Promise.resolve();
+    const current = previous.catch(() => {}).then(mutation);
+    entryMutationQueues.set(localId, current);
+    return current.finally(() => {
+      if (entryMutationQueues.get(localId) === current) entryMutationQueues.delete(localId);
+    });
+  }
+
   function isInvalidCapture(capture) { return destroyed || capture.discarded; }
   async function removeOrphan(savedFilePath) {
     if (!savedFilePath) return;
@@ -344,6 +376,16 @@ function normalizeEntry(entry) {
     uploadStatus: entry.uploadStatus === 'uploaded' ? 'uploaded' : 'pending',
   };
   return normalized;
+}
+
+function compareWorkspaceEntries(left, right) {
+  const leftCreatedAt = Number(left.createdAt);
+  const rightCreatedAt = Number(right.createdAt);
+  const leftTime = Number.isFinite(leftCreatedAt) ? leftCreatedAt : Number.NEGATIVE_INFINITY;
+  const rightTime = Number.isFinite(rightCreatedAt) ? rightCreatedAt : Number.NEGATIVE_INFINITY;
+  if (leftTime !== rightTime) return rightTime - leftTime;
+  const localIdOrder = left.localId.localeCompare(right.localId);
+  return localIdOrder || left.workspaceKey.localeCompare(right.workspaceKey);
 }
 
 function idleState() {

@@ -300,6 +300,32 @@ test('findWorkspace selects the newest retained workspace for a family and dish'
   controller.destroy();
 });
 
+test('findWorkspace resolves equal and invalid createdAt ties independently of storage order', () => {
+  const cases = [
+    [
+      { localId: 'b', workspaceKey: 'family-1|dish-1|record-b', createdAt: 20 },
+      { localId: 'a', workspaceKey: 'family-1|dish-1|record-a', createdAt: 20 },
+    ],
+    [
+      { localId: 'd', workspaceKey: 'family-1|dish-1|record-d', createdAt: 'invalid' },
+      { localId: 'c', workspaceKey: 'family-1|dish-1|record-c', createdAt: 'also-invalid' },
+    ],
+  ];
+
+  cases.forEach((pair) => {
+    const entries = pair.map((entry) => ({
+      ...entry, savedFilePath: null, durationMs: 1, format: 'mp3', byteLength: 1, uploadStatus: 'uploaded',
+    }));
+    const forward = createController({ entries });
+    const reversed = createController({ entries: [...entries].reverse() });
+    const expected = { recordId: `record-${pair[1].localId}`, workspaceKey: pair[1].workspaceKey };
+    assert.deepEqual(forward.controller.findWorkspace({ familyId: 'family-1', dishId: 'dish-1' }), expected);
+    assert.deepEqual(reversed.controller.findWorkspace({ familyId: 'family-1', dishId: 'dish-1' }), expected);
+    forward.controller.destroy();
+    reversed.controller.destroy();
+  });
+});
+
 test('marks uploaded before deleting its saved file and excludes uploaded entries from local recovery', async () => {
   const entry = {
     localId: 'clip-1', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: 'wxfile://saved/clip.mp3',
@@ -359,6 +385,64 @@ test('cancelling without RecorderManager.cancel stops and discards the eventual 
   assert.equal(states.at(-1).status, 'idle');
   await recorderManager.finish({ tempFilePath: 'wxfile://tmp/discarded.mp3', duration: 500 });
   assert.deepEqual(storage.entries(), []);
+  controller.destroy();
+});
+
+test('cancel waits for its stop callback before allowing a replacement recording', async () => {
+  const { controller, recorderManager, storage, timerApi } = createController();
+  const states = [];
+  controller.on('state', (state) => states.push(state));
+
+  controller.start('family-1|dish-1|record-b');
+  controller.cancel();
+  controller.start('family-1|dish-1|record-c');
+
+  assert.equal(recorderManager.stopCalls, 1);
+  assert.equal(recorderManager.cancelCalls, 0);
+  assert.equal(recorderManager.startCalls.length, 1);
+  assert.equal(timerApi.activeCount(), 0);
+  assert.equal(states.at(-1).status, 'idle');
+
+  await recorderManager.finish({ tempFilePath: 'wxfile://tmp/b.mp3', duration: 500 });
+  assert.deepEqual(storage.entries(), []);
+  controller.start('family-1|dish-1|record-c');
+  assert.equal(recorderManager.startCalls.length, 2);
+  controller.destroy();
+});
+
+test('a cancelled recorder error clears only its terminal gate', () => {
+  const { controller, recorderManager, storage } = createController();
+  const states = [];
+  controller.on('state', (state) => states.push(state));
+
+  controller.start('family-1|dish-1|record-b');
+  controller.cancel();
+  controller.start('family-1|dish-1|record-c');
+  recorderManager.fail({ code: 'DEVICE_BUSY' });
+
+  assert.equal(recorderManager.startCalls.length, 1);
+  assert.equal(states.at(-1).status, 'idle');
+  assert.deepEqual(storage.entries(), []);
+  controller.start('family-1|dish-1|record-c');
+  assert.equal(recorderManager.startCalls.length, 2);
+  controller.destroy();
+});
+
+test('a cancel stop failure clears the gate and emits a stable interruption error', () => {
+  const recorderManager = createRecorder();
+  recorderManager.stop = () => {
+    recorderManager.stopCalls += 1;
+    throw new Error('shutdown failed');
+  };
+  const { controller } = createController({ recorderManager });
+  const states = [];
+  controller.on('state', (state) => states.push(state));
+
+  controller.start('family-1|dish-1|record-b');
+  assert.doesNotThrow(() => controller.cancel());
+  assert.equal(states.at(-1).errorCode, 'RECORDING_INTERRUPTED');
+  controller.start('family-1|dish-1|record-c');
+  assert.equal(recorderManager.startCalls.length, 2);
   controller.destroy();
 });
 
@@ -694,5 +778,58 @@ test('remove re-finds its entry after deferred deletion when another entry is re
   removeA.resolve();
   await removing;
   assert.deepEqual(storage.entries(), []);
+  controller.destroy();
+});
+
+test('markUploaded then concurrent remove serializes deletion and removes only that metadata', async () => {
+  const deletion = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.removeSavedFile = async ({ filePath }) => {
+    fileSystem.calls.push(['removeSavedFile', filePath]);
+    if (fileSystem.calls.length === 1) return deletion.promise;
+    throw new Error('already absent');
+  };
+  const entries = [
+    { localId: 'a', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: 'wxfile://saved/a.mp3', durationMs: 1, format: 'mp3', byteLength: 1, createdAt: 1, uploadStatus: 'pending' },
+    { localId: 'b', workspaceKey: 'family-1|dish-1|record-2', savedFilePath: null, durationMs: 2, format: 'mp3', byteLength: 2, createdAt: 2, uploadStatus: 'pending' },
+  ];
+  const { controller, storage } = createController({ entries, fileSystem });
+
+  const uploading = controller.markUploaded('a');
+  await Promise.resolve();
+  const removing = controller.remove('a');
+  await Promise.resolve();
+  deletion.resolve();
+  await Promise.all([uploading, removing]);
+
+  assert.deepEqual(fileSystem.calls, [['removeSavedFile', 'wxfile://saved/a.mp3']]);
+  assert.deepEqual(storage.entries(), [entries[1]]);
+  controller.destroy();
+});
+
+test('remove then concurrent markUploaded cannot resurrect metadata or serialize unrelated ids', async () => {
+  const deletion = createDeferred();
+  const fileSystem = createFileSystem();
+  fileSystem.removeSavedFile = async ({ filePath }) => {
+    fileSystem.calls.push(['removeSavedFile', filePath]);
+    if (fileSystem.calls.length === 1) return deletion.promise;
+    throw new Error('already absent');
+  };
+  const entries = [
+    { localId: 'a', workspaceKey: 'family-1|dish-1|record-1', savedFilePath: 'wxfile://saved/a.mp3', durationMs: 1, format: 'mp3', byteLength: 1, createdAt: 1, uploadStatus: 'pending' },
+    { localId: 'b', workspaceKey: 'family-1|dish-1|record-2', savedFilePath: null, durationMs: 2, format: 'mp3', byteLength: 2, createdAt: 2, uploadStatus: 'pending' },
+  ];
+  const { controller, storage } = createController({ entries, fileSystem });
+
+  const removing = controller.remove('a');
+  await Promise.resolve();
+  const uploading = controller.markUploaded('a');
+  await controller.markUploaded('b');
+  assert.equal(storage.entries().find((entry) => entry.localId === 'b').uploadStatus, 'uploaded');
+  deletion.resolve();
+  await Promise.all([removing, uploading]);
+
+  assert.deepEqual(fileSystem.calls, [['removeSavedFile', 'wxfile://saved/a.mp3']]);
+  assert.deepEqual(storage.entries(), [{ ...entries[1], uploadStatus: 'uploaded' }]);
   controller.destroy();
 });

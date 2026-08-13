@@ -116,6 +116,7 @@ Page({
   },
 
   onRecipeChange(event) {
+    if (this.data.confirming) return;
     const recipe = cloneRecipe(event.detail && event.detail.recipe);
     this.recipeDirty = true;
     this.editGeneration = (this.editGeneration || 0) + 1;
@@ -124,6 +125,7 @@ Page({
   },
 
   onRecipeValidation(event) {
+    if (this.data.confirming) return;
     this.setData({ validation: event.detail || { ok: false, errors: ['菜谱内容不完整'] } });
   },
 
@@ -137,6 +139,7 @@ Page({
 
   async saveDraftNow() {
     this.clearAutosaveTimer();
+    if (this.saveDrainPromise) return this.saveDrainPromise;
     const validation = validateRecipe(this.data.recipe);
     this.setData({ validation });
     if (!validation.ok || !this.data.draft) {
@@ -148,42 +151,61 @@ Page({
       this.setData({ saveState: 'error', saveMessage: '家庭菜谱需要启用 CloudBase' });
       return false;
     }
-    const recipe = cloneRecipe(this.data.recipe);
-    const generation = this.editGeneration || 0;
-    const revision = this.data.draft.revision;
-    this.setData({ saveState: 'saving', saveMessage: '保存中' });
-    try {
-      const result = await recipeAssistant.updateDraft({
-        familyId: this.data.familyId,
-        dishId: this.data.dishId,
-        draftId: this.data.draftId,
-        revision,
-        recipe,
-      });
-      const draft = result && result.draft ? result.draft : { ...this.data.draft, revision: revision + 1 };
-      this.lastSavedRecipeJson = JSON.stringify(recipe);
-      const hasNewerEdit = (this.editGeneration || 0) !== generation;
-      this.recipeDirty = hasNewerEdit;
-      this.setData({
-        draft,
-        saveState: 'saved',
-        saveMessage: hasNewerEdit ? '有新修改待保存' : '已保存',
-      });
-      if (hasNewerEdit) this.scheduleAutosave();
-      return true;
-    } catch (error) {
-      if (error && error.code === 'DRAFT_CONFLICT') {
-        const localConflictRecipe = cloneRecipe(this.data.recipe);
-        this.setData({
-          localConflictRecipe,
-          saveState: 'conflict',
-          saveMessage: '保存冲突，刷新后可重新应用本地内容',
-        });
+    this.saveDrainPromise = this.drainDraftSaves(recipeAssistant)
+      .finally(() => { this.saveDrainPromise = null; });
+    return this.saveDrainPromise;
+  },
+
+  async drainDraftSaves(recipeAssistant) {
+    let shouldSave = this.recipeDirty
+      || this.lastSavedRecipeJson !== JSON.stringify(normalizeRecipe(this.data.recipe));
+    while (shouldSave) {
+      this.clearAutosaveTimer();
+      const validation = validateRecipe(this.data.recipe);
+      this.setData({ validation });
+      if (!validation.ok || !this.data.draft) {
+        this.setData({ saveState: 'invalid', saveMessage: '请先补全必填内容' });
         return false;
       }
-      this.setData({ saveState: 'error', saveMessage: '暂时无法保存，请稍后重试' });
-      return false;
+      const recipe = cloneRecipe(this.data.recipe);
+      const generation = this.editGeneration || 0;
+      const revision = this.data.draft.revision;
+      this.setData({ saveState: 'saving', saveMessage: '保存中' });
+      try {
+        const result = await recipeAssistant.updateDraft({
+          familyId: this.data.familyId,
+          dishId: this.data.dishId,
+          draftId: this.data.draftId,
+          revision,
+          recipe,
+        });
+        const draft = result && result.draft
+          ? result.draft
+          : { ...this.data.draft, revision: revision + 1 };
+        this.lastSavedRecipeJson = JSON.stringify(recipe);
+        const hasNewerEdit = (this.editGeneration || 0) !== generation;
+        this.recipeDirty = hasNewerEdit;
+        shouldSave = hasNewerEdit;
+        this.setData({
+          draft,
+          saveState: hasNewerEdit ? 'saving' : 'saved',
+          saveMessage: hasNewerEdit ? '保存中' : '已保存',
+        });
+      } catch (error) {
+        if (error && error.code === 'DRAFT_CONFLICT') {
+          const localConflictRecipe = cloneRecipe(this.data.recipe);
+          this.setData({
+            localConflictRecipe,
+            saveState: 'conflict',
+            saveMessage: '保存冲突，刷新后可重新应用本地内容',
+          });
+          return false;
+        }
+        this.setData({ saveState: 'error', saveMessage: '暂时无法保存，请稍后重试' });
+        return false;
+      }
     }
+    return true;
   },
 
   async refreshAfterConflict() {
@@ -204,12 +226,12 @@ Page({
   },
 
   chooseRecordOnly() {
-    if (this.data.confirmMode !== 'record' || this.data.publishLocked) return;
+    if (this.data.confirming || this.data.confirmMode !== 'record' || this.data.publishLocked) return;
     this.setData({ publishAsMain: false });
   },
 
   choosePublishMain() {
-    if (this.data.confirmMode !== 'record') return;
+    if (this.data.confirming || this.data.confirmMode !== 'record') return;
     this.setData({ publishAsMain: true });
   },
 
@@ -220,21 +242,22 @@ Page({
       if (!validation.ok) showToast('请先补全菜谱必填内容');
       return;
     }
-    this.clearAutosaveTimer();
-    if (this.recipeDirty) {
-      const saved = await this.saveDraftNow();
-      if (!saved) return;
-    }
-    const recipeAssistant = this.getRecipeAssistant();
-    if (!recipeAssistant) {
-      showToast('家庭菜谱需要启用 CloudBase');
-      return;
-    }
-    const publishAsMain = this.data.confirmMode === 'main'
-      || this.data.publishLocked
-      || this.data.publishAsMain;
     this.setData({ confirming: true });
+    this.clearAutosaveTimer();
+    let confirmed = false;
     try {
+      if (this.recipeDirty || this.saveDrainPromise) {
+        const saved = await this.saveDraftNow();
+        if (!saved) return;
+      }
+      const recipeAssistant = this.getRecipeAssistant();
+      if (!recipeAssistant) {
+        showToast('家庭菜谱需要启用 CloudBase');
+        return;
+      }
+      const publishAsMain = this.data.confirmMode === 'main'
+        || this.data.publishLocked
+        || this.data.publishAsMain;
       const result = await recipeAssistant.confirmDraft({
         familyId: this.data.familyId,
         dishId: this.data.dishId,
@@ -243,6 +266,7 @@ Page({
         publishAsMain,
         baseMainVersionId: String(this.data.draft.baseMainVersionId || ''),
       });
+      confirmed = true;
       this.clearAutosaveTimer();
       showToast('菜谱已确认', 'success');
       const versionId = result && result.version && (result.version._id || result.version.id);
@@ -266,7 +290,7 @@ Page({
         showToast('暂时无法确认菜谱');
       }
     } finally {
-      this.setData({ confirming: false });
+      if (!confirmed) this.setData({ confirming: false });
     }
   },
 });

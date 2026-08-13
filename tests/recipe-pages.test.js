@@ -96,6 +96,20 @@ function draftFixture(overrides = {}) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function flushPromises() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 test('manual recipe pages are registered, package-safe, and keep history read only', () => {
   const appConfig = JSON.parse(read('app.json'));
   const draftConfig = JSON.parse(read('pages/recipe-draft/recipe-draft.json'));
@@ -152,6 +166,29 @@ test('recipe editor uses visible native input and textarea controls with no shad
   assert.doesNotMatch(styles, /color:\s*transparent|caret-color:\s*transparent/);
 });
 
+test('disabled recipe editor ignores handlers and disables every native control', () => {
+  const draftTemplate = read('pages/recipe-draft/recipe-draft.wxml');
+  const editorTemplate = read('components/recipe-editor/recipe-editor.wxml');
+  const definition = loadComponent('components/recipe-editor/recipe-editor.js');
+  const originalRecipe = completeRecipe({
+    ingredients: [{ name: '番茄', amountText: '2个', note: '', uncertain: false }],
+  });
+  const editor = createComponentInstance(definition, { disabled: true, recipe: originalRecipe });
+
+  editor.addIngredient();
+  editor.onIngredientInput({
+    currentTarget: { dataset: { index: 0, field: 'name' } },
+    detail: { value: '不应写入' },
+  });
+
+  assert.deepEqual(editor.data.recipe, originalRecipe);
+  assert.deepEqual(editor.events, []);
+  assert.match(draftTemplate, /<recipe-editor[^>]*disabled="\{\{confirming\}\}"/);
+  const nativeControls = editorTemplate.match(/<(?:input|textarea|button)\b[^>]*>/g) || [];
+  assert.ok(nativeControls.length > 0);
+  nativeControls.forEach((control) => assert.match(control, /disabled="\{\{disabled\}\}"/));
+});
+
 test('recipe validation remains package-safe when Node Buffer is unavailable', () => {
   const { validateRecipe } = require('../services/recipe-domain');
   const originalBuffer = global.Buffer;
@@ -160,6 +197,21 @@ test('recipe validation remains package-safe when Node Buffer is unavailable', (
     assert.deepEqual(validateRecipe(completeRecipe()), { ok: true, errors: [] });
   } finally {
     global.Buffer = originalBuffer;
+  }
+});
+
+test('recipe byte length counts a non-BMP emoji without Buffer or TextEncoder', () => {
+  const { recipeByteLength } = require('../services/recipe-domain');
+  const originalBuffer = global.Buffer;
+  const originalTextEncoder = global.TextEncoder;
+  global.Buffer = undefined;
+  global.TextEncoder = undefined;
+  try {
+    const recipe = completeRecipe({ familyNotes: ['😀'] });
+    assert.equal(recipeByteLength(recipe), 95);
+  } finally {
+    global.Buffer = originalBuffer;
+    global.TextEncoder = originalTextEncoder;
   }
 });
 
@@ -337,6 +389,156 @@ test('draft autosave waits 800 ms and preserves a complete local copy on conflic
     global.getApp = originalGetApp;
     global.setTimeout = originalSetTimeout;
     global.clearTimeout = originalClearTimeout;
+  }
+});
+
+test('draft save drain serializes overlapping edits and persists the latest generation', async () => {
+  const originalGetApp = global.getApp;
+  const requests = [];
+  const pending = [];
+  const firstRecipe = completeRecipe({ familyNotes: ['第一版'] });
+  const latestRecipe = completeRecipe({ familyNotes: ['第二版'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        updateDraft(payload) {
+          requests.push(payload);
+          const request = deferred();
+          pending.push(request);
+          return request.promise;
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: firstRecipe }),
+      recipe: firstRecipe,
+      validation: { ok: true, errors: [] },
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+
+    const firstSave = page.saveDraftNow();
+    page.onRecipeChange({ detail: { recipe: latestRecipe } });
+    const queuedSave = page.saveDraftNow();
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].revision, 3);
+    assert.deepEqual(requests[0].recipe, firstRecipe);
+
+    pending[0].resolve({ draft: draftFixture({ revision: 4, recipe: firstRecipe }) });
+    await flushPromises();
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].revision, 4);
+    assert.deepEqual(requests[1].recipe, latestRecipe);
+
+    pending[1].resolve({ draft: draftFixture({ revision: 5, recipe: latestRecipe }) });
+    assert.equal(await firstSave, true);
+    assert.equal(await queuedSave, true);
+    assert.equal(page.data.draft.revision, 5);
+    assert.equal(page.recipeDirty, false);
+    assert.equal(page.data.saveState, 'saved');
+    assert.equal(page.data.localConflictRecipe, null);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('confirmation locks before saving, ignores edits, and confirms only the persisted revision', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const update = deferred();
+  const calls = [];
+  const persistedRecipe = completeRecipe({ familyNotes: ['确认这一版'] });
+  const attemptedRecipe = completeRecipe({ familyNotes: ['不应写入'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        updateDraft(payload) {
+          calls.push({ action: 'updateDraft', payload });
+          return update.promise;
+        },
+        async confirmDraft(payload) {
+          calls.push({ action: 'confirmDraft', payload });
+          return { version: { _id: 'version-1' } };
+        },
+      },
+    },
+  });
+  global.wx = { redirectTo() {}, showToast() {} };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draftId: 'draft-1',
+      draft: draftFixture({ revision: 6, recipe: persistedRecipe }),
+      recipe: persistedRecipe,
+      validation: { ok: true, errors: [] },
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+
+    const confirmation = page.confirmRecipe();
+    const lockedImmediately = page.data.confirming;
+    page.onRecipeChange({ detail: { recipe: attemptedRecipe } });
+    const generationAfterAttempt = page.editGeneration;
+
+    assert.equal(calls.filter((call) => call.action === 'confirmDraft').length, 0);
+    update.resolve({ draft: draftFixture({ revision: 7, recipe: persistedRecipe }) });
+    await confirmation;
+
+    assert.equal(lockedImmediately, true);
+    assert.deepEqual(page.data.recipe, persistedRecipe);
+    assert.equal(generationAfterAttempt, 1);
+    assert.deepEqual(calls.map((call) => call.action), ['updateDraft', 'confirmDraft']);
+    assert.equal(calls[1].payload.revision, 7);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('confirmation unlocks when the queued save fails', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const update = deferred();
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        updateDraft() { return update.promise; },
+        async confirmDraft() { throw new Error('confirm must not run'); },
+      },
+    },
+  });
+  global.wx = { showToast() {} };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draftId: 'draft-1',
+      draft: draftFixture({ revision: 2 }),
+      recipe: completeRecipe(),
+      validation: { ok: true, errors: [] },
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+
+    const confirmation = page.confirmRecipe();
+    const lockedImmediately = page.data.confirming;
+    update.reject(new Error('network unavailable'));
+    await confirmation;
+
+    assert.equal(lockedImmediately, true);
+    assert.equal(page.data.confirming, false);
+    assert.equal(page.data.saveState, 'error');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
   }
 });
 

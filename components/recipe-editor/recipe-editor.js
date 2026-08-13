@@ -25,6 +25,10 @@ Component({
         this.setData({ recipe: normalizeRecipe(value || emptyRecipe()) });
       },
     },
+    disabled: {
+      type: Boolean,
+      value: false,
+    },
   },
 
   data: {
@@ -39,6 +43,7 @@ Component({
 
   methods: {
     commit(nextRecipe) {
+      if (this.data.disabled) return;
       const recipe = normalizeRecipe(nextRecipe);
       const validation = validateRecipe(recipe);
       this.setData({ recipe });

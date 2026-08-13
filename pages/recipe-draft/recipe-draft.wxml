@@ -23,7 +23,7 @@
       </view>
     </view>
 
-    <recipe-editor value="{{recipe}}" bind:change="onRecipeChange" bind:validation="onRecipeValidation" />
+    <recipe-editor value="{{recipe}}" disabled="{{confirming}}" bind:change="onRecipeChange" bind:validation="onRecipeValidation" />
 
     <view wx:if="{{confirmMode === 'record'}}" class="card-surface confirm-mode-card">
       <view class="section-title">这次确认后怎么保存</view>

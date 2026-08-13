@@ -42,9 +42,7 @@ function sanitize(value) {
 
 function sensitiveKey(key) {
   const normalized = String(key || '').toLowerCase();
-  return normalized === 'openid'
-    || ((normalized.includes('temp') || normalized.includes('temporary')) && normalized.includes('url'))
-    || normalized === 'shortlivedurl';
+  return normalized.includes('openid') || /urls?$/.test(normalized);
 }
 
 module.exports = {

@@ -17,6 +17,29 @@ const DEFAULT_CONFIG = Object.freeze({
   usageCollection: 'recipe_usage_daily',
 });
 
+const RECORD_SCOPED_ACTIONS = Object.freeze([
+  'getRecordWorkspace',
+  'reserveRecording',
+  'submitRecording',
+  'refreshWorkspace',
+  'updateTranscript',
+  'addManualText',
+  'deleteRecordingAudio',
+  'deleteRecording',
+  'attachRecordWorkspace',
+  'cancelRecordWorkspace',
+  'organizeDraft',
+]);
+
+const RECORD_ID_ACTIONS = Object.freeze([
+  'getRecordWorkspace',
+  'reserveRecording',
+  'refreshWorkspace',
+  'addManualText',
+  'attachRecordWorkspace',
+  'cancelRecordWorkspace',
+]);
+
 function configFor(dependencies = {}) {
   return { ...DEFAULT_CONFIG, ...(dependencies.config || {}) };
 }
@@ -42,6 +65,9 @@ async function getDocument(db, name, id) {
 
 function createGuards(db, config) {
   async function requireMember(familyId, openid) {
+    if (!String(openid || '').trim()) {
+      throw createRecipeError('AUTH_REQUIRED', '无法确认登录身份', 'authorize');
+    }
     const members = await query(db, config.memberCollection, { familyId, openid, status: 'active' }, 1);
     if (!members[0]) throw createRecipeError('NOT_MEMBER', '你还不是这个家庭的成员', 'authorize');
     return members[0];
@@ -93,9 +119,15 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
     const guards = dependencies.guards || createGuards(db, config);
 
     stage = 'authorize';
-    await guards.requireMember(familyId, String(context.OPENID || '').trim());
+    const openid = String(context.OPENID || '').trim();
+    if (!openid) throw createRecipeError('AUTH_REQUIRED', '无法确认登录身份', 'authorize');
+    await guards.requireMember(familyId, openid);
     const allowArchived = ['getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace'].includes(requiredAction);
     await guards.requireActiveDish(familyId, dishId, { allowArchived });
+    if (RECORD_ID_ACTIONS.includes(requiredAction)) {
+      const recordId = requireValue(event.recordId, 'RECORD_REQUIRED', '缺少制作记录');
+      await guards.requireCookingRecord(familyId, dishId, recordId);
+    }
 
     stage = 'action';
     let data;
@@ -110,7 +142,7 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         data = await getVersion(repository, familyId, dishId, event.versionId);
         break;
       case 'getRecordWorkspace':
-        data = await getRecordWorkspace(repository, guards, familyId, dishId, event.recordId);
+        data = await getRecordWorkspace(repository, familyId, dishId, event.recordId);
         break;
       default:
         throw createRecipeError('ACTION_INVALID', '不支持这个操作', 'action');
@@ -146,9 +178,8 @@ async function getVersion(repository, familyId, dishId, rawVersionId) {
   return { version };
 }
 
-async function getRecordWorkspace(repository, guards, familyId, dishId, rawRecordId) {
+async function getRecordWorkspace(repository, familyId, dishId, rawRecordId) {
   const recordId = requireValue(rawRecordId, 'RECORD_REQUIRED', '缺少制作记录');
-  await guards.requireCookingRecord(familyId, dishId, recordId);
   const [recordings, draft] = await Promise.all([
     repository.listRecordings(familyId, dishId, recordId),
     repository.getDraft({ familyId, dishId, recordId }),
@@ -196,6 +227,8 @@ async function main(event = {}, context = {}) {
 
 module.exports = {
   DEFAULT_CONFIG,
+  RECORD_ID_ACTIONS,
+  RECORD_SCOPED_ACTIONS,
   createGuards,
   handleAction,
   main,

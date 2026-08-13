@@ -4,6 +4,8 @@ const Module = require('node:module');
 
 const {
   DEFAULT_CONFIG,
+  RECORD_ID_ACTIONS,
+  RECORD_SCOPED_ACTIONS,
   handleAction,
   main,
 } = require('../cloudfunctions/recipe-assistant');
@@ -158,6 +160,70 @@ test('denies revoked memberships', async () => {
   assert.equal(result.error.code, 'NOT_MEMBER');
 });
 
+test('fails closed on blank trusted identity before an empty-openid member can authorize', async () => {
+  const seed = baseSeed();
+  seed.family_members['malformed-empty-openid'] = {
+    _id: 'malformed-empty-openid', familyId: 'family-a', memberId: 'malformed', openid: '', status: 'active',
+  };
+
+  for (const openid of ['', '   ']) {
+    const result = await invoke(createMemoryDatabase(seed), {
+      action: 'getRecipe', familyId: 'family-a', dishId: 'dish-1',
+      openid: 'openid-a', memberId: 'member-a',
+    }, openid);
+
+    assert.deepEqual(result, {
+      ok: false,
+      error: { code: 'AUTH_REQUIRED', message: '无法确认登录身份' },
+    });
+  }
+});
+
+test('defines every record-scoped action and the actions whose contract carries recordId', () => {
+  assert.deepEqual([...RECORD_SCOPED_ACTIONS].sort(), [
+    'addManualText',
+    'attachRecordWorkspace',
+    'cancelRecordWorkspace',
+    'deleteRecording',
+    'deleteRecordingAudio',
+    'getRecordWorkspace',
+    'organizeDraft',
+    'refreshWorkspace',
+    'reserveRecording',
+    'submitRecording',
+    'updateTranscript',
+  ]);
+  assert.deepEqual([...RECORD_ID_ACTIONS].sort(), [
+    'addManualText',
+    'attachRecordWorkspace',
+    'cancelRecordWorkspace',
+    'getRecordWorkspace',
+    'refreshWorkspace',
+    'reserveRecording',
+  ]);
+});
+
+test('pending direct-record actions verify cross-dish and cross-family record ownership before rejection', async () => {
+  const seed = baseSeed();
+  seed.family_states['family-b'].cookingRecords.push({
+    id: 'record-family-b-only', familyId: 'family-b', dishId: 'dish-1',
+  });
+  const db = createMemoryDatabase(seed);
+
+  for (const recordId of ['record-deleted', 'record-family-b-only']) {
+    const result = await invoke(db, {
+      action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId,
+    });
+    assert.equal(result.ok, false, recordId);
+    assert.equal(result.error.code, 'RECORD_NOT_FOUND', recordId);
+  }
+
+  const owned = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  });
+  assert.equal(owned.error.code, 'ACTION_INVALID');
+});
+
 test('purged tombstones deny every implemented and pending recipe action', async () => {
   const db = createMemoryDatabase(baseSeed());
   for (const action of ['getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace', 'createManualDraft']) {
@@ -223,7 +289,18 @@ test('getRecipe verifies pointer and version ownership and sanitizes sensitive f
   seed.recipe_versions = {
     'version-2': {
       _id: 'version-2', familyId: 'family-a', dishId: 'dish-1', versionNumber: 2,
-      recipe: { familyNotes: ['safe'], nested: { openid: 'hidden', temporaryUrl: 'https://temporary.example/version' } },
+      recipe: {
+        familyNotes: ['safe'],
+        fileId: 'cloud://env/durable-recipe-source',
+        nested: {
+          creatorOpenid: 'creator-hidden',
+          _openid: 'system-hidden',
+          audioUrl: 'https://temporary.example/audio',
+          downloadUrl: 'https://temporary.example/download',
+          tempFileURL: 'https://temporary.example/version',
+          instruction: 'legitimate recipe field',
+        },
+      },
     },
     'version-other': { _id: 'version-other', familyId: 'family-b', dishId: 'dish-1', versionNumber: 99, recipe: { secret: true } },
   };
@@ -237,8 +314,12 @@ test('getRecipe verifies pointer and version ownership and sanitizes sensitive f
   assert.equal(result.data.pointer._id, 'family-a|dish-1');
   assert.equal(result.data.version._id, 'version-2');
   assert.equal(serialized.includes('must-not-leak'), false);
+  assert.equal(serialized.includes('creator-hidden'), false);
+  assert.equal(serialized.includes('system-hidden'), false);
   assert.equal(serialized.includes('temporary.example'), false);
   assert.equal(serialized.includes('version-other'), false);
+  assert.equal(result.data.version.recipe.fileId, 'cloud://env/durable-recipe-source');
+  assert.equal(result.data.version.recipe.nested.instruction, 'legitimate recipe field');
 });
 
 test('treats a cross-family recipe pointer as absent', async () => {

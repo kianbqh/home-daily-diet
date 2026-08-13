@@ -1,4 +1,5 @@
 const { withoutSystemId } = require('./logic');
+const { isDeepStrictEqual } = require('node:util');
 
 function createRecipeRepository(db, config) {
   async function getDocument(name, id) {
@@ -72,7 +73,17 @@ function createRecipeRepository(db, config) {
   }
 
   async function createVersion(data) {
-    return addDocument(config.versionCollection, data);
+    const id = versionDocumentId(data.familyId, data.dishId, data.versionNumber);
+    const existing = await getDocument(config.versionCollection, id);
+    if (existing) {
+      if (sameDocument(existing, data)) return existing;
+      const error = new Error('recipe version is immutable');
+      error.name = 'RecipeAssistantError';
+      error.code = 'VERSION_IMMUTABLE_CONFLICT';
+      error.stage = 'action';
+      throw error;
+    }
+    return setDocument(config.versionCollection, id, data);
   }
 
   async function getRecording(familyIdOrInput, dishIdArg, recordingIdArg) {
@@ -116,6 +127,14 @@ function owned(document, familyId, dishId) {
 function normalizeOwnedLookup(familyIdOrInput, dishId, documentId, documentKey = 'draftId') {
   if (familyIdOrInput && typeof familyIdOrInput === 'object') return familyIdOrInput;
   return { familyId: familyIdOrInput, dishId, [documentKey]: documentId };
+}
+
+function versionDocumentId(familyId, dishId, versionNumber) {
+  return `${familyId}|${dishId}|${versionNumber}`;
+}
+
+function sameDocument(existing, expected) {
+  return isDeepStrictEqual(withoutSystemId(existing), withoutSystemId(expected));
 }
 
 module.exports = { createRecipeRepository };

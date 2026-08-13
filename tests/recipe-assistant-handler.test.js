@@ -19,34 +19,72 @@ function clone(value) {
 
 function createMemoryDatabase(seed = {}, options = {}) {
   const collections = new Map();
+  const documentVersions = new Map();
   let transactionCount = 0;
+  let transactionAttemptCount = 0;
   Object.entries(seed).forEach(([name, records]) => {
     collections.set(name, new Map(Object.entries(records).map(([id, data]) => [id, clone(data)])));
+    Object.keys(records).forEach((id) => documentVersions.set(documentKey(name, id), 0));
   });
 
-  function collection(name) {
+  function collection(name, transaction = null) {
     if (!collections.has(name)) collections.set(name, new Map());
     const records = collections.get(name);
     return {
       doc(id) {
         return {
           async get() {
-            return { data: records.has(id) ? clone(records.get(id)) : null };
+            const key = documentKey(name, id);
+            if (transaction && transaction.writes.has(key)) {
+              return { data: clone(transaction.writes.get(key).data) };
+            }
+            if (transaction && !transaction.readVersions.has(key)) {
+              transaction.readVersions.set(key, documentVersions.get(key) || 0);
+            }
+            const data = records.has(id) ? clone(records.get(id)) : null;
+            if (transaction && typeof options.afterTransactionRead === 'function') {
+              await options.afterTransactionRead({
+                name, id, data: clone(data), attempt: transaction.attempt,
+                transactionId: transaction.id,
+              });
+            }
+            return { data };
           },
           async set({ data }) {
             rejectSystemId(data, 'set');
-            records.set(id, { ...clone(data), _id: id });
+            const key = documentKey(name, id);
+            const stored = { ...clone(data), _id: id };
+            if (transaction) {
+              if (!transaction.readVersions.has(key)) {
+                transaction.readVersions.set(key, documentVersions.get(key) || 0);
+              }
+              transaction.writes.set(key, { name, id, data: stored });
+              return { _id: id };
+            }
+            records.set(id, stored);
+            documentVersions.set(key, (documentVersions.get(key) || 0) + 1);
             return { _id: id };
           },
         };
       },
       async add({ data }) {
+        if (transaction) {
+          const error = new Error('CloudBase transactions do not support collection.add');
+          error.code = 'TRANSACTION_ADD_UNSUPPORTED';
+          throw error;
+        }
         rejectSystemId(data, 'add');
         const id = `${name}-${records.size + 1}`;
         records.set(id, { ...clone(data), _id: id });
+        documentVersions.set(documentKey(name, id), 1);
         return { _id: id };
       },
       where(filter) {
+        if (transaction) {
+          const error = new Error('CloudBase transactions do not support collection.where');
+          error.code = 'TRANSACTION_QUERY_UNSUPPORTED';
+          throw error;
+        }
         let result = [...records.values()].filter((record) => Object.entries(filter).every(
           ([key, expected]) => record[key] === expected
         ));
@@ -77,13 +115,48 @@ function createMemoryDatabase(seed = {}, options = {}) {
   }
 
   const db = {
-    collection,
+    collection(name) {
+      return collection(name);
+    },
     async runTransaction(callback) {
       transactionCount += 1;
       if (typeof options.beforeTransaction === 'function') {
         await options.beforeTransaction(db, transactionCount);
       }
-      return callback(db);
+      const transactionId = transactionCount;
+      const maxAttempts = options.maxTransactionAttempts || 5;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        transactionAttemptCount += 1;
+        const transaction = {
+          id: transactionId,
+          attempt,
+          readVersions: new Map(),
+          writes: new Map(),
+        };
+        const transactionDb = {
+          collection(name) {
+            return collection(name, transaction);
+          },
+        };
+        const result = await callback(transactionDb);
+        const conflicted = [...transaction.readVersions.entries()].some(
+          ([key, version]) => (documentVersions.get(key) || 0) !== version
+        );
+        if (conflicted) {
+          if (attempt === maxAttempts) {
+            const error = new Error('transaction conflict retry limit exceeded');
+            error.code = 'TRANSACTION_CONFLICT';
+            throw error;
+          }
+          continue;
+        }
+        transaction.writes.forEach(({ name, id, data }, key) => {
+          collections.get(name).set(id, clone(data));
+          documentVersions.set(key, (documentVersions.get(key) || 0) + 1);
+        });
+        return result;
+      }
+      throw new Error('unreachable transaction state');
     },
     records(name) {
       return collections.get(name) || new Map();
@@ -91,8 +164,15 @@ function createMemoryDatabase(seed = {}, options = {}) {
     transactionCount() {
       return transactionCount;
     },
+    transactionAttemptCount() {
+      return transactionAttemptCount;
+    },
   };
   return db;
+
+  function documentKey(name, id) {
+    return `${name}\u0000${id}`;
+  }
 }
 
 function familyState(familyId = 'family-a') {
@@ -483,7 +563,7 @@ test('recipe validation errors do not echo raw recipe content in responses or lo
   assert.deepEqual(Object.keys(logs[0]).sort(), ['action', 'code', 'durationMs', 'requestId', 'stage'].sort());
 });
 
-test('first confirmation publishes once and an identical retry returns the same immutable version', async () => {
+test('first confirmation uses doc-only transaction operations and an identical retry returns the same immutable version', async () => {
   const db = createMemoryDatabase(baseSeed(), { rejectSystemId: true });
   const created = await invoke(db, {
     action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
@@ -504,11 +584,13 @@ test('first confirmation publishes once and an identical retry returns the same 
   assert.equal(confirmed.data.draft.revision, 1);
   assert.equal(confirmed.data.draft.confirmedVersionId, confirmed.data.version._id);
   assert.equal(confirmed.data.version.versionNumber, 1);
+  assert.equal(confirmed.data.version._id, 'family-a|dish-1|1');
   assert.equal(confirmed.data.version.publishedAsMain, true);
   assert.equal(confirmed.data.version.previousMainVersionId, '');
   assert.equal(confirmed.data.version.confirmedBy, 'member-a');
   assert.equal(confirmed.data.pointer.currentVersionId, confirmed.data.version._id);
   assert.equal(confirmed.data.pointer.currentVersionNumber, 1);
+  assert.equal(confirmed.data.pointer.latestVersionNumber, 1);
   assert.equal(confirmed.data.pointer.updatedBy, 'member-a');
   assert.equal(retried.data.version._id, confirmed.data.version._id);
   assert.equal(retried.data.draft.confirmedVersionId, confirmed.data.version._id);
@@ -550,13 +632,157 @@ test('later confirmations preserve main by default and allocate monotonic versio
   assert.equal(secondConfirmed.data.version.versionNumber, 2);
   assert.equal(secondConfirmed.data.version.publishedAsMain, false);
   assert.equal(secondConfirmed.data.pointer.currentVersionId, firstVersionId);
+  assert.equal(secondConfirmed.data.pointer.currentVersionNumber, 1);
+  assert.equal(secondConfirmed.data.pointer.latestVersionNumber, 2);
   assert.equal(thirdConfirmed.data.version.versionNumber, 3);
   assert.equal(thirdConfirmed.data.version.publishedAsMain, true);
   assert.equal(thirdConfirmed.data.pointer.currentVersionId, thirdConfirmed.data.version._id);
+  assert.equal(thirdConfirmed.data.pointer.latestVersionNumber, 3);
   assert.deepEqual(
     [...db.records('recipe_versions').values()].map((item) => item.versionNumber).sort(),
     [1, 2, 3]
   );
+});
+
+test('a legacy pointer initializes latestVersionNumber from currentVersionNumber without querying versions', async () => {
+  const seed = baseSeed();
+  seed.family_recipes = {
+    'family-a|dish-1': {
+      _id: 'family-a|dish-1', familyId: 'family-a', dishId: 'dish-1',
+      currentVersionId: 'legacy-main', currentVersionNumber: 7,
+      createdAt: 10, updatedBy: 'legacy-member', updatedAt: 11,
+      mainLabel: 'preserve-main-metadata',
+    },
+  };
+  seed.recipe_versions = {
+    'legacy-main': {
+      _id: 'legacy-main', familyId: 'family-a', dishId: 'dish-1',
+      versionNumber: 7, recipe: clone(validRecipe),
+    },
+  };
+  seed.recipe_drafts = {
+    'legacy-draft': {
+      _id: 'legacy-draft', familyId: 'family-a', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+      baseMainVersionId: 'legacy-main', confirmedVersionId: '', createdBy: 'member-a', createdAt: 20,
+      updatedBy: 'member-a', updatedAt: 20,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+
+  const result = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'legacy-draft',
+    revision: 0, publishAsMain: false, baseMainVersionId: 'legacy-main',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.version.versionNumber, 8);
+  assert.equal(result.data.version._id, 'family-a|dish-1|8');
+  assert.equal(result.data.pointer.currentVersionId, 'legacy-main');
+  assert.equal(result.data.pointer.currentVersionNumber, 7);
+  assert.equal(result.data.pointer.latestVersionNumber, 8);
+  assert.equal(result.data.pointer.createdAt, 10);
+  assert.equal(result.data.pointer.mainLabel, 'preserve-main-metadata');
+  assert.equal(result.data.pointer.updatedBy, 'member-a');
+  assert.equal(result.data.pointer.updatedAt, 100);
+});
+
+test('concurrent non-main confirmations retry the shared counter and keep the main pointer unchanged', async () => {
+  const seed = baseSeed();
+  seed.family_recipes = {
+    'family-a|dish-1': {
+      _id: 'family-a|dish-1', familyId: 'family-a', dishId: 'dish-1',
+      currentVersionId: 'main-version', currentVersionNumber: 4, latestVersionNumber: 4,
+      createdAt: 1, updatedBy: 'member-a', updatedAt: 1,
+    },
+  };
+  seed.recipe_versions = {
+    'main-version': {
+      _id: 'main-version', familyId: 'family-a', dishId: 'dish-1',
+      versionNumber: 4, recipe: clone(validRecipe),
+    },
+  };
+  seed.recipe_drafts = {
+    'concurrent-draft-a': {
+      _id: 'concurrent-draft-a', familyId: 'family-a', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+      baseMainVersionId: 'main-version', confirmedVersionId: '',
+    },
+    'concurrent-draft-b': {
+      _id: 'concurrent-draft-b', familyId: 'family-a', dishId: 'dish-1', recordId: '',
+      sourceType: 'manual', status: 'editing', recipe: clone(validRecipe), revision: 0,
+      baseMainVersionId: 'main-version', confirmedVersionId: '',
+    },
+  };
+  let firstPointerReads = 0;
+  let releaseFirstReads;
+  const bothReadPointer = new Promise((resolve) => { releaseFirstReads = resolve; });
+  const db = createMemoryDatabase(seed, {
+    async afterTransactionRead({ name, id, attempt }) {
+      if (name !== 'family_recipes' || id !== 'family-a|dish-1' || attempt !== 1) return;
+      firstPointerReads += 1;
+      if (firstPointerReads === 2) releaseFirstReads();
+      await bothReadPointer;
+    },
+  });
+  const request = (draftId) => invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId,
+    revision: 0, publishAsMain: false, baseMainVersionId: 'main-version',
+  });
+
+  const [left, right] = await Promise.all([
+    request('concurrent-draft-a'),
+    request('concurrent-draft-b'),
+  ]);
+  const pointer = db.records('family_recipes').get('family-a|dish-1');
+
+  assert.equal(left.ok, true);
+  assert.equal(right.ok, true);
+  assert.deepEqual([left.data.version.versionNumber, right.data.version.versionNumber].sort(), [5, 6]);
+  assert.notEqual(left.data.version._id, right.data.version._id);
+  assert.equal(pointer.currentVersionId, 'main-version');
+  assert.equal(pointer.currentVersionNumber, 4);
+  assert.equal(pointer.latestVersionNumber, 6);
+  assert.equal(db.transactionCount(), 2);
+  assert.equal(db.transactionAttemptCount(), 3);
+});
+
+test('deterministic version creation reuses identical content and refuses an immutable overwrite', async () => {
+  const db = createMemoryDatabase(baseSeed(), { rejectSystemId: true });
+  const repository = createRecipeRepository(db, DEFAULT_CONFIG);
+  const version = {
+    familyId: 'family-a', dishId: 'dish-1', recordId: '', versionNumber: 9,
+    recipe: clone(validRecipe), sourceDraftId: 'draft-a', publishedAsMain: false,
+    previousMainVersionId: 'main-version', confirmedBy: 'member-a', confirmedAt: 100,
+  };
+
+  const first = await repository.runTransaction((transaction) => transaction.createVersion(version));
+  const retry = await repository.runTransaction((transaction) => transaction.createVersion({
+    confirmedAt: version.confirmedAt,
+    confirmedBy: version.confirmedBy,
+    previousMainVersionId: version.previousMainVersionId,
+    publishedAsMain: version.publishedAsMain,
+    sourceDraftId: version.sourceDraftId,
+    recipe: clone(version.recipe),
+    versionNumber: version.versionNumber,
+    recordId: version.recordId,
+    dishId: version.dishId,
+    familyId: version.familyId,
+  }));
+  let immutableError;
+  try {
+    await repository.runTransaction((transaction) => transaction.createVersion({
+      ...version, sourceDraftId: 'draft-b',
+    }));
+  } catch (error) {
+    immutableError = error;
+  }
+
+  assert.equal(first._id, 'family-a|dish-1|9');
+  assert.deepEqual(retry, first);
+  assert.equal(immutableError && immutableError.code, 'VERSION_IMMUTABLE_CONFLICT');
+  assert.equal(db.records('recipe_versions').size, 1);
+  assert.equal(db.records('recipe_versions').get('family-a|dish-1|9').sourceDraftId, 'draft-a');
 });
 
 test('confirmDraft rejects a stale main base without creating a version or changing the draft', async () => {

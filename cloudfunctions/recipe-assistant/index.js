@@ -282,9 +282,8 @@ async function confirmDraft(repository, member, familyId, dishId, event, now) {
       throw createRecipeError('MAIN_RECIPE_CONFLICT', '主菜谱已被更新，请刷新后重试');
     }
 
-    const latestVersions = await transaction.listVersions(familyId, dishId, 1);
-    const latestVersionNumber = latestVersions[0] ? Number(latestVersions[0].versionNumber) || 0 : 0;
     const pointerVersionNumber = pointer ? Number(pointer.currentVersionNumber) || 0 : 0;
+    const latestVersionNumber = pointer ? Number(pointer.latestVersionNumber) || 0 : 0;
     const versionNumber = Math.max(latestVersionNumber, pointerVersionNumber) + 1;
     const shouldPublishAsMain = !pointer || !previousMainVersionId || publishAsMain;
     const version = await transaction.createVersion({
@@ -300,18 +299,17 @@ async function confirmDraft(repository, member, familyId, dishId, event, now) {
       confirmedAt: now,
     });
 
-    let nextPointer = pointer;
-    if (shouldPublishAsMain) {
-      nextPointer = await transaction.setRecipePointer(familyId, dishId, {
-        familyId,
-        dishId,
-        currentVersionId: version._id,
-        currentVersionNumber: versionNumber,
-        createdAt: pointer && pointer.createdAt != null ? pointer.createdAt : now,
-        updatedBy: member.memberId,
-        updatedAt: now,
-      });
-    }
+    const nextPointer = await transaction.setRecipePointer(familyId, dishId, {
+      ...(pointer || {}),
+      familyId,
+      dishId,
+      currentVersionId: shouldPublishAsMain ? version._id : previousMainVersionId,
+      currentVersionNumber: shouldPublishAsMain ? versionNumber : pointerVersionNumber,
+      latestVersionNumber: versionNumber,
+      createdAt: pointer && pointer.createdAt != null ? pointer.createdAt : now,
+      updatedBy: member.memberId,
+      updatedAt: now,
+    });
     const confirmedDraft = await transaction.setDraft(draftId, {
       ...draft,
       recipe,

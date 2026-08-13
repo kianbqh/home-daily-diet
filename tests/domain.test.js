@@ -86,6 +86,34 @@ test('appends a later cooking record instead of replacing history', () => {
   assert.equal(second.dishes[0].coverImage, 'second.jpg');
 });
 
+test('uses a pre-generated cooking record id and makes an identical retry idempotent', () => {
+  let state = addDish(createInitialState({ memberId: 'member-1' }), { name: '番茄炒蛋' });
+  const dishId = state.dishes[0].id;
+  const input = {
+    id: 'record-stable-1',
+    dishId,
+    recordedBy: 'member-1',
+    recordedAt: '2026-08-13T12:00:00.000Z',
+    mealType: 'lunch',
+  };
+
+  state = addCookingRecord(state, input, '2026-08-13T12:00:01.000Z');
+  state = addCookingRecord(state, input, '2026-08-13T12:00:02.000Z');
+
+  assert.equal(state.cookingRecords.filter((item) => item.id === input.id).length, 1);
+});
+
+test('rejects reuse of a cooking record id for another dish', () => {
+  let state = addDish(createInitialState(), { name: '番茄炒蛋' });
+  state = addDish(state, { name: '紫菜汤' });
+  state = addCookingRecord(state, { id: 'record-stable-2', dishId: state.dishes[0].id });
+
+  assert.throws(
+    () => addCookingRecord(state, { id: 'record-stable-2', dishId: state.dishes[1].id }),
+    /制作记录编号已被占用/
+  );
+});
+
 test('updates dish profile without changing its cooking history', () => {
   const first = stateWithDish({ name: '番茄炒蛋' });
   const dishId = first.dishes[0].id;

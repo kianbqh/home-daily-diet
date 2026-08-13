@@ -21,6 +21,18 @@ function makeId(prefix) {
   return `${prefix}-${Date.now()}-${idSequence}`;
 }
 
+function createCookingRecordId() {
+  return makeId('record');
+}
+
+function sameCookingRecord(existing, expected) {
+  return existing.familyId === expected.familyId
+    && existing.dishId === expected.dishId
+    && existing.recordedBy === expected.recordedBy
+    && existing.recordedAt === expected.recordedAt
+    && existing.mealType === expected.mealType;
+}
+
 function normalizeDishCategory(category) {
   const normalized = String(category || '').trim();
   return DISH_CATEGORIES.includes(normalized) ? normalized : '';
@@ -180,8 +192,8 @@ function addCookingRecord(inputState, input = {}, now) {
   }
   const recordedAt = timestamp(input.recordedAt || now);
   const image = input.image || '';
-  state.cookingRecords.push({
-    id: makeId('record'),
+  const expected = {
+    id: input.id || createCookingRecordId(),
     familyId: state.family.id,
     dishId: dish.id,
     recordedBy: input.recordedBy || state.currentMemberId,
@@ -190,7 +202,13 @@ function addCookingRecord(inputState, input = {}, now) {
     image,
     rating: input.rating || '',
     note: input.note || '',
-  });
+  };
+  const existing = state.cookingRecords.find((record) => record.id === expected.id);
+  if (existing) {
+    if (sameCookingRecord(existing, expected)) return state;
+    throw new Error('制作记录编号已被占用');
+  }
+  state.cookingRecords.push(expected);
   dish.updatedAt = recordedAt;
   if (image) {
     dish.coverImage = image;
@@ -605,6 +623,7 @@ module.exports = {
   cancelMealSelection,
   confirmMealSession,
   createInitialState,
+  createCookingRecordId,
   createMealSession,
   deleteDish,
   getDishSummary,

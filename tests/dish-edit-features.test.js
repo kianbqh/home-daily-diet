@@ -119,11 +119,18 @@ test('saving an appended record clears only the current record photo after uploa
     image: 'local-photo.jpg',
     displayImage: 'local-photo.jpg',
   });
+  page.startRecordEntry();
+  const reservedRecordId = page.data.recordIdDraft;
+  page.startRecordEntry();
+  assert.match(reservedRecordId, /^record-/);
+  assert.equal(page.data.recordIdDraft, reservedRecordId);
   await page.save();
 
+  assert.equal(added.id, reservedRecordId);
   assert.equal(added.image, 'cloud://local-photo.jpg');
   assert.equal(page.data.image, '');
   assert.equal(page.data.displayImage, '');
+  assert.equal(page.data.recordIdDraft, '');
   await new Promise((resolve) => setTimeout(resolve, 500));
 
   global.getApp = originalGetApp;
@@ -145,6 +152,10 @@ test('existing dish details open and cancel the append-record form without keepi
 
   page.startRecordEntry();
   assert.equal(page.data.recordFormVisible, true);
+  assert.match(page.data.recordIdDraft, /^record-/);
+  const reservedRecordId = page.data.recordIdDraft;
+  page.startRecordEntry();
+  assert.equal(page.data.recordIdDraft, reservedRecordId);
 
   page.setData({
     image: 'wxfile://draft.jpg',
@@ -158,6 +169,7 @@ test('existing dish details open and cancel the append-record form without keepi
 
   assert.deepEqual({
     recordFormVisible: page.data.recordFormVisible,
+    recordIdDraft: page.data.recordIdDraft,
     image: page.data.image,
     displayImage: page.data.displayImage,
     mealType: page.data.mealType,
@@ -166,6 +178,7 @@ test('existing dish details open and cancel the append-record form without keepi
     customMealTypeDraft: page.data.customMealTypeDraft,
   }, {
     recordFormVisible: false,
+    recordIdDraft: '',
     image: '',
     displayImage: '',
     mealType: '',

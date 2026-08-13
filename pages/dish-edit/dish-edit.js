@@ -1,4 +1,4 @@
-const { DISH_CATEGORIES, DISH_TAGS } = require('../../services/domain');
+const { DISH_CATEGORIES, DISH_TAGS, createCookingRecordId } = require('../../services/domain');
 const { todayString } = require('../../utils/format');
 const { buildDishDetailViewModel } = require('../../utils/view-model');
 const { isCloudFileId, resolveCloudFileUrls } = require('../../utils/cloud-image');
@@ -32,6 +32,7 @@ Page({
     isEditingProfile: false,
     editProfileVisible: false,
     recordFormVisible: false,
+    recordIdDraft: '',
     isArchived: false,
     canAddRecord: true,
     canEditProfile: false,
@@ -229,6 +230,7 @@ Page({
     if (!this.data.isExisting || this.data.isArchived || this.data.editProfileVisible) return;
     this.setData({
       recordFormVisible: true,
+      recordIdDraft: this.data.recordIdDraft || createCookingRecordId(),
       recordDate: todayString(),
     });
   },
@@ -237,6 +239,7 @@ Page({
     if (!this.data.isExisting) return;
     this.setData({
       recordFormVisible: false,
+      recordIdDraft: '',
       image: '',
       displayImage: '',
       recordDate: todayString(),
@@ -576,8 +579,8 @@ Page({
         mealType,
       };
       if (this.data.isExisting) {
-        store.addCookingRecord({ ...payload, dishId: this.data.dishId });
-        this.setData({ image: '', displayImage: '', recordFormVisible: false });
+        store.addCookingRecord({ ...payload, id: this.data.recordIdDraft, dishId: this.data.dishId });
+        this.setData({ image: '', displayImage: '', recordFormVisible: false, recordIdDraft: '' });
         this.finishAndGoBack('这次记录已追加');
         return;
       }

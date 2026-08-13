@@ -24,9 +24,12 @@ function unwrapRecipeResult(result, action) {
   throw error;
 }
 
-function createReservationError() {
-  const error = new Error('recording reservation is invalid');
-  error.code = 'INVALID_RECORDING_RESERVATION';
+function createUploadError(code) {
+  const error = new Error(code === 'INVALID_RECORDING_RESERVATION'
+    ? 'recording reservation is invalid'
+    : 'recipe audio upload failed');
+  error.code = code;
+  error.action = 'uploadRecording';
   return error;
 }
 
@@ -54,18 +57,19 @@ function createRecipeAssistant(api, options = {}) {
     const cloudPath = reservation && reservation.cloudPath;
     const expectedPrefix = `families/${familyId}/recipe-audio/`;
     if (!familyId || typeof cloudPath !== 'string' || !cloudPath.startsWith(expectedPrefix)) {
-      throw createReservationError();
+      throw createUploadError('INVALID_RECORDING_RESERVATION');
     }
     if (typeof api.cloud.uploadFile !== 'function') {
-      const error = new Error('recipe audio upload is unavailable');
-      error.code = 'RECIPE_AUDIO_UPLOAD_UNAVAILABLE';
-      throw error;
+      throw createUploadError('RECIPE_AUDIO_UPLOAD_FAILED');
     }
-    const result = await api.cloud.uploadFile({ cloudPath, filePath });
+    let result;
+    try {
+      result = await api.cloud.uploadFile({ cloudPath, filePath });
+    } catch (error) {
+      throw createUploadError('RECIPE_AUDIO_UPLOAD_FAILED');
+    }
     if (!result || !result.fileID) {
-      const error = new Error('recipe audio upload did not return a file id');
-      error.code = 'RECIPE_AUDIO_UPLOAD_UNAVAILABLE';
-      throw error;
+      throw createUploadError('RECIPE_AUDIO_UPLOAD_FAILED');
     }
     return result.fileID;
   }

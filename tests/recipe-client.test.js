@@ -105,7 +105,47 @@ test('recording upload rejects a reservation outside its family audio namespace'
       familyId: 'family-1',
       cloudPath: 'families/family-2/recipe-audio/reserved-audio.m4a',
     }, 'wxfile://recording.m4a'),
-    (error) => error && error.code === 'INVALID_RECORDING_RESERVATION'
+    (error) => error instanceof Error
+      && error.code === 'INVALID_RECORDING_RESERVATION'
+      && error.action === 'uploadRecording'
   );
   assert.equal(fake.uploads.length, 0);
+});
+
+test('recording upload normalizes transport failure without exposing reservation content', async () => {
+  const fake = createFakeApi();
+  fake.api.cloud.uploadFile = async () => {
+    const error = new Error('upload failed for families/family-1/recipe-audio/private.m4a');
+    error.code = 'PROVIDER_UPLOAD_FAILURE';
+    throw error;
+  };
+  const service = createRecipeAssistant(fake.api, { envId: 'env-test' });
+
+  await assert.rejects(
+    service.uploadRecording({
+      familyId: 'family-1',
+      cloudPath: 'families/family-1/recipe-audio/reserved-audio.m4a',
+    }, 'wxfile://recording.m4a'),
+    (error) => error instanceof Error
+      && error.code === 'RECIPE_AUDIO_UPLOAD_FAILED'
+      && error.action === 'uploadRecording'
+      && error.message === 'recipe audio upload failed'
+  );
+});
+
+test('recording upload normalizes a response without a file id', async () => {
+  const fake = createFakeApi();
+  fake.api.cloud.uploadFile = async () => ({});
+  const service = createRecipeAssistant(fake.api, { envId: 'env-test' });
+
+  await assert.rejects(
+    service.uploadRecording({
+      familyId: 'family-1',
+      cloudPath: 'families/family-1/recipe-audio/reserved-audio.m4a',
+    }, 'wxfile://recording.m4a'),
+    (error) => error instanceof Error
+      && error.code === 'RECIPE_AUDIO_UPLOAD_FAILED'
+      && error.action === 'uploadRecording'
+      && error.message === 'recipe audio upload failed'
+  );
 });

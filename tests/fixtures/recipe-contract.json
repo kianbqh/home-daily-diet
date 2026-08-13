@@ -1,0 +1,14 @@
+{
+  "ingredients": [
+    { "name": "鸡蛋", "amountText": "3 个", "note": "", "uncertain": false }
+  ],
+  "steps": [
+    { "order": 1, "instruction": "炒至刚凝固", "heat": "中大火", "durationText": "", "keyPoint": "不要炒老", "uncertain": false }
+  ],
+  "tips": ["番茄出汁少时加一点水"],
+  "failures": [
+    { "problem": "鸡蛋发老", "cause": "炒太久", "remedy": "刚凝固就盛出" }
+  ],
+  "familyNotes": ["最后放一点糖"],
+  "uncertainties": []
+}

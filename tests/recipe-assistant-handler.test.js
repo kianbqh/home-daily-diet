@@ -316,7 +316,7 @@ test('pending direct-record actions verify cross-dish and cross-family record ow
   const actions = [
     ['getRecordWorkspace', 'success'],
     ['reserveRecording', 'RECORDING_FORMAT_INVALID'],
-    ['refreshWorkspace', 'ACTION_INVALID'],
+    ['refreshWorkspace', 'ASR_UNAVAILABLE'],
     ['addManualText', 'TEXT_REQUIRED'],
     ['attachRecordWorkspace', 'success'],
     ['cancelRecordWorkspace', 'success'],
@@ -1161,6 +1161,9 @@ function recordingServices(overrides = {}) {
         submitted.push(input);
         return { taskId: 'task-1', requestId: 'asr-request-1', submittedAt: 100, expiresAt: 200 };
       },
+      async query() {
+        return { status: 'transcribing', transcript: '', durationMs: 0, requestId: 'query-request', errorCode: '' };
+      },
     },
     idGenerator: () => 'recording-fixed',
     ...overrides,
@@ -1661,4 +1664,168 @@ test('workspace state documents are not addressable as recordings and foreign au
   assert.equal(workspace.ok, true);
   assert.deepEqual(workspace.data.audioUrls, {});
   assert.equal(requested, null);
+});
+
+test('submitRecording keeps an unexpired ASR task idempotent and replaces an expired task on the same recording', async () => {
+  const fileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'transcribing', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
+      fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
+      asrTaskId: 'old-task', asrSubmittedAt: 50, asrExpiresAt: 200, transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const activeServices = recordingServices({ now: () => 100 });
+  const active = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId,
+  }, 'openid-a', activeServices);
+  assert.equal(active.error.code, 'ASR_TASK_IN_PROGRESS');
+  assert.equal(activeServices.submitted.length, 0);
+
+  const retryServices = recordingServices({
+    now: () => 201,
+    asrProvider: {
+      async submit(input) {
+        retryServices.submitted.push(input);
+        return { taskId: 'replacement-task', requestId: 'replacement-request', submittedAt: 201, expiresAt: 301 };
+      },
+    },
+  });
+  const retried = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId,
+  }, 'openid-a', retryServices);
+  assert.equal(retried.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored._id, 'audio');
+  assert.equal(stored.asrTaskId, 'replacement-task');
+  assert.equal(stored.asrRequestId, 'replacement-request');
+  assert.equal(retryServices.submitted.length, 1);
+});
+
+test('concurrent retries create only one replacement ASR task', async () => {
+  const fileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'failed', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
+      fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
+      asrTaskId: 'failed-task', asrSubmittedAt: 10, asrExpiresAt: 20, transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let submits = 0;
+  const services = recordingServices({ asrProvider: {
+    async submit() {
+      submits += 1;
+      return { taskId: 'replacement-task', requestId: 'replacement-request', submittedAt: 100, expiresAt: 200 };
+    },
+  } });
+  const event = {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId,
+  };
+
+  const results = await Promise.all([
+    invoke(db, event, 'openid-a', services),
+    invoke(db, event, 'openid-a', services),
+  ]);
+
+  assert.equal(results.filter((item) => item.ok).length, 1);
+  assert.deepEqual(results.filter((item) => !item.ok).map((item) => item.error.code), ['ASR_TASK_IN_PROGRESS']);
+  assert.equal(submits, 1);
+});
+
+test('refreshWorkspace queries at most ten owned transcribing recordings in sequence order', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`audio-${index + 1}`, {
+    _id: `audio-${index + 1}`, familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: index + 1,
+    sourceType: 'audio', status: 'transcribing', fileId: `cloud://env/families/family-a/recipe-audio/audio-${index + 1}.mp3`,
+    asrTaskId: index + 1, asrSubmittedAt: 10, asrExpiresAt: 1000, rawTranscript: '', editedTranscript: '', transcriptRevision: 0,
+  }]));
+  const queried = [];
+  const services = recordingServices({ asrProvider: {
+    async query(input) {
+      queried.push(input);
+      return { status: 'transcribing', transcript: '', durationMs: 0, requestId: `q-${input.taskId}`, errorCode: '' };
+    },
+  } });
+
+  const result = await invoke(createMemoryDatabase(seed), {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(queried.map((item) => item.taskId), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+});
+
+test('refreshWorkspace persists ready text without overwriting a user edit and keeps failed audio retryable', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    ready: {
+      _id: 'ready', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/ready.mp3',
+      asrTaskId: 1, asrSubmittedAt: 10, asrExpiresAt: 1000, rawTranscript: '', editedTranscript: '家人修订文字', transcriptRevision: 1,
+    },
+    failed: {
+      _id: 'failed', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 2,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/failed.mp3',
+      asrTaskId: 2, asrSubmittedAt: 10, asrExpiresAt: 1000, rawTranscript: '', editedTranscript: '', transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const services = recordingServices({ asrProvider: { async query({ taskId }) {
+    return taskId === 1
+      ? { status: 'ready', transcript: '机器识别文字', durationMs: 1234, requestId: 'ready-query', errorCode: '' }
+      : { status: 'failed', transcript: '', durationMs: 0, requestId: 'failed-query', errorCode: 'ASR_TASK_FAILED' };
+  } } });
+
+  const result = await invoke(db, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+
+  assert.equal(result.ok, true);
+  const ready = db.records('recipe_recordings').get('ready');
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.rawTranscript, '机器识别文字');
+  assert.equal(ready.editedTranscript, '家人修订文字');
+  assert.equal(ready.transcriptRevision, 1);
+  const failed = db.records('recipe_recordings').get('failed');
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.errorCode, 'ASR_TASK_FAILED');
+  assert.equal(failed.fileId.endsWith('/failed.mp3'), true);
+});
+
+test('refreshWorkspace initializes edited text once and cannot resurrect a recording deleted during ASR query', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    initial: {
+      _id: 'initial', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/initial.mp3',
+      asrTaskId: 1, asrSubmittedAt: 10, asrExpiresAt: 1000, rawTranscript: '', editedTranscript: '', transcriptRevision: 0,
+    },
+    deleted: {
+      _id: 'deleted', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 2,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/deleted.mp3',
+      asrTaskId: 2, asrSubmittedAt: 10, asrExpiresAt: 1000, rawTranscript: '', editedTranscript: '', transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const services = recordingServices({ asrProvider: { async query({ taskId }) {
+    if (taskId === 2) db.records('recipe_recordings').get('deleted').status = 'deleted';
+    return { status: 'ready', transcript: `识别结果${taskId}`, durationMs: 1000, requestId: `q-${taskId}`, errorCode: '' };
+  } } });
+
+  const result = await invoke(db, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+
+  assert.equal(result.ok, true);
+  const initial = db.records('recipe_recordings').get('initial');
+  assert.equal(initial.rawTranscript, '识别结果1');
+  assert.equal(initial.editedTranscript, '识别结果1');
+  assert.equal(db.records('recipe_recordings').get('deleted').status, 'deleted');
+  assert.equal(db.records('recipe_recordings').get('deleted').rawTranscript, '');
 });

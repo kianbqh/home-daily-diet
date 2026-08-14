@@ -1,4 +1,5 @@
 const { createRecipeRepository } = require('./repository');
+const { createTencentAsrProvider } = require('./providers/tencent-asr');
 const { normalizeRecipe, validateRecipe } = require('./recipe-schema');
 const {
   createRecipeError,
@@ -38,6 +39,7 @@ const MAX_WORKSPACE_DURATION_MS = 15 * 60 * 1000;
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const MAX_RECORDING_DURATION_MS = 3 * 60 * 1000;
 const RECORDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+let productionAsrProvider = null;
 
 function configFor(dependencies = {}) {
   return { ...DEFAULT_CONFIG, ...(dependencies.config || {}) };
@@ -145,6 +147,9 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         break;
       case 'submitRecording':
         data = await submitRecording(repository, member, familyId, dishId, event, dependencies, nowMs(dependencies));
+        break;
+      case 'refreshWorkspace':
+        data = await refreshWorkspace(repository, member, familyId, dishId, event.recordId, dependencies, nowMs(dependencies));
         break;
       case 'addManualText':
         data = await addManualText(repository, member, familyId, dishId, event, dependencies, nowMs(dependencies));
@@ -284,7 +289,10 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   const recording = await repository.getRecording(familyId, dishId, recordingId);
   if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
   if (recording.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
-  if (recording.status !== 'reserved' && recording.status !== 'failed') {
+  if (hasUnexpiredAsrTask(recording, now) || recording.status === 'uploading') {
+    throw createRecipeError('ASR_TASK_IN_PROGRESS', '这段录音正在识别，请稍后刷新');
+  }
+  if (recording.status !== 'reserved' && recording.status !== 'failed' && recording.status !== 'transcribing') {
     throw createRecipeError('RECORDING_STATE_INVALID', '录音片段当前不能提交');
   }
   if (!fileIdMatchesCloudPath(fileId, recording.reservedCloudPath)) {
@@ -299,7 +307,10 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   const accepted = await repository.runTransaction(async (transaction) => {
     const current = await transaction.getRecording(familyId, dishId, recordingId);
     if (!current || current.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
-    if (current.status !== 'reserved' && current.status !== 'failed') {
+    if (hasUnexpiredAsrTask(current, now) || current.status === 'uploading') {
+      throw createRecipeError('ASR_TASK_IN_PROGRESS', '这段录音正在识别，请稍后刷新');
+    }
+    if (current.status !== 'reserved' && current.status !== 'failed' && current.status !== 'transcribing') {
       throw createRecipeError('RECORDING_STATE_INVALID', '录音片段当前不能提交');
     }
     const state = await transaction.getWorkspaceState(familyId, dishId, current.recordId);
@@ -353,6 +364,67 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     });
   });
   return { recording: updated };
+}
+
+async function refreshWorkspace(repository, member, familyId, dishId, rawRecordId, dependencies, now) {
+  const recordId = requireValue(rawRecordId, 'RECORD_REQUIRED', '缺少制作记录');
+  const asrProvider = dependencies.asrProvider;
+  if (!asrProvider || typeof asrProvider.query !== 'function') {
+    throw createRecipeError('ASR_UNAVAILABLE', '语音识别服务暂时不可用');
+  }
+  const candidates = (await repository.listRecordings(familyId, dishId, recordId))
+    .filter((item) => item.status === 'transcribing' && item.asrTaskId !== '' && item.asrTaskId != null)
+    .slice(0, 10);
+  const refreshed = [];
+  for (const candidate of candidates) {
+    const result = await asrProvider.query({
+      taskId: candidate.asrTaskId,
+      submittedAt: candidate.asrSubmittedAt,
+      expiresAt: candidate.asrExpiresAt,
+    });
+    const updated = await repository.runTransaction(async (transaction) => {
+      const current = await transaction.getRecording(familyId, dishId, candidate._id);
+      if (!current || current.status === 'deleted' || current.recordId !== recordId) return current;
+      if (current.status !== 'transcribing' || String(current.asrTaskId) !== String(candidate.asrTaskId)) return current;
+      if (result.status === 'transcribing') {
+        return transaction.setRecording(candidate._id, {
+          ...current,
+          asrRequestId: result.requestId || current.asrRequestId || '',
+          updatedAt: now,
+        });
+      }
+      if (result.status === 'ready') {
+        const transcript = String(result.transcript || '').trim();
+        const preserveEdit = Number(current.transcriptRevision) > 0 || String(current.editedTranscript || '').trim() !== '';
+        return transaction.setRecording(candidate._id, {
+          ...current,
+          status: 'ready',
+          rawTranscript: transcript,
+          editedTranscript: preserveEdit ? current.editedTranscript : transcript,
+          asrRequestId: result.requestId || current.asrRequestId || '',
+          errorCode: '',
+          updatedBy: member.memberId,
+          updatedAt: now,
+        });
+      }
+      return transaction.setRecording(candidate._id, {
+        ...current,
+        status: 'failed',
+        asrRequestId: result.requestId || current.asrRequestId || '',
+        errorCode: result.errorCode || 'ASR_TASK_FAILED',
+        updatedBy: member.memberId,
+        updatedAt: now,
+      });
+    });
+    if (updated && updated.status !== 'deleted') refreshed.push(updated);
+  }
+  return { recordings: refreshed };
+}
+
+function hasUnexpiredAsrTask(recording, now) {
+  if (!recording || recording.status !== 'transcribing' || !recording.asrTaskId) return false;
+  const expiresAt = Number(recording.asrExpiresAt);
+  return Number.isFinite(expiresAt) && expiresAt > now;
 }
 
 async function addManualText(repository, member, familyId, dishId, event, dependencies, now) {
@@ -781,9 +853,14 @@ async function main(event = {}, context = {}) {
     };
     const db = cloud.database(runtimeEnv ? { env: runtimeEnv } : {});
     const fileApi = createCloudFileApi(cloud);
+    const asrProvider = {
+      submit(input) { return getProductionAsrProvider().submit(input); },
+      query(input) { return getProductionAsrProvider().query(input); },
+    };
     return handleAction(event, requestContext, {
       db,
       fileApi,
+      asrProvider,
       now: Date.now,
       logger: console,
       startedAt,
@@ -800,6 +877,11 @@ async function main(event = {}, context = {}) {
     if (typeof console !== 'undefined' && typeof console.error === 'function') console.error(log);
     return { ok: false, error: { code, message: publicMessage(error) } };
   }
+}
+
+function getProductionAsrProvider() {
+  if (!productionAsrProvider) productionAsrProvider = createTencentAsrProvider();
+  return productionAsrProvider;
 }
 
 function createCloudFileApi(cloud) {

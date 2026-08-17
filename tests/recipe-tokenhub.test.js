@@ -279,6 +279,58 @@ test('fails closed with AI_NOT_CONFIGURED before making a request when the key i
   assert.equal(calls, 0);
 });
 
+test('uses hy3 by default when no recipe model is configured', async () => {
+  const previous = process.env.RECIPE_MODEL;
+  delete process.env.RECIPE_MODEL;
+  const fake = queuedFetch([tokenHubResponse(JSON.stringify(fixture))]);
+  try {
+    const provider = createTokenHubProvider({
+      fetch: fake.fetch.bind(fake),
+      apiKey: TEST_KEY,
+      promptVersion: 'v1',
+    });
+
+    await provider.organize({ sourceText: '鸡蛋三个', userId: 'family-hash' });
+  } finally {
+    if (previous === undefined) delete process.env.RECIPE_MODEL;
+    else process.env.RECIPE_MODEL = previous;
+  }
+
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0].body.model, 'hy3');
+});
+
+test('allows the explicitly approved deepseek-v4-flash model', async () => {
+  const fake = queuedFetch([tokenHubResponse(JSON.stringify(fixture), {
+    payload: { model: 'deepseek-v4-flash' },
+  })]);
+  const provider = providerFor(fake.fetch.bind(fake), { model: 'deepseek-v4-flash' });
+
+  const result = await provider.organize({ sourceText: '鸡蛋三个', userId: 'family-hash' });
+
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0].body.model, 'deepseek-v4-flash');
+  assert.equal(result.modelName, 'deepseek-v4-flash');
+});
+
+test('rejects Kimi and arbitrary recipe models before fetch', async () => {
+  for (const model of ['kimi-k2', 'unapproved-model']) {
+    let calls = 0;
+    const provider = createTokenHubProvider({
+      fetch: async () => { calls += 1; },
+      apiKey: TEST_KEY,
+      model,
+      promptVersion: 'v1',
+    });
+
+    await rejectsWithCode(provider.organize({
+      sourceText: '鸡蛋三个',
+      userId: 'family-hash',
+    }), 'AI_NOT_CONFIGURED');
+    assert.equal(calls, 0);
+  }
+});
+
 test('maps non-success and transport failures to the stable AI_HTTP_ERROR', async () => {
   const nonSuccess = queuedFetch([tokenHubResponse('', { ok: false, status: 429 })]);
   await rejectsWithCode(providerFor(nonSuccess.fetch.bind(nonSuccess)).organize({

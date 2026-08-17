@@ -8,6 +8,7 @@ const {
 
 const DEFAULT_BASE_URL = 'https://tokenhub.tencentmaas.com';
 const DEFAULT_MODEL = 'hy3';
+const ALLOWED_MODELS = Object.freeze([DEFAULT_MODEL, 'deepseek-v4-flash']);
 const DEFAULT_PROMPT_VERSION = 'v1';
 const REQUEST_TIMEOUT_MS = 55_000;
 const FORMAT_REPAIR_PROMPT = '只修复为符合 Schema 的 JSON。不要新增、删除或推测任何事实，只输出 JSON。';
@@ -27,7 +28,7 @@ function createTokenHubProvider(options = {}) {
 
   return {
     async organize({ sourceText, userId } = {}) {
-      if (!apiKey || typeof requestFetch !== 'function') {
+      if (!apiKey || typeof requestFetch !== 'function' || !ALLOWED_MODELS.includes(model)) {
         throw createProviderError('AI_NOT_CONFIGURED', 'TokenHub is not configured');
       }
 
@@ -203,6 +204,7 @@ function createProviderError(code, message) {
 }
 
 module.exports = {
+  ALLOWED_MODELS,
   DEFAULT_BASE_URL,
   DEFAULT_MODEL,
   DEFAULT_PROMPT_VERSION,

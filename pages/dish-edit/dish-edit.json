@@ -1,3 +1,6 @@
 {
-  "navigationBarTitleText": "记录菜品"
+  "navigationBarTitleText": "记录菜品",
+  "usingComponents": {
+    "recipe-recording-workspace": "/components/recipe-recording-workspace/recipe-recording-workspace"
+  }
 }

@@ -34,6 +34,11 @@ Page({
     editProfileVisible: false,
     recordFormVisible: false,
     recordIdDraft: '',
+    recordingFamilyKey: '',
+    recordWorkspaceHasContent: false,
+    recordWorkspaceReady: false,
+    recordWorkspacePendingCount: 0,
+    recordWorkspaceBusy: false,
     isArchived: false,
     canAddRecord: true,
     canEditProfile: false,
@@ -114,14 +119,15 @@ Page({
   onLoad(options = {}) {
     const store = this.getStore();
     if (!store) return;
+    const state = store.getState();
     const dish = options.dishId
-      ? store.getState().dishes.find((item) => item.id === options.dishId)
+      ? state.dishes.find((item) => item.id === options.dishId)
       : null;
     if (!dish) return;
 
     const isArchived = dish.status === 'deleted';
     const isEditingProfile = options.mode === 'edit' && !isArchived;
-    const detail = buildDishDetailViewModel(store.getState(), dish.id);
+    const detail = buildDishDetailViewModel(state, dish.id);
     const displayDetail = withHistoryDisplayImages(detail);
     const image = isEditingProfile ? dish.coverImage || '' : '';
     const visibleImage = isCloudFileId(image) ? '' : image;
@@ -131,6 +137,11 @@ Page({
       isEditingProfile,
       editProfileVisible: isEditingProfile,
       recordFormVisible: false,
+      recordingFamilyKey: String(state && state.family && state.family.id || ''),
+      recordWorkspaceHasContent: false,
+      recordWorkspaceReady: false,
+      recordWorkspacePendingCount: 0,
+      recordWorkspaceBusy: false,
       isArchived,
       canAddRecord: !isArchived,
       canEditProfile: !isArchived,
@@ -313,15 +324,49 @@ Page({
 
   startRecordEntry() {
     if (!this.data.isExisting || this.data.isArchived || this.data.editProfileVisible) return;
+    let recordId = String(this.data.recordIdDraft || '');
+    const familyId = this.currentFamilyId();
+    if (!recordId) {
+      const workspace = this.getRecordingWorkspace();
+      const recovered = workspace && typeof workspace.findWorkspace === 'function'
+        ? workspace.findWorkspace({ familyId, dishId: this.data.dishId })
+        : null;
+      recordId = String(recovered && recovered.recordId || '') || createCookingRecordId();
+    }
     this.setData({
       recordFormVisible: true,
-      recordIdDraft: this.data.recordIdDraft || createCookingRecordId(),
+      recordIdDraft: recordId,
       recordDate: todayString(),
     });
   },
 
-  cancelRecordEntry() {
-    if (!this.data.isExisting) return;
+  getRecordingWorkspace() {
+    if (typeof this.selectComponent !== 'function') return null;
+    return this.selectComponent('#recipeRecordingWorkspace');
+  },
+
+  currentFamilyId() {
+    if (this.data.recordingFamilyKey) return String(this.data.recordingFamilyKey);
+    const store = this.getStore();
+    const state = store && typeof store.getState === 'function' ? store.getState() : {};
+    return String(state && state.family && state.family.id || '');
+  },
+
+  confirmRecordCancellation() {
+    if (typeof wx === 'undefined' || typeof wx.showModal !== 'function') return Promise.resolve(false);
+    return new Promise((resolve) => {
+      wx.showModal({
+        title: '取消本次记录？',
+        content: '本次未保存的录音和文字会被删除',
+        confirmText: '确认删除',
+        confirmColor: '#b85c45',
+        success: (result) => resolve(Boolean(result && result.confirm)),
+        fail: () => resolve(false),
+      });
+    });
+  },
+
+  resetRecordEntry() {
     this.setData({
       recordFormVisible: false,
       recordIdDraft: '',
@@ -332,7 +377,59 @@ Page({
       mealTypeLabel: '未指定餐次',
       customMealType: '',
       customMealTypeDraft: '',
+      recordWorkspaceHasContent: false,
+      recordWorkspaceReady: false,
+      recordWorkspacePendingCount: 0,
+      recordWorkspaceBusy: false,
     });
+  },
+
+  async cancelRecordEntry() {
+    if (!this.data.isExisting || this.data.recordWorkspaceBusy) return;
+    const confirmed = await this.confirmRecordCancellation();
+    if (!confirmed) return;
+    const recordId = String(this.data.recordIdDraft || '');
+    const familyId = this.currentFamilyId();
+    const workspace = this.getRecordingWorkspace();
+    const { recipeAssistant } = this.getRecipeContext();
+    this.setData({ recordWorkspaceBusy: true });
+    try {
+      if (recordId && familyId && recipeAssistant
+        && typeof recipeAssistant.cancelRecordWorkspace === 'function') {
+        await recipeAssistant.cancelRecordWorkspace({
+          familyId,
+          dishId: this.data.dishId,
+          recordId,
+        });
+      }
+      if (workspace && typeof workspace.clearLocalClips === 'function') {
+        await workspace.clearLocalClips();
+      }
+      this.resetRecordEntry();
+    } catch (error) {
+      this.setData({ recordWorkspaceBusy: false });
+      showToast('制作过程暂时无法取消，请稍后重试');
+    }
+  },
+
+  onRecordingWorkspaceChange(event) {
+    const detail = event && event.detail ? event.detail : {};
+    this.setData({
+      recordWorkspaceHasContent: Boolean(detail.hasContent),
+      recordWorkspaceReady: Boolean(detail.readyToOrganize),
+      recordWorkspacePendingCount: Number(detail.pendingCount) || 0,
+    });
+  },
+
+  onOpenRecordingDraft(event) {
+    const draftId = String(event && event.detail && event.detail.draftId || '');
+    const familyId = this.currentFamilyId();
+    if (!draftId || !familyId || !this.data.dishId) return;
+    if (typeof wx !== 'undefined' && typeof wx.navigateTo === 'function') {
+      wx.navigateTo({
+        url: `/pages/recipe-draft/recipe-draft?familyId=${encodeURIComponent(familyId)}&dishId=${encodeURIComponent(this.data.dishId)}&draftId=${encodeURIComponent(draftId)}`,
+      });
+    }
   },
 
   chooseImage() {
@@ -606,10 +703,16 @@ Page({
       showToast('应用还没有完成初始化');
       return;
     }
+    const savingRecord = this.data.isExisting && !this.data.editProfileVisible;
+    if (savingRecord) {
+      if (this.data.recordWorkspaceBusy) return;
+      this.setData({ recordWorkspaceBusy: true });
+    }
     let image = '';
     try {
       image = await this.uploadCurrentImage();
     } catch (error) {
+      if (savingRecord) this.setData({ recordWorkspaceBusy: false });
       showToast('照片上传失败，请重试');
       return;
     }
@@ -665,7 +768,20 @@ Page({
       };
       if (this.data.isExisting) {
         store.addCookingRecord({ ...payload, id: this.data.recordIdDraft, dishId: this.data.dishId });
-        this.setData({ image: '', displayImage: '', recordFormVisible: false, recordIdDraft: '' });
+        const familyId = this.currentFamilyId();
+        const { recipeAssistant } = this.getRecipeContext();
+        if (familyId && recipeAssistant && typeof recipeAssistant.attachRecordWorkspace === 'function') {
+          await recipeAssistant.attachRecordWorkspace({
+            familyId,
+            dishId: this.data.dishId,
+            recordId: this.data.recordIdDraft,
+          });
+        }
+        const workspace = this.getRecordingWorkspace();
+        if (workspace && typeof workspace.clearLocalClips === 'function') {
+          await workspace.clearLocalClips();
+        }
+        this.resetRecordEntry();
         this.finishAndGoBack('这次记录已追加');
         return;
       }
@@ -681,6 +797,7 @@ Page({
       this.setData({ image: '', displayImage: '' });
       this.guideAfterFirstDish();
     } catch (error) {
+      if (savingRecord) this.setData({ recordWorkspaceBusy: false });
       showToast(error.message || '菜品暂时无法保存');
     }
   },

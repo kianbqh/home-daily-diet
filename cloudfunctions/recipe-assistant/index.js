@@ -127,8 +127,16 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
     if (!openid) throw createRecipeError('AUTH_REQUIRED', '无法确认登录身份', 'authorize');
     const member = await guards.requireMember(familyId, openid);
     const allowArchived = ['getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace'].includes(requiredAction);
-    await guards.requireActiveDish(familyId, dishId, { allowArchived });
-    await authorizeRecordScope(requiredAction, event, familyId, dishId, repository, guards);
+    const dish = await guards.requireActiveDish(familyId, dishId, { allowArchived });
+    const recordAuthorization = await authorizeRecordScope(
+      requiredAction, event, member, dish, familyId, dishId, repository, guards, db, config
+    );
+    if (recordAuthorization && recordAuthorization.kind === 'provisional'
+      && recordAuthorization.hasWorkspace && requiredAction !== 'cancelRecordWorkspace') {
+      await claimProvisionalWorkspace(
+        db, config, familyId, dishId, recordAuthorization.recordId, member.memberId, nowMs(dependencies)
+      );
+    }
 
     stage = 'action';
     let data;
@@ -146,16 +154,22 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         data = await getRecordWorkspace(repository, familyId, dishId, event.recordId, dependencies.fileApi);
         break;
       case 'reserveRecording':
-        data = await reserveRecording(repository, member, familyId, dishId, event, dependencies, nowMs(dependencies));
+        data = await reserveRecording(
+          repository, member, familyId, dishId, event, dependencies, nowMs(dependencies), recordAuthorization
+        );
         break;
       case 'submitRecording':
-        data = await submitRecording(repository, member, familyId, dishId, event, dependencies, nowMs(dependencies));
+        data = await submitRecording(
+          repository, member, familyId, dishId, event, dependencies, nowMs(dependencies), recordAuthorization
+        );
         break;
       case 'refreshWorkspace':
         data = await refreshWorkspace(repository, member, familyId, dishId, event.recordId, dependencies, nowMs(dependencies));
         break;
       case 'addManualText':
-        data = await addManualText(repository, member, familyId, dishId, event, dependencies, nowMs(dependencies));
+        data = await addManualText(
+          repository, member, familyId, dishId, event, dependencies, nowMs(dependencies), recordAuthorization
+        );
         break;
       case 'updateTranscript':
         data = await updateTranscript(repository, member, familyId, dishId, event, nowMs(dependencies));
@@ -167,10 +181,14 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         data = await deleteRecording(repository, member, familyId, dishId, event, dependencies.fileApi, nowMs(dependencies));
         break;
       case 'attachRecordWorkspace':
-        data = await attachRecordWorkspace(repository, member, familyId, dishId, event.recordId, nowMs(dependencies));
+        data = await attachRecordWorkspace(
+          repository, member, familyId, dishId, event.recordId, dependencies, nowMs(dependencies)
+        );
         break;
       case 'cancelRecordWorkspace':
-        data = await cancelRecordWorkspace(repository, member, familyId, dishId, event.recordId, dependencies.fileApi, nowMs(dependencies));
+        data = await cancelRecordWorkspace(
+          repository, member, familyId, dishId, event.recordId, dependencies, nowMs(dependencies), recordAuthorization
+        );
         break;
       case 'createManualDraft':
         data = await createManualDraft(repository, guards, member, familyId, dishId, event, nowMs(dependencies));
@@ -240,7 +258,7 @@ async function getRecordWorkspace(repository, familyId, dishId, rawRecordId, fil
   return { recordings: recordings.filter((item) => item.status !== 'deleted'), draft, audioUrls };
 }
 
-async function reserveRecording(repository, member, familyId, dishId, event, dependencies, now) {
+async function reserveRecording(repository, member, familyId, dishId, event, dependencies, now, authorization) {
   const recordId = requireValue(event.recordId, 'RECORD_REQUIRED', '缺少制作记录');
   if (String(event.format || '').trim().toLowerCase() !== 'mp3') {
     throw createRecipeError('RECORDING_FORMAT_INVALID', '录音格式必须为 MP3', 'validate');
@@ -254,37 +272,48 @@ async function reserveRecording(repository, member, familyId, dishId, event, dep
   if (!/^recording-[A-Za-z0-9_-]+$/.test(recordingId)) {
     throw createRecipeError('RECORDING_ID_INVALID', '无法创建录音片段');
   }
+  if (authorization && authorization.kind === 'provisional') {
+    await claimProvisionalWorkspace(
+      dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, now
+    );
+  }
   const cloudPath = `families/${familyId}/recipe-audio/${recordingId}.mp3`;
   const expiresAt = now + RECORDING_TTL_MS;
-  const recording = await repository.runTransaction(async (transaction) => {
-    if (await transaction.getRecording(familyId, dishId, recordingId)) {
-      throw createRecipeError('RECORDING_CONFLICT', '录音片段已存在，请重试');
-    }
-    const existingState = await transaction.getWorkspaceState(familyId, dishId, recordId);
-    const activeCount = existingState ? Number(existingState.activeCount) || 0 : recordings.length;
-    if (activeCount >= MAX_RECORDINGS) {
-      throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '每次制作最多保留 10 段录音');
-    }
-    const sequence = existingState ? (Number(existingState.nextSequence) || nextSequence(recordings)) : nextSequence(recordings);
-    await transaction.setWorkspaceState(familyId, dishId, recordId, {
-      familyId, dishId, recordId, sourceType: 'workspace_state', status: 'active',
-      activeCount: activeCount + 1, totalDurationMs: existingState
-        ? Number(existingState.totalDurationMs) || 0
-        : recordings.reduce((sum, item) => sum + validDuration(item.durationMs), 0),
-      nextSequence: sequence + 1, updatedAt: now,
-    });
-    return transaction.setRecording(recordingId, {
-      familyId, dishId, recordId, sequence, sourceType: 'audio',
-      reservedCloudPath: cloudPath, fileId: '', durationMs: 0, durationCommitted: false,
-      format: 'mp3', byteLength: 0, status: 'reserved', rawTranscript: '', editedTranscript: '', transcriptRevision: 0,
-      errorCode: '', createdBy: member.memberId, createdAt: now, updatedBy: member.memberId,
-      updatedAt: now, audioDeletedAt: null, audioDeletePending: false, draftExpiresAt: expiresAt,
-    });
-  });
+  const recording = await runSegmentCreationTransaction(
+    repository, dependencies, authorization, familyId, dishId, recordId, member.memberId,
+    async (transaction) => {
+      if (await transaction.getRecording(familyId, dishId, recordingId)) {
+        throw createRecipeError('RECORDING_CONFLICT', '录音片段已存在，请重试');
+      }
+      const existingState = await transaction.getWorkspaceState(familyId, dishId, recordId);
+      requireProvisionalStateOwner(existingState, member.memberId, authorization);
+      const activeCount = existingState ? Number(existingState.activeCount) || 0 : recordings.length;
+      if (activeCount >= MAX_RECORDINGS) {
+        throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '每次制作最多保留 10 段录音');
+      }
+      const sequence = existingState ? (Number(existingState.nextSequence) || nextSequence(recordings)) : nextSequence(recordings);
+      await transaction.setWorkspaceState(familyId, dishId, recordId, {
+        familyId, dishId, recordId, sourceType: 'workspace_state', status: 'active',
+        createdBy: existingState && existingState.createdBy || member.memberId,
+        createdAt: existingState && existingState.createdAt != null ? existingState.createdAt : now,
+        activeCount: activeCount + 1, totalDurationMs: existingState
+          ? Number(existingState.totalDurationMs) || 0
+          : recordings.reduce((sum, item) => sum + validDuration(item.durationMs), 0),
+        nextSequence: sequence + 1, updatedAt: now,
+      });
+      return transaction.setRecording(recordingId, {
+        familyId, dishId, recordId, sequence, sourceType: 'audio',
+        reservedCloudPath: cloudPath, fileId: '', durationMs: 0, durationCommitted: false,
+        format: 'mp3', byteLength: 0, status: 'reserved', rawTranscript: '', editedTranscript: '', transcriptRevision: 0,
+        errorCode: '', createdBy: member.memberId, createdAt: now, updatedBy: member.memberId,
+        updatedAt: now, audioDeletedAt: null, audioDeletePending: false, draftExpiresAt: expiresAt,
+      });
+    },
+  );
   return { recordingId: recording._id, cloudPath, expiresAt };
 }
 
-async function submitRecording(repository, member, familyId, dishId, event, dependencies, now) {
+async function submitRecording(repository, member, familyId, dishId, event, dependencies, now, authorization) {
   const recordingId = requireValue(event.recordingId, 'RECORDING_REQUIRED', '缺少录音片段');
   const fileId = requireValue(event.fileId, 'FILE_REQUIRED', '缺少录音文件');
   const fileApi = dependencies.fileApi;
@@ -311,6 +340,7 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   const accepted = await repository.runTransaction(async (transaction) => {
     const current = await transaction.getRecording(familyId, dishId, recordingId);
     if (!current || current.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
+    requireProvisionalArtifactOwner(current, member.memberId, authorization);
     if (hasUnexpiredAsrTask(current, now) || hasActiveSubmitLease(current, now)) {
       throw createRecipeError('ASR_TASK_IN_PROGRESS', '这段录音正在识别，请稍后刷新');
     }
@@ -318,6 +348,7 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
       throw createRecipeError('RECORDING_STATE_INVALID', '录音片段当前不能提交');
     }
     const state = await transaction.getWorkspaceState(familyId, dishId, current.recordId);
+    requireProvisionalStateOwner(state, member.memberId, authorization);
     const recordings = await repository.listRecordings(familyId, dishId, current.recordId);
     const existingTotal = state
       ? Number(state.totalDurationMs) || 0
@@ -329,6 +360,8 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     }
     await transaction.setWorkspaceState(familyId, dishId, current.recordId, {
       ...(state || {}), familyId, dishId, recordId: current.recordId, sourceType: 'workspace_state',
+      createdBy: state && state.createdBy || member.memberId,
+      createdAt: state && state.createdAt != null ? state.createdAt : now,
       status: 'active', activeCount: state ? Number(state.activeCount) || 0 : recordings.filter((item) => item.status !== 'deleted').length,
       totalDurationMs: totalDuration, nextSequence: state ? Number(state.nextSequence) || nextSequence(recordings) : nextSequence(recordings),
       updatedAt: now,
@@ -502,7 +535,7 @@ function normalizeSafeInteger(value, minimum) {
   return Number.isSafeInteger(normalized) && normalized >= minimum ? normalized : null;
 }
 
-async function addManualText(repository, member, familyId, dishId, event, dependencies, now) {
+async function addManualText(repository, member, familyId, dishId, event, dependencies, now, authorization) {
   const recordId = requireValue(event.recordId, 'RECORD_REQUIRED', '缺少制作记录');
   const text = requireValue(event.text, 'TEXT_REQUIRED', '请输入文字说明');
   const recordings = (await repository.listRecordings(familyId, dishId, recordId))
@@ -512,28 +545,39 @@ async function addManualText(repository, member, familyId, dishId, event, depend
     : `${now}-${Math.random().toString(36).slice(2, 10)}`;
   const recordingId = String(generated).startsWith('recording-') || String(generated).startsWith('manual-')
     ? String(generated) : `recording-${generated}`;
-  const recording = await repository.runTransaction(async (transaction) => {
-    if (await transaction.getRecording(familyId, dishId, recordingId)) {
-      throw createRecipeError('RECORDING_CONFLICT', '内容片段已存在，请重试');
-    }
-    const state = await transaction.getWorkspaceState(familyId, dishId, recordId);
-    const activeCount = state ? Number(state.activeCount) || 0 : recordings.length;
-    if (activeCount >= MAX_RECORDINGS) throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '每次制作最多保留 10 段内容');
-    const sequence = state ? Number(state.nextSequence) || nextSequence(recordings) : nextSequence(recordings);
-    await transaction.setWorkspaceState(familyId, dishId, recordId, {
-      ...(state || {}), familyId, dishId, recordId, sourceType: 'workspace_state', status: 'active',
-      activeCount: activeCount + 1,
-      totalDurationMs: state ? Number(state.totalDurationMs) || 0 : recordings.reduce((sum, item) => sum + validDuration(item.durationMs), 0),
-      nextSequence: sequence + 1, updatedAt: now,
-    });
-    return transaction.setRecording(recordingId, {
-      familyId, dishId, recordId, sequence, sourceType: 'manual_text',
-      fileId: '', durationMs: 0, durationCommitted: false, format: '', byteLength: 0, status: 'ready',
-      rawTranscript: '', editedTranscript: text, transcriptRevision: 0, errorCode: '',
-      createdBy: member.memberId, createdAt: now, updatedBy: member.memberId, updatedAt: now,
-      audioDeletedAt: null, audioDeletePending: false, draftExpiresAt: now + RECORDING_TTL_MS,
-    });
-  });
+  if (authorization && authorization.kind === 'provisional') {
+    await claimProvisionalWorkspace(
+      dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, now
+    );
+  }
+  const recording = await runSegmentCreationTransaction(
+    repository, dependencies, authorization, familyId, dishId, recordId, member.memberId,
+    async (transaction) => {
+      if (await transaction.getRecording(familyId, dishId, recordingId)) {
+        throw createRecipeError('RECORDING_CONFLICT', '内容片段已存在，请重试');
+      }
+      const state = await transaction.getWorkspaceState(familyId, dishId, recordId);
+      requireProvisionalStateOwner(state, member.memberId, authorization);
+      const activeCount = state ? Number(state.activeCount) || 0 : recordings.length;
+      if (activeCount >= MAX_RECORDINGS) throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '每次制作最多保留 10 段内容');
+      const sequence = state ? Number(state.nextSequence) || nextSequence(recordings) : nextSequence(recordings);
+      await transaction.setWorkspaceState(familyId, dishId, recordId, {
+        ...(state || {}), familyId, dishId, recordId, sourceType: 'workspace_state', status: 'active',
+        createdBy: state && state.createdBy || member.memberId,
+        createdAt: state && state.createdAt != null ? state.createdAt : now,
+        activeCount: activeCount + 1,
+        totalDurationMs: state ? Number(state.totalDurationMs) || 0 : recordings.reduce((sum, item) => sum + validDuration(item.durationMs), 0),
+        nextSequence: sequence + 1, updatedAt: now,
+      });
+      return transaction.setRecording(recordingId, {
+        familyId, dishId, recordId, sequence, sourceType: 'manual_text',
+        fileId: '', durationMs: 0, durationCommitted: false, format: '', byteLength: 0, status: 'ready',
+        rawTranscript: '', editedTranscript: text, transcriptRevision: 0, errorCode: '',
+        createdBy: member.memberId, createdAt: now, updatedBy: member.memberId, updatedAt: now,
+        audioDeletedAt: null, audioDeletePending: false, draftExpiresAt: now + RECORDING_TTL_MS,
+      });
+    },
+  );
   return { recording };
 }
 
@@ -554,7 +598,7 @@ async function updateTranscript(repository, member, familyId, dishId, event, now
   });
 }
 
-async function attachRecordWorkspace(repository, member, familyId, dishId, rawRecordId, now) {
+async function attachRecordWorkspace(repository, member, familyId, dishId, rawRecordId, dependencies, now) {
   const recordId = requireValue(rawRecordId, 'RECORD_REQUIRED', '缺少制作记录');
   const recordings = await repository.listRecordings(familyId, dishId, recordId);
   for (const recording of recordings) {
@@ -574,11 +618,19 @@ async function attachRecordWorkspace(repository, member, familyId, dishId, rawRe
       return transaction.setDraft(current._id, { ...current, draftExpiresAt: null, updatedAt: now });
     });
   }
+  await finishWorkspaceClaim(
+    dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, 'attached', now
+  );
   return { attached: true };
 }
 
-async function cancelRecordWorkspace(repository, member, familyId, dishId, rawRecordId, fileApi, now) {
+async function cancelRecordWorkspace(repository, member, familyId, dishId, rawRecordId, dependencies, now, authorization) {
   const recordId = requireValue(rawRecordId, 'RECORD_REQUIRED', '缺少制作记录');
+  const fileApi = dependencies.fileApi;
+  await finishWorkspaceClaim(
+    dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, 'cancelled', now,
+    { createIfMissing: Boolean(authorization && authorization.kind === 'provisional') }
+  );
   const recordings = await repository.listRecordings(familyId, dishId, recordId);
   for (const recording of recordings.filter((item) => item.status !== 'deleted' && item.draftExpiresAt != null)) {
     await tombstoneRecording(repository, member, recording, fileApi, now);
@@ -889,25 +941,240 @@ function normalizeAndValidateRecipe(value) {
   return normalizeRecipe(value);
 }
 
-async function authorizeRecordScope(action, event, familyId, dishId, repository, guards) {
-  if (!RECORD_SCOPED_ACTIONS.includes(action)) return;
+async function authorizeRecordScope(action, event, member, dish, familyId, dishId, repository, guards, db, config) {
+  if (!RECORD_SCOPED_ACTIONS.includes(action)) return null;
   if (RECORD_ID_ACTIONS.includes(action)) {
     const recordId = requireValue(event.recordId, 'RECORD_REQUIRED', '缺少制作记录');
-    await guards.requireCookingRecord(familyId, dishId, recordId);
-    return;
+    if (action === 'attachRecordWorkspace') {
+      await guards.requireCookingRecord(familyId, dishId, recordId);
+      const workspace = await inspectWorkspace(repository, db, config, familyId, dishId, recordId);
+      requireWorkspaceOwner(workspace, member.memberId, { provisional: false });
+      return { kind: 'saved', recordId, hasWorkspace: workspace.hasWorkspace };
+    }
+
+    const cookingRecord = await findCookingRecord(guards, familyId, dishId, recordId);
+    if (cookingRecord) {
+      const workspace = await inspectWorkspace(repository, db, config, familyId, dishId, recordId);
+      requireWorkspaceOwner(workspace, member.memberId, { provisional: false });
+      return { kind: 'saved', recordId, hasWorkspace: workspace.hasWorkspace };
+    }
+
+    requireProvisionalRecordId(recordId);
+    requireActiveProvisionalDish(dish);
+    const workspace = await inspectWorkspace(repository, db, config, familyId, dishId, recordId);
+    requireWorkspaceOwner(workspace, member.memberId, {
+      provisional: true,
+      allowCancelled: action === 'cancelRecordWorkspace',
+    });
+    return { kind: 'provisional', recordId, hasWorkspace: workspace.hasWorkspace };
   }
   if (RECORD_ACTION_CONTRACTS.recordingId.includes(action)) {
     const recordingId = requireValue(event.recordingId, 'RECORDING_REQUIRED', '缺少录音片段');
     const recording = await repository.getRecording(familyId, dishId, recordingId);
     if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
-    await guards.requireCookingRecord(familyId, dishId, recording.recordId);
-    return;
+    const recordId = String(recording.recordId || '').trim();
+    const cookingRecord = await findCookingRecord(guards, familyId, dishId, recordId);
+    const workspace = await inspectWorkspace(repository, db, config, familyId, dishId, recordId);
+    if (cookingRecord) {
+      requireWorkspaceOwner(workspace, member.memberId, { provisional: false });
+      return { kind: 'saved', recordId, recordingId, hasWorkspace: true };
+    }
+
+    requireProvisionalRecordId(recordId);
+    requireActiveProvisionalDish(dish);
+    requireProvisionalArtifactOwner(recording, member.memberId, { kind: 'provisional' });
+    requireWorkspaceOwner(workspace, member.memberId, { provisional: true });
+    return { kind: 'provisional', recordId, recordingId, hasWorkspace: true };
   }
   const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
   const draft = await repository.getDraft(familyId, dishId, draftId);
   if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
   const recordId = String(draft.recordId || '').trim();
   if (recordId) await guards.requireCookingRecord(familyId, dishId, recordId);
+  return { kind: recordId ? 'saved' : 'manual', recordId, draftId, hasWorkspace: true };
+}
+
+async function findCookingRecord(guards, familyId, dishId, recordId) {
+  try {
+    return await guards.requireCookingRecord(familyId, dishId, recordId);
+  } catch (error) {
+    if (runtimeErrorCode(error) === 'RECORD_NOT_FOUND') return null;
+    throw error;
+  }
+}
+
+function requireProvisionalRecordId(recordId) {
+  if (/^record-\d{10,16}-\d{1,9}$/.test(String(recordId || ''))) return recordId;
+  if (String(recordId || '').startsWith('record-')) throw workspaceNotFound();
+  throw createRecipeError('RECORD_ID_INVALID', '制作记录编号无效', 'authorize');
+}
+
+function requireActiveProvisionalDish(dish) {
+  if (dish && dish.status === 'active') return;
+  throw createRecipeError('DISH_DELETED', '这道菜已进入回收站', 'authorize');
+}
+
+async function inspectWorkspace(repository, db, config, familyId, dishId, recordId) {
+  const [claim, recordings, draft] = await Promise.all([
+    getWorkspaceClaim(db, config, recordId),
+    repository.listRecordings(familyId, dishId, recordId),
+    repository.getDraft({ familyId, dishId, recordId }),
+  ]);
+  return {
+    claim,
+    recordings,
+    draft,
+    familyId,
+    dishId,
+    recordId,
+    hasWorkspace: Boolean(claim || recordings.length || draft),
+  };
+}
+
+function requireWorkspaceOwner(workspace, memberId, options) {
+  const { claim, recordings, draft, familyId, dishId, recordId } = workspace;
+  if (claim) {
+    if (claim.workspaceFamilyId !== familyId
+      || claim.workspaceDishId !== dishId
+      || claim.workspaceRecordId !== recordId) throw workspaceNotFound();
+    const validProvisionalStatus = claim.status === 'temporary'
+      || (options.allowCancelled && claim.status === 'cancelled');
+    if (options.provisional && !validProvisionalStatus) throw workspaceNotFound();
+    if ((options.provisional || claim.status === 'temporary') && claim.createdBy !== memberId) {
+      throw workspaceNotFound();
+    }
+  }
+  for (const recording of recordings) {
+    if (options.provisional && recording.draftExpiresAt == null) throw workspaceNotFound();
+    if (recording.draftExpiresAt != null && recording.createdBy !== memberId) throw workspaceNotFound();
+  }
+  if (draft) {
+    if (options.provisional && draft.draftExpiresAt == null) throw workspaceNotFound();
+    if (draft.draftExpiresAt != null && draft.createdBy !== memberId) throw workspaceNotFound();
+  }
+}
+
+function requireProvisionalArtifactOwner(artifact, memberId, authorization) {
+  if (!authorization || authorization.kind !== 'provisional') return;
+  if (!artifact || artifact.draftExpiresAt == null || artifact.createdBy !== memberId) throw workspaceNotFound();
+}
+
+function requireProvisionalStateOwner(state, memberId, authorization) {
+  if (!authorization || authorization.kind !== 'provisional' || !state) return;
+  if (state.createdBy !== memberId) throw workspaceNotFound();
+}
+
+function workspaceNotFound() {
+  return createRecipeError('RECORD_NOT_FOUND', '找不到这次制作记录', 'authorize');
+}
+
+function workspaceClaimDocumentId(recordId) {
+  return `workspace-claim-${recordId}`;
+}
+
+async function getWorkspaceClaim(db, config, recordId) {
+  const claim = await getDocument(db, config.recordingCollection, workspaceClaimDocumentId(recordId));
+  return claim && claim.sourceType === 'workspace_state' && claim.workspaceClaim === true
+    && claim.workspaceRecordId === recordId ? claim : null;
+}
+
+async function claimProvisionalWorkspace(db, config, familyId, dishId, recordId, memberId, now) {
+  requireProvisionalRecordId(recordId);
+  if (!db || typeof db.runTransaction !== 'function') {
+    throw createRecipeError('DATABASE_UNAVAILABLE', '菜谱服务暂时不可用', 'authorize');
+  }
+  const claimId = workspaceClaimDocumentId(recordId);
+  return db.runTransaction(async (transaction) => {
+    const current = await getDocument(transaction, config.recordingCollection, claimId);
+    if (current) {
+      if (current.sourceType !== 'workspace_state'
+        || current.workspaceClaim !== true
+        || current.workspaceFamilyId !== familyId
+        || current.workspaceDishId !== dishId
+        || current.workspaceRecordId !== recordId
+        || current.status !== 'temporary'
+        || current.createdBy !== memberId) throw workspaceNotFound();
+      return current;
+    }
+    const claim = {
+      familyId, dishId, recordId, sourceType: 'workspace_state', workspaceClaim: true,
+      workspaceFamilyId: familyId, workspaceDishId: dishId,
+      workspaceRecordId: recordId, status: 'temporary', createdBy: memberId,
+      createdAt: now, updatedBy: memberId, updatedAt: now, draftExpiresAt: now + RECORDING_TTL_MS,
+    };
+    await transaction.collection(config.recordingCollection).doc(claimId).set({ data: claim });
+    return { ...claim, _id: claimId };
+  });
+}
+
+async function runSegmentCreationTransaction(
+  repository, dependencies, authorization, familyId, dishId, recordId, memberId, callback
+) {
+  if (!authorization || authorization.kind !== 'provisional') {
+    return repository.runTransaction(callback);
+  }
+  const db = dependencies.db;
+  const config = configFor(dependencies);
+  if (!db || typeof db.runTransaction !== 'function') {
+    throw createRecipeError('DATABASE_UNAVAILABLE', '菜谱服务暂时不可用', 'authorize');
+  }
+  const claimId = workspaceClaimDocumentId(recordId);
+  return db.runTransaction(async (transaction) => {
+    const claim = await getDocument(transaction, config.recordingCollection, claimId);
+    if (!claim
+      || claim.sourceType !== 'workspace_state'
+      || claim.workspaceClaim !== true
+      || claim.familyId !== familyId
+      || claim.dishId !== dishId
+      || claim.recordId !== recordId
+      || claim.workspaceFamilyId !== familyId
+      || claim.workspaceDishId !== dishId
+      || claim.workspaceRecordId !== recordId
+      || claim.status !== 'temporary'
+      || claim.createdBy !== memberId) throw workspaceNotFound();
+    return callback(createRecipeRepository(transaction, config));
+  });
+}
+
+async function finishWorkspaceClaim(
+  db, config, familyId, dishId, recordId, memberId, status, now, options = {}
+) {
+  if (!db || typeof db.runTransaction !== 'function') return;
+  const claimId = workspaceClaimDocumentId(recordId);
+  await db.runTransaction(async (transaction) => {
+    const current = await getDocument(transaction, config.recordingCollection, claimId);
+    if (!current) {
+      if (!options.createIfMissing) return null;
+      const claim = {
+        familyId, dishId, recordId, sourceType: 'workspace_state', workspaceClaim: true,
+        workspaceFamilyId: familyId, workspaceDishId: dishId,
+        workspaceRecordId: recordId, status, createdBy: memberId,
+        createdAt: now, updatedBy: memberId, updatedAt: now, draftExpiresAt: now + RECORDING_TTL_MS,
+      };
+      await transaction.collection(config.recordingCollection).doc(claimId).set({ data: claim });
+      return { ...claim, _id: claimId };
+    }
+    if (current.sourceType !== 'workspace_state'
+      || current.workspaceClaim !== true
+      || current.workspaceFamilyId !== familyId
+      || current.workspaceDishId !== dishId
+      || current.workspaceRecordId !== recordId) throw workspaceNotFound();
+    if (current.status === 'temporary' || current.status === 'cancelled') {
+      if (current.createdBy !== memberId) throw workspaceNotFound();
+    }
+    if (current.status !== 'temporary') return current;
+    const updated = {
+      ...current, status, updatedBy: memberId, updatedAt: now,
+      draftExpiresAt: status === 'attached' ? null : current.draftExpiresAt,
+    };
+    await transaction.collection(config.recordingCollection).doc(claimId).set({ data: sanitizeSystemId(updated) });
+    return updated;
+  });
+}
+
+function sanitizeSystemId(document) {
+  const { _id, ...data } = document || {};
+  return data;
 }
 
 function nowMs(dependencies) {

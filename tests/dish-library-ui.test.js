@@ -152,7 +152,7 @@ test('existing dish details gate the append-record form behind one button', () =
   assert.match(template, /wx:if="\{\{isExisting && !isArchived && !editProfileVisible && !recordFormVisible\}\}" class="card-surface record-entry-card"/);
   assert.match(template, /class="primary-button" bindtap="startRecordEntry">追加新记录<\/button>/);
   assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible && \(!isExisting \|\| recordFormVisible\)\}\}" class="card-surface record-fields-card"/);
-  assert.match(template, /wx:if="\{\{isExisting && recordFormVisible\}\}" class="secondary-button" bindtap="cancelRecordEntry">取消<\/button>/);
+  assert.match(template, /wx:if="\{\{isExisting && recordFormVisible\}\}" class="secondary-button" disabled="\{\{recordWorkspaceBusy\}\}" bindtap="cancelRecordEntry">取消<\/button>/);
   assert.match(template, /\{\{isExisting \? '保存这次记录' : '保存这道菜'\}\}/);
 });
 

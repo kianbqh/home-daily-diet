@@ -666,6 +666,18 @@
   gap: 16rpx;
 }
 
+.record-section-heading {
+  margin-bottom: 8rpx;
+}
+
+.recording-workspace-card {
+  padding: 28rpx;
+}
+
+.record-form-actions button[disabled] {
+  opacity: 0.5;
+}
+
 .record-form-actions button {
   display: flex;
   flex: 1;

@@ -175,6 +175,9 @@
   </view>
 
   <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible)}}" class="card-surface record-fields-card">
+    <view class="section-heading compact-heading record-section-heading">
+      <view class="section-title">本次记录</view>
+    </view>
     <view class="record-field">
       <text class="form-label">菜名 <text class="required">*</text></text>
       <input class="visible-native-input {{isExisting && !isEditingProfile ? 'readonly' : ''}}" value="{{nameDraft}}" disabled="{{isExisting && !isEditingProfile}}" placeholder="例如：番茄炒蛋" bindinput="onNameInput" />
@@ -220,10 +223,22 @@
     </view>
   </view>
 
+  <view wx:if="{{isExisting && !isArchived}}" hidden="{{!recordFormVisible || editProfileVisible}}" class="card-surface recording-workspace-card">
+    <recipe-recording-workspace
+      id="recipeRecordingWorkspace"
+      family-id="{{recordingFamilyKey}}"
+      dish-id="{{dishId}}"
+      record-id="{{recordIdDraft}}"
+      disabled="{{recordWorkspaceBusy}}"
+      bindworkspacechange="onRecordingWorkspaceChange"
+      bindopendraft="onOpenRecordingDraft"
+    />
+  </view>
+
   <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible)}}" class="card-surface dish-actions-card sticky-action">
     <view class="record-form-actions">
-      <button wx:if="{{isExisting && recordFormVisible}}" class="secondary-button" bindtap="cancelRecordEntry">取消</button>
-      <button class="primary-button" bindtap="save">{{isExisting ? '保存这次记录' : '保存这道菜'}}</button>
+      <button wx:if="{{isExisting && recordFormVisible}}" class="secondary-button" disabled="{{recordWorkspaceBusy}}" bindtap="cancelRecordEntry">取消</button>
+      <button class="primary-button" disabled="{{recordWorkspaceBusy}}" bindtap="save">{{isExisting ? '保存这次记录' : '保存这道菜'}}</button>
     </view>
   </view>
 </view>

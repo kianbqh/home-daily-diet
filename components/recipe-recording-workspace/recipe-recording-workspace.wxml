@@ -1,0 +1,54 @@
+<view class="recording-workspace">
+  <view class="workspace-heading">
+    <view>
+      <text class="workspace-title">制作过程</text>
+      <text class="workspace-copy">可以分段录音，上一段转写时仍可继续录下一段。</text>
+    </view>
+    <text wx:if="{{clips.length}}" class="workspace-count">{{clips.length}} / 10 段</text>
+  </view>
+
+  <view class="recording-panel {{recording ? 'active' : ''}}">
+    <view class="recording-time">
+      <text class="elapsed-time">{{elapsedLabel}}</text>
+      <text class="remaining-time">倒计时 {{remainingLabel}}</text>
+    </view>
+    <button wx:if="{{!recording}}" class="record-button" disabled="{{disabled}}" bindtap="startRecording">开始录音</button>
+    <button wx:else class="record-button stop" disabled="{{disabled}}" bindtap="stopRecording">结束录音</button>
+  </view>
+
+  <text wx:if="{{workspaceError}}" class="workspace-message">{{workspaceError}}</text>
+
+  <view wx:if="{{clips.length}}" class="clip-list">
+    <view wx:for="{{clips}}" wx:key="key" class="clip-card">
+      <view class="clip-head">
+        <view>
+          <text class="clip-title">{{item.sourceType === 'manual_text' ? '文字说明' : '录音片段'}} {{item.sequence || index + 1}}</text>
+          <text wx:if="{{item.durationMs}}" class="clip-duration">{{item.durationLabel}}</text>
+        </view>
+        <text class="status-pill status-{{item.displayStatus}}">{{item.statusLabel}}</text>
+      </view>
+
+      <view class="clip-actions top-actions">
+        <button class="mini-button" disabled="{{disabled || !item.canPlay}}" data-key="{{item.key}}" bindtap="playClip">{{playingClipKey === item.key ? '播放中' : '播放'}}</button>
+        <button wx:if="{{item.uploadFailed}}" class="mini-button accent" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="retryClip">重新上传</button>
+        <button wx:elif="{{item.canRetryTranscript}}" class="mini-button accent" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="retryClip">重新转写</button>
+        <button class="mini-button danger" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="deleteClip">删除</button>
+      </view>
+
+      <view wx:if="{{item.canEditTranscript}}" class="transcript-editor">
+        <textarea class="visible-native-textarea" disabled="{{disabled}}" value="{{item.editedTranscript}}" data-key="{{item.key}}" maxlength="30000" placeholder="校对或补充这段文字" bindinput="onTranscriptInput" />
+        <button class="save-transcript" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="saveTranscript">保存修改</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="manual-text-panel">
+    <text class="manual-title">添加文字说明</text>
+    <text class="manual-copy">不录音也可以记录火候、用量和家里的经验。</text>
+    <textarea class="visible-native-textarea" disabled="{{disabled}}" value="{{manualTextDraft}}" maxlength="30000" placeholder="例如：最后放一点糖，鸡蛋刚凝固就盛出" bindinput="onManualTextInput" />
+    <button class="secondary-action" disabled="{{disabled || !manualTextDraft}}" bindtap="addManualText">保存文字说明</button>
+  </view>
+
+  <view wx:if="{{pendingCount}}" class="pending-summary">还有 {{pendingCount}} 段尚未就绪，可先保存本次记录后再回来。</view>
+  <button wx:if="{{draftId}}" class="secondary-action draft-action" disabled="{{disabled}}" bindtap="openDraft">打开菜谱草稿</button>
+</view>

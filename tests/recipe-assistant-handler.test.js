@@ -100,7 +100,11 @@ function createMemoryDatabase(seed = {}, options = {}) {
             return this;
           },
           async get() {
-            return { data: clone(result) };
+            const data = clone(result);
+            if (typeof options.afterQuery === 'function') {
+              await options.afterQuery({ name, filter: clone(filter), data: clone(data) });
+            }
+            return { data };
           },
         };
       },
@@ -1218,6 +1222,341 @@ async function reserveOwnedRecording(db, services = recordingServices(), extra =
   return { result, services };
 }
 
+const PRE_SAVE_RECORD_ID = 'record-1787000000000-1';
+
+function addSecondActiveMember(seed) {
+  seed.family_members['member-a2'] = {
+    _id: 'member-a2', familyId: 'family-a', memberId: 'member-a2', openid: 'openid-a2', status: 'active',
+  };
+  return seed;
+}
+
+test('trusted owner can reserve, read, add, submit, update, and delete a pre-save workspace', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const generatedIds = ['recording-pre-save', 'manual-pre-save'];
+  const services = recordingServices({ idGenerator: () => generatedIds.shift() });
+
+  const empty = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: PRE_SAVE_RECORD_ID,
+  }, 'openid-a', services);
+  assert.deepEqual(empty, { ok: true, data: { recordings: [], draft: null, audioUrls: {} } });
+
+  const reserved = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordId: PRE_SAVE_RECORD_ID, format: 'mp3', memberId: 'forged-member',
+  }, 'openid-a', services);
+  assert.equal(reserved.ok, true);
+  assert.equal(reserved.data.recordingId, 'recording-pre-save');
+
+  const read = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: PRE_SAVE_RECORD_ID,
+  }, 'openid-a', services);
+  assert.deepEqual(read.data.recordings.map((item) => item._id), ['recording-pre-save']);
+
+  const added = await invoke(db, {
+    action: 'addManualText', familyId: 'family-a', dishId: 'dish-1',
+    recordId: PRE_SAVE_RECORD_ID, text: ' 少放盐 ', memberId: 'forged-member',
+  }, 'openid-a', services);
+  assert.equal(added.ok, true);
+  assert.equal(added.data.recording.createdBy, 'member-a');
+
+  const submitted = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordingId: 'recording-pre-save', recordId: 'record-deleted',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-pre-save.mp3',
+  }, 'openid-a', services);
+  assert.equal(submitted.ok, true);
+  assert.equal(submitted.data.recording.status, 'transcribing');
+
+  const updated = await invoke(db, {
+    action: 'updateTranscript', familyId: 'family-a', dishId: 'dish-1',
+    recordingId: 'manual-pre-save', recordId: 'record-deleted', transcriptRevision: 0, text: '少放一点盐',
+  }, 'openid-a', services);
+  assert.equal(updated.ok, true);
+  assert.equal(updated.data.recording.editedTranscript, '少放一点盐');
+
+  const deleted = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordingId: 'manual-pre-save', recordId: 'record-deleted',
+  }, 'openid-a', services);
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.data.recording.status, 'deleted');
+});
+
+test('an active member cannot read or mutate another member pre-save workspace', async () => {
+  const db = createMemoryDatabase(addSecondActiveMember(baseSeed()));
+  const services = recordingServices({ idGenerator: () => 'recording-private' });
+  const recordId = 'record-1787000000000-2';
+  const reserved = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId, format: 'mp3',
+  }, 'openid-a', services);
+  assert.equal(reserved.ok, true);
+  db.records('recipe_drafts').set('draft-private', {
+    _id: 'draft-private', familyId: 'family-a', dishId: 'dish-1', recordId,
+    status: 'editing', createdBy: 'member-a', draftExpiresAt: 604800100,
+  });
+
+  const attempts = [
+    { action: 'getRecordWorkspace', recordId },
+    { action: 'addManualText', recordId, text: '偷改' },
+    { action: 'refreshWorkspace', recordId },
+    {
+      action: 'submitRecording', recordingId: 'recording-private', recordId: 'record-1',
+      fileId: 'cloud://env/families/family-a/recipe-audio/recording-private.mp3',
+    },
+    { action: 'updateTranscript', recordingId: 'recording-private', recordId: 'record-1', transcriptRevision: 0, text: '偷改' },
+    { action: 'deleteRecording', recordingId: 'recording-private', recordId: 'record-1' },
+  ];
+  for (const attempt of attempts) {
+    const denied = await invoke(db, {
+      familyId: 'family-a', dishId: 'dish-1', memberId: 'member-a', ...attempt,
+    }, 'openid-a2', services);
+    assert.equal(denied.ok, false, attempt.action);
+    assert.equal(denied.error.code, 'RECORD_NOT_FOUND', attempt.action);
+  }
+
+  const ownerRead = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  assert.equal(ownerRead.ok, true);
+  assert.equal(ownerRead.data.draft._id, 'draft-private');
+  assert.equal(db.records('recipe_recordings').get('recording-private').status, 'reserved');
+});
+
+test('attach stays strict until local save and only the temporary workspace owner can attach', async () => {
+  const seed = addSecondActiveMember(baseSeed());
+  const db = createMemoryDatabase(seed);
+  const services = recordingServices({ idGenerator: () => 'recording-attach' });
+  const recordId = 'record-1787000000000-3';
+  await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId, format: 'mp3',
+  }, 'openid-a', services);
+
+  const beforeSave = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  assert.equal(beforeSave.error.code, 'RECORD_NOT_FOUND');
+
+  db.records('family_states').get('family-a').cookingRecords.push({
+    id: recordId, familyId: 'family-a', dishId: 'dish-1',
+  });
+  const otherMember = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a2', services);
+  assert.equal(otherMember.error.code, 'RECORD_NOT_FOUND');
+
+  const attached = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  assert.equal(attached.ok, true);
+  assert.equal(db.records('recipe_recordings').get('recording-attach').draftExpiresAt, null);
+
+  const historicalRead = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a2', services);
+  assert.equal(historicalRead.ok, true);
+});
+
+test('pre-save workspace claims remain isolated across family and dish scopes', async () => {
+  const seed = baseSeed();
+  seed.family_states['family-a'].dishes.push({ id: 'dish-2', status: 'active' });
+  const db = createMemoryDatabase(seed);
+  const services = recordingServices({ idGenerator: () => 'recording-scoped' });
+  const recordId = 'record-1787000000000-4';
+  const owner = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId, format: 'mp3',
+  }, 'openid-a', services);
+  assert.equal(owner.ok, true);
+
+  for (const scope of [
+    { familyId: 'family-a', dishId: 'dish-2', openid: 'openid-a' },
+    { familyId: 'family-b', dishId: 'dish-1', openid: 'openid-b' },
+  ]) {
+    const read = await invoke(db, {
+      action: 'getRecordWorkspace', familyId: scope.familyId, dishId: scope.dishId, recordId,
+    }, scope.openid, services);
+    assert.equal(read.error.code, 'RECORD_NOT_FOUND', `${scope.familyId}|${scope.dishId}: read`);
+    const reserve = await invoke(db, {
+      action: 'reserveRecording', familyId: scope.familyId, dishId: scope.dishId, recordId, format: 'mp3',
+    }, scope.openid, services);
+    assert.equal(reserve.error.code, 'RECORD_NOT_FOUND', `${scope.familyId}|${scope.dishId}: reserve`);
+  }
+});
+
+test('an empty provisional cancel leaves a tombstone that blocks later segment creation', async () => {
+  const cases = [
+    {
+      recordId: 'record-1787000000010-1',
+      recordingId: 'recording-after-cancel',
+      event: { action: 'reserveRecording', format: 'mp3' },
+    },
+    {
+      recordId: 'record-1787000000010-2',
+      recordingId: 'manual-after-cancel',
+      event: { action: 'addManualText', text: '取消后不应保存' },
+    },
+  ];
+  for (const item of cases) {
+    const db = createMemoryDatabase(baseSeed());
+    const services = recordingServices({ idGenerator: () => item.recordingId });
+    const cancelled = await invoke(db, {
+      action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: item.recordId,
+    }, 'openid-a', services);
+    assert.equal(cancelled.ok, true, item.event.action);
+
+    const delayed = await invoke(db, {
+      familyId: 'family-a', dishId: 'dish-1', recordId: item.recordId, ...item.event,
+    }, 'openid-a', services);
+    assert.equal(delayed.ok, false, item.event.action);
+    assert.equal(delayed.error && delayed.error.code, 'RECORD_NOT_FOUND', item.event.action);
+    assert.equal(db.records('recipe_recordings').get(`workspace-claim-${item.recordId}`).status, 'cancelled');
+    assert.equal(db.records('recipe_recordings').has(item.recordingId), false, item.event.action);
+  }
+});
+
+test('cancelled claim wins when reserve or manual creation resumes from an older transaction snapshot', async () => {
+  const cases = [
+    {
+      recordId: 'record-1787000000020-1',
+      recordingId: 'recording-delayed-cancel',
+      event: { action: 'reserveRecording', format: 'mp3' },
+    },
+    {
+      recordId: 'record-1787000000020-2',
+      recordingId: 'manual-delayed-cancel',
+      event: { action: 'addManualText', text: '并发取消' },
+    },
+  ];
+  for (const item of cases) {
+    let releaseCreation;
+    let markCreationPaused;
+    const creationReleased = new Promise((resolve) => { releaseCreation = resolve; });
+    const creationPaused = new Promise((resolve) => { markCreationPaused = resolve; });
+    const workspaceStateId = `workspace-family-a-dish-1-${item.recordId}`;
+    let paused = false;
+    const db = createMemoryDatabase(baseSeed(), {
+      async afterTransactionRead({ name, id, attempt }) {
+        if (!paused && attempt === 1 && name === 'recipe_recordings' && id === workspaceStateId) {
+          paused = true;
+          markCreationPaused();
+          await creationReleased;
+        }
+      },
+    });
+    const services = recordingServices({ idGenerator: () => item.recordingId });
+    const creation = invoke(db, {
+      familyId: 'family-a', dishId: 'dish-1', recordId: item.recordId, ...item.event,
+    }, 'openid-a', services);
+    await creationPaused;
+
+    const cancelled = await invoke(db, {
+      action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: item.recordId,
+    }, 'openid-a', services);
+    releaseCreation();
+    const delayed = await creation;
+
+    assert.equal(cancelled.ok, true, item.event.action);
+    assert.equal(delayed.ok, false, item.event.action);
+    assert.equal(delayed.error && delayed.error.code, 'RECORD_NOT_FOUND', item.event.action);
+    assert.equal(db.records('recipe_recordings').get(`workspace-claim-${item.recordId}`).status, 'cancelled');
+    assert.equal(db.records('recipe_recordings').has(item.recordingId), false, item.event.action);
+
+    const submit = await invoke(db, {
+      action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: item.recordingId,
+      recordId: 'record-1', fileId: `cloud://env/families/family-a/recipe-audio/${item.recordingId}.mp3`,
+    }, 'openid-a', services);
+    assert.equal(submit.error.code, 'RECORDING_NOT_FOUND', `${item.event.action}: submit`);
+  }
+});
+
+test('cancellation tombstones the claim before its cleanup snapshot can miss a concurrent creation', async () => {
+  const recordId = 'record-1787000000030-1';
+  const recordingId = 'recording-before-cleanup';
+  const workspaceStateId = `workspace-family-a-dish-1-${recordId}`;
+  let releaseCreation;
+  let markCreationPaused;
+  let releaseCleanup;
+  let markCleanupReached;
+  const creationReleased = new Promise((resolve) => { releaseCreation = resolve; });
+  const creationPaused = new Promise((resolve) => { markCreationPaused = resolve; });
+  const cleanupReleased = new Promise((resolve) => { releaseCleanup = resolve; });
+  const cleanupReached = new Promise((resolve) => { markCleanupReached = resolve; });
+  let creationWasPaused = false;
+  let scopedRecordingQueries = 0;
+  const db = createMemoryDatabase(baseSeed(), {
+    async afterTransactionRead({ name, id, attempt }) {
+      if (!creationWasPaused && attempt === 1 && name === 'recipe_recordings' && id === workspaceStateId) {
+        creationWasPaused = true;
+        markCreationPaused();
+        await creationReleased;
+      }
+    },
+    async afterQuery({ name, filter }) {
+      if (name !== 'recipe_recordings'
+        || filter.familyId !== 'family-a'
+        || filter.dishId !== 'dish-1'
+        || filter.recordId !== recordId) return;
+      scopedRecordingQueries += 1;
+      if (scopedRecordingQueries === 4) {
+        markCleanupReached();
+        await cleanupReleased;
+      }
+    },
+  });
+  const services = recordingServices({ idGenerator: () => recordingId });
+  const creation = invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId, format: 'mp3',
+  }, 'openid-a', services);
+  await creationPaused;
+
+  const cancellation = invoke(db, {
+    action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  await cleanupReached;
+  releaseCreation();
+  const created = await creation;
+  releaseCleanup();
+  const cancelled = await cancellation;
+
+  const activeSegments = [...db.records('recipe_recordings').values()].filter((item) => (
+    item.recordId === recordId && item.sourceType !== 'workspace_state' && item.status !== 'deleted'
+  ));
+  assert.equal(cancelled.ok, true);
+  assert.equal(db.records('recipe_recordings').get(`workspace-claim-${recordId}`).status, 'cancelled');
+  assert.equal(activeSegments.length, 0);
+  if (created.ok) {
+    assert.equal(db.records('recipe_recordings').get(recordingId).status, 'deleted');
+  } else {
+    assert.equal(created.error && created.error.code, 'RECORD_NOT_FOUND');
+  }
+});
+
+test('pre-save IDs fail closed and archived dishes cannot open a new workspace', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices();
+  for (const event of [
+    { action: 'getRecordWorkspace', recordId: 'draft-1787000000000-1' },
+    { action: 'reserveRecording', recordId: '../record-1787000000000-1', format: 'mp3' },
+    { action: 'addManualText', recordId: 'not-a-record', text: '文字' },
+    { action: 'cancelRecordWorkspace', recordId: 'record/1787000000000/1' },
+  ]) {
+    const denied = await invoke(db, { familyId: 'family-a', dishId: 'dish-1', ...event }, 'openid-a', services);
+    assert.equal(denied.ok, false, event.action);
+    assert.equal(denied.error.code, 'RECORD_ID_INVALID', event.action);
+  }
+
+  const archived = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-deleted',
+    recordId: 'record-1787000000000-5',
+  }, 'openid-a', services);
+  assert.equal(archived.error.code, 'DISH_DELETED');
+
+  const historical = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-deleted', recordId: 'record-deleted',
+  }, 'openid-a', services);
+  assert.equal(historical.ok, true);
+});
+
 test('reserves an owned MP3 upload path and rejects format, clip-count, and family scope violations', async () => {
   const db = createMemoryDatabase(baseSeed());
   const services = recordingServices();
@@ -1501,7 +1840,7 @@ test('attachRecordWorkspace cannot clear expiration or resurrect a recording del
   seed.recipe_recordings = {
     audio: {
       _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
-      sourceType: 'audio', status: 'reserved', draftExpiresAt: 700, fileId: '',
+      sourceType: 'audio', status: 'reserved', draftExpiresAt: 700, fileId: '', createdBy: 'member-a',
     },
   };
   const db = createMemoryDatabase(seed);
@@ -1537,7 +1876,7 @@ test('tombstone cleanup targets the fileId committed after the initial delete re
   seed.recipe_recordings = {
     audio: {
       _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
-      sourceType: 'audio', status: 'reserved', draftExpiresAt: 700, fileId: '', durationMs: 0,
+      sourceType: 'audio', status: 'reserved', draftExpiresAt: 700, fileId: '', durationMs: 0, createdBy: 'member-a',
     },
   };
   const db = createMemoryDatabase(seed);

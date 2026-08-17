@@ -110,6 +110,51 @@ function flushPromises() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function createRecordingWx(initialEntries = []) {
+  const handlers = {};
+  let storedEntries = clone(initialEntries);
+  const removedFiles = [];
+  const recorder = {
+    startCalls: [],
+    stopCalls: 0,
+    offCalls: [],
+    onStop(callback) { handlers.stop = callback; },
+    onError(callback) { handlers.error = callback; },
+    onInterruptionBegin(callback) { handlers.interruption = callback; },
+    offStop(callback) { if (handlers.stop === callback) delete handlers.stop; this.offCalls.push('stop'); },
+    offError(callback) { if (handlers.error === callback) delete handlers.error; this.offCalls.push('error'); },
+    offInterruptionBegin(callback) { if (handlers.interruption === callback) delete handlers.interruption; this.offCalls.push('interruption'); },
+    start(options) { this.startCalls.push(clone(options)); },
+    stop() { this.stopCalls += 1; },
+    finish(result) { return handlers.stop && handlers.stop(result); },
+  };
+  const api = {
+    getRecorderManager() { return recorder; },
+    getFileSystemManager() {
+      return {
+        saveFile({ tempFilePath, success }) {
+          success({ savedFilePath: `wxfile://saved/${tempFilePath.split('/').pop()}` });
+        },
+        getFileInfo({ success }) { success({ size: 321 }); },
+        removeSavedFile({ filePath, success }) { removedFiles.push(filePath); success({}); },
+      };
+    },
+    getStorageSync() { return clone(storedEntries); },
+    setStorageSync(key, value) { storedEntries = clone(value); },
+    showToast() {},
+  };
+  return {
+    api,
+    recorder,
+    removedFiles,
+    storageEntries: () => clone(storedEntries),
+  };
+}
+
 test('manual recipe pages are registered, package-safe, and keep history read only', () => {
   const appConfig = JSON.parse(read('app.json'));
   const draftConfig = JSON.parse(read('pages/recipe-draft/recipe-draft.json'));
@@ -706,6 +751,301 @@ test('recipe page loads an immutable selected version and edits main by cloning 
       payload: { familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'edit_main' },
     });
     assert.equal(navigation, '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=edit-draft');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('recording workspace uses native lifecycle and uploads each completed clip in order', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const harness = createRecordingWx();
+  const calls = [];
+  const recipeAssistant = {
+    async reserveRecording(payload) {
+      calls.push({ action: 'reserveRecording', payload });
+      return {
+        recordingId: 'recording-1',
+        cloudPath: 'families/family-internal-1/recipe-audio/recording-1.mp3',
+      };
+    },
+    async uploadRecording(reservation, filePath) {
+      calls.push({ action: 'uploadRecording', reservation, filePath });
+      return 'cloud://env/families/family-internal-1/recipe-audio/recording-1.mp3';
+    },
+    async submitRecording(payload) {
+      calls.push({ action: 'submitRecording', payload });
+      return {
+        recording: {
+          _id: 'recording-1', sourceType: 'audio', sequence: 1, status: 'transcribing',
+          fileId: payload.fileId, durationMs: 1200, editedTranscript: '', transcriptRevision: 0,
+        },
+      };
+    },
+  };
+  global.getApp = () => ({ globalData: { recipeAssistant } });
+  global.wx = harness.api;
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    assert.deepEqual(Object.keys(definition.properties).sort(), ['disabled', 'dishId', 'familyId', 'recordId']);
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    component.startRecording();
+    await harness.recorder.finish({ tempFilePath: 'wxfile://tmp/clip.mp3', duration: 1200 });
+    await flushPromises();
+    await flushPromises();
+
+    assert.deepEqual(calls.map((item) => item.action), [
+      'reserveRecording', 'uploadRecording', 'submitRecording',
+    ]);
+    assert.equal(calls[0].payload.recordId, 'record-1');
+    assert.equal(calls[1].reservation.familyId, 'family-internal-1');
+    assert.equal(component.data.clips[0].statusLabel, '转写中');
+    assert.equal(component.data.clips[0].localPath, '', 'uploaded clips must not retain a deleted local playback path');
+    assert.equal(harness.storageEntries()[0].uploadStatus, 'uploaded');
+
+    component.startRecording();
+    assert.equal(harness.recorder.startCalls.length, 2, 'a transcribing clip must not block the next recording');
+    definition.lifetimes.detached.call(component);
+    assert.deepEqual(harness.recorder.offCalls.sort(), ['error', 'interruption', 'stop']);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('recording workspace retains a local clip and offers re-upload after upload failure', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const harness = createRecordingWx();
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async reserveRecording() {
+          return {
+            recordingId: 'recording-failed-upload',
+            cloudPath: 'families/family-internal-1/recipe-audio/recording-failed-upload.mp3',
+          };
+        },
+        async uploadRecording() { throw new Error('offline'); },
+        async submitRecording() { throw new Error('must not submit'); },
+      },
+    },
+  });
+  global.wx = harness.api;
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+    component.startRecording();
+    await harness.recorder.finish({ tempFilePath: 'wxfile://tmp/offline.mp3', duration: 900 });
+    await flushPromises();
+    await flushPromises();
+
+    assert.equal(component.data.clips[0].statusLabel, '等待上传');
+    assert.equal(component.data.clips[0].uploadFailed, true);
+    assert.equal(harness.storageEntries()[0].uploadStatus, 'pending');
+    assert.match(read('components/recipe-recording-workspace/recipe-recording-workspace.wxml'), /重新上传/);
+    definition.lifetimes.detached.call(component);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('recording workspace refreshes once on page show and emits its public events', async () => {
+  const originalGetApp = global.getApp;
+  const calls = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getRecordWorkspace(payload) {
+          calls.push({ action: 'getRecordWorkspace', payload });
+          return {
+            recordings: [{
+              _id: 'recording-1', sourceType: 'audio', sequence: 1, status: 'transcribing',
+              fileId: 'cloud://audio', durationMs: 1000, editedTranscript: '', transcriptRevision: 0,
+            }],
+            draft: { _id: 'draft-1' },
+            audioUrls: { 'recording-1': 'https://temp.example/audio.mp3' },
+          };
+        },
+        async refreshWorkspace(payload) {
+          calls.push({ action: 'refreshWorkspace', payload });
+          return {
+            recordings: [{
+              _id: 'recording-1', sourceType: 'audio', sequence: 1, status: 'ready',
+              fileId: 'cloud://audio', durationMs: 1000, editedTranscript: '少放盐', transcriptRevision: 0,
+            }],
+          };
+        },
+      },
+    },
+  });
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+
+    await definition.pageLifetimes.show.call(component);
+    component.openDraft();
+
+    assert.deepEqual(calls.map((item) => item.action), ['getRecordWorkspace', 'refreshWorkspace']);
+    assert.equal(component.data.clips[0].statusLabel, '可校对');
+    assert.deepEqual(component.events.filter((event) => event.name === 'workspacechange').at(-1).detail, {
+      hasContent: true,
+      readyToOrganize: true,
+      pendingCount: 0,
+    });
+    assert.deepEqual(component.events.filter((event) => event.name === 'opendraft').at(-1).detail, {
+      draftId: 'draft-1',
+    });
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('recording workspace supports transcript edits, manual text, retry, delete, and required controls', async () => {
+  const originalGetApp = global.getApp;
+  const calls = [];
+  const recipeAssistant = {
+    async updateTranscript(payload) {
+      calls.push({ action: 'updateTranscript', payload });
+      return { recording: { _id: 'recording-1', sequence: 1, sourceType: 'audio', status: 'ready', editedTranscript: payload.text, transcriptRevision: 2 } };
+    },
+    async addManualText(payload) {
+      calls.push({ action: 'addManualText', payload });
+      return { recording: { _id: 'manual-1', sequence: 2, sourceType: 'manual_text', status: 'ready', editedTranscript: payload.text, transcriptRevision: 0 } };
+    },
+    async submitRecording(payload) {
+      calls.push({ action: 'submitRecording', payload });
+      return { recording: { _id: 'recording-2', sequence: 3, sourceType: 'audio', status: 'transcribing', fileId: payload.fileId, editedTranscript: '', transcriptRevision: 0 } };
+    },
+    async deleteRecording(payload) {
+      calls.push({ action: 'deleteRecording', payload });
+      return { recording: { _id: payload.recordingId, status: 'deleted' } };
+    },
+  };
+  global.getApp = () => ({ globalData: { recipeAssistant } });
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+      clips: [
+        { key: 'recording-1', recordingId: 'recording-1', sequence: 1, sourceType: 'audio', status: 'ready', statusLabel: '可校对', editedTranscript: '原文字', transcriptRevision: 1 },
+        { key: 'recording-2', recordingId: 'recording-2', sequence: 3, sourceType: 'audio', status: 'failed', statusLabel: '转写失败', fileId: 'cloud://audio-2', editedTranscript: '', transcriptRevision: 0 },
+      ],
+    });
+
+    component.onTranscriptInput({ currentTarget: { dataset: { key: 'recording-1' } }, detail: { value: '修订文字' } });
+    await component.saveTranscript({ currentTarget: { dataset: { key: 'recording-1' } } });
+    component.onManualTextInput({ detail: { value: '补充一点糖' } });
+    await component.addManualText();
+    await component.retryClip({ currentTarget: { dataset: { key: 'recording-2' } } });
+    await component.deleteClip({ currentTarget: { dataset: { key: 'recording-1' } } });
+
+    assert.deepEqual(calls.map((item) => item.action), [
+      'updateTranscript', 'addManualText', 'submitRecording', 'deleteRecording',
+    ]);
+    const template = read('components/recipe-recording-workspace/recipe-recording-workspace.wxml');
+    for (const binding of ['startRecording', 'stopRecording', 'playClip', 'saveTranscript', 'retryClip', 'deleteClip', 'addManualText']) {
+      assert.match(template, new RegExp(`bindtap="${binding}"`), binding);
+    }
+    assert.match(template, /倒计时/);
+    assert.match(template, /添加文字说明/);
+    for (const label of ['等待上传', '转写中', '可校对', '转写失败']) assert.match(read('components/recipe-recording-workspace/recipe-recording-workspace.js'), new RegExp(label));
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('recording playback destroys the old context and refreshes an expired temporary URL', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const contexts = [];
+  let workspaceReads = 0;
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getRecordWorkspace() {
+          workspaceReads += 1;
+          return { recordings: [], draft: null, audioUrls: {} };
+        },
+      },
+    },
+  });
+  global.wx = {
+    createInnerAudioContext() {
+      const context = {
+        destroyed: false,
+        played: false,
+        play() { this.played = true; },
+        destroy() { this.destroyed = true; },
+        onEnded(callback) { this.ended = callback; },
+        onError(callback) { this.failed = callback; },
+      };
+      contexts.push(context);
+      return context;
+    },
+    showToast() {},
+  };
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+      clips: [
+        { key: 'recording-1', recordingId: 'recording-1', audioUrl: 'https://temp.example/one.mp3' },
+        { key: 'recording-2', recordingId: 'recording-2', audioUrl: 'https://temp.example/two.mp3' },
+      ],
+    });
+
+    component.playClip({ currentTarget: { dataset: { key: 'recording-1' } } });
+    component.playClip({ currentTarget: { dataset: { key: 'recording-2' } } });
+    contexts[1].failed({ errMsg: 'url expired' });
+    await flushPromises();
+
+    assert.equal(contexts[0].destroyed, true);
+    assert.equal(contexts[1].played, true);
+    assert.equal(workspaceReads, 1);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('local workspace recovery is scoped by family, dish, and record and expires after seven days', () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const now = Date.now();
+  const harness = createRecordingWx([
+    { localId: 'expired', workspaceKey: 'family-a|dish-1|record-expired', savedFilePath: 'wxfile://expired.mp3', durationMs: 1, createdAt: now - 8 * 86400000, uploadStatus: 'pending' },
+    { localId: 'current', workspaceKey: 'family-a|dish-1|record-current', savedFilePath: 'wxfile://current.mp3', durationMs: 1, createdAt: now - 6 * 86400000, uploadStatus: 'pending' },
+    { localId: 'foreign', workspaceKey: 'family-b|dish-1|record-foreign', savedFilePath: 'wxfile://foreign.mp3', durationMs: 1, createdAt: now - 86400000, uploadStatus: 'pending' },
+  ]);
+  global.getApp = () => ({ globalData: { recipeAssistant: null } });
+  global.wx = harness.api;
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-a', dishId: 'dish-1', recordId: '', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    assert.deepEqual(component.findWorkspace({ familyId: 'family-a', dishId: 'dish-1' }), {
+      recordId: 'record-current', workspaceKey: 'family-a|dish-1|record-current',
+    });
+    assert.deepEqual(component.findWorkspace({ familyId: 'family-b', dishId: 'dish-1' }), {
+      recordId: 'record-foreign', workspaceKey: 'family-b|dish-1|record-foreign',
+    });
+    assert.equal(harness.storageEntries().some((entry) => entry.localId === 'expired'), false);
+    definition.lifetimes.detached.call(component);
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;

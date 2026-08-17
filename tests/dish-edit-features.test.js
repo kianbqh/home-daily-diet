@@ -94,13 +94,27 @@ test('saving an appended record clears only the current record photo after uploa
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   let added = null;
+  const calls = [];
   const store = {
-    uploadImage: async (filePath) => `cloud://${filePath}`,
+    getState: () => ({ family: { id: 'family-internal-1' } }),
+    uploadImage: async (filePath) => {
+      calls.push('upload');
+      return `cloud://${filePath}`;
+    },
     addCookingRecord(input) {
+      calls.push('add');
       added = input;
     },
   };
-  global.getApp = () => ({ globalData: { store } });
+  const recipeAssistant = {
+    async attachRecordWorkspace(payload) {
+      calls.push('attach');
+      assert.deepEqual(payload, {
+        familyId: 'family-internal-1', dishId: 'dish-1', recordId: added.id,
+      });
+    },
+  };
+  global.getApp = () => ({ globalData: { store, recipeAssistant } });
   global.wx = {
     showLoading() {},
     hideLoading() {},
@@ -118,7 +132,9 @@ test('saving an appended record clears only the current record photo after uploa
     mealType: 'dinner',
     image: 'local-photo.jpg',
     displayImage: 'local-photo.jpg',
+    recordingFamilyKey: 'family-internal-1',
   });
+  page.selectComponent = () => ({ async clearLocalClips() { calls.push('clear-local'); } });
   page.startRecordEntry();
   const reservedRecordId = page.data.recordIdDraft;
   page.startRecordEntry();
@@ -131,13 +147,35 @@ test('saving an appended record clears only the current record photo after uploa
   assert.equal(page.data.image, '');
   assert.equal(page.data.displayImage, '');
   assert.equal(page.data.recordIdDraft, '');
+  assert.deepEqual(calls, ['upload', 'add', 'attach', 'clear-local']);
   await new Promise((resolve) => setTimeout(resolve, 500));
 
   global.getApp = originalGetApp;
   global.wx = originalWx;
 });
 
-test('existing dish details open and cancel the append-record form without keeping drafts', () => {
+test('existing dish details cancel only after explicit confirmation and clear cloud before local clips', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  let modal = null;
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ family: { id: 'family-internal-1' } }) },
+      recipeAssistant: {
+        async cancelRecordWorkspace(payload) {
+          calls.push({ action: 'cancel-cloud', payload });
+        },
+      },
+    },
+  });
+  global.wx = {
+    showModal(options) {
+      modal = options;
+      options.success({ confirm: true, cancel: false });
+    },
+    showToast() {},
+  };
   const page = createPageInstance(loadPage(), {
     isExisting: true,
     isArchived: false,
@@ -148,7 +186,10 @@ test('existing dish details open and cancel the append-record form without keepi
     mealTypeLabel: '未指定餐次',
     customMealType: '',
     customMealTypeDraft: '',
+    dishId: 'dish-1',
+    recordingFamilyKey: 'family-internal-1',
   });
+  page.selectComponent = () => ({ async clearLocalClips() { calls.push({ action: 'clear-local' }); } });
 
   page.startRecordEntry();
   assert.equal(page.data.recordFormVisible, true);
@@ -156,6 +197,13 @@ test('existing dish details open and cancel the append-record form without keepi
   const reservedRecordId = page.data.recordIdDraft;
   page.startRecordEntry();
   assert.equal(page.data.recordIdDraft, reservedRecordId);
+
+  page.setData({ recordWorkspaceBusy: true });
+  await page.cancelRecordEntry();
+  assert.equal(modal, null, 'save in progress must not open a competing cancellation');
+  assert.deepEqual(calls, []);
+  assert.equal(page.data.recordIdDraft, reservedRecordId);
+  page.setData({ recordWorkspaceBusy: false });
 
   page.setData({
     image: 'wxfile://draft.jpg',
@@ -165,7 +213,7 @@ test('existing dish details open and cancel the append-record form without keepi
     customMealType: '夜宵',
     customMealTypeDraft: '夜宵',
   });
-  page.cancelRecordEntry();
+  await page.cancelRecordEntry();
 
   assert.deepEqual({
     recordFormVisible: page.data.recordFormVisible,
@@ -186,6 +234,103 @@ test('existing dish details open and cancel the append-record form without keepi
     customMealType: '',
     customMealTypeDraft: '',
   });
+  assert.equal(modal.content, '本次未保存的录音和文字会被删除');
+  assert.deepEqual(calls, [
+    {
+      action: 'cancel-cloud',
+      payload: { familyId: 'family-internal-1', dishId: 'dish-1', recordId: reservedRecordId },
+    },
+    { action: 'clear-local' },
+  ]);
+  global.getApp = originalGetApp;
+  global.wx = originalWx;
+});
+
+test('append record entry recovers the newest local workspace before generating an id', () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  let cancelled = false;
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ family: { id: 'family-internal-1' } }) },
+      recipeAssistant: { cancelRecordWorkspace() { cancelled = true; } },
+    },
+  });
+  global.wx = {};
+  const page = createPageInstance(loadPage(), {
+    isExisting: true,
+    isArchived: false,
+    editProfileVisible: false,
+    dishId: 'dish-1',
+    recordingFamilyKey: 'family-internal-1',
+    recordIdDraft: '',
+  });
+  const lookups = [];
+  page.selectComponent = () => ({
+    findWorkspace(input) {
+      lookups.push(input);
+      return { recordId: 'record-recovered', workspaceKey: 'family-internal-1|dish-1|record-recovered' };
+    },
+  });
+
+  page.startRecordEntry();
+  page.onUnload();
+
+  assert.deepEqual(lookups, [{ familyId: 'family-internal-1', dishId: 'dish-1' }]);
+  assert.equal(page.data.recordIdDraft, 'record-recovered');
+  assert.equal(cancelled, false, 'abnormal page exit must leave the workspace recoverable');
+  global.getApp = originalGetApp;
+  global.wx = originalWx;
+});
+
+test('a failed local cooking-record save never attaches the recording workspace', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  let page;
+  let busyDuringUpload = null;
+  const store = {
+    getState: () => ({ family: { id: 'family-internal-1' } }),
+    async uploadImage(filePath) {
+      calls.push('upload');
+      busyDuringUpload = page.data.recordWorkspaceBusy;
+      return `cloud://${filePath}`;
+    },
+    addCookingRecord() { calls.push('add'); throw new Error('local save failed'); },
+  };
+  global.getApp = () => ({
+    globalData: {
+      store,
+      recipeAssistant: { async attachRecordWorkspace() { calls.push('attach'); } },
+    },
+  });
+  global.wx = { showLoading() {}, hideLoading() {}, showToast() {} };
+  try {
+    page = createPageInstance(loadPage(), {
+      isExisting: true,
+      editProfileVisible: false,
+      isArchived: false,
+      recordFormVisible: true,
+      dishId: 'dish-1',
+      nameDraft: 'Tomato eggs',
+      recordIdDraft: 'record-stable-failure',
+      recordDate: '2026-08-08',
+      mealType: 'dinner',
+      image: 'local-photo.jpg',
+      displayImage: 'local-photo.jpg',
+      recordingFamilyKey: 'family-internal-1',
+    });
+
+    await page.save();
+
+    assert.deepEqual(calls, ['upload', 'add']);
+    assert.equal(busyDuringUpload, true, 'record save must lock before photo upload starts');
+    assert.equal(page.data.recordIdDraft, 'record-stable-failure');
+    assert.equal(page.data.recordFormVisible, true);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
 });
 
 test('new dish pages ignore append-record form controls', () => {

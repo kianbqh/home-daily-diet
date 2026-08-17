@@ -1077,6 +1077,27 @@ test('getRecordWorkspace requires a bound cooking record and returns only owned 
   assert.equal(denied.error.code, 'RECORD_NOT_FOUND');
 });
 
+test('getRecordWorkspace never exposes an ASR submission lease token', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'uploading', fileId: '',
+      asrSubmitToken: 'server-only-token', asrSubmitLeaseExpiresAt: 120_100,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+
+  const result = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(JSON.stringify(result.data).includes('server-only-token'), false);
+  assert.equal(Object.hasOwn(result.data.recordings[0], 'asrSubmitLeaseExpiresAt'), false);
+  assert.equal(db.records('recipe_recordings').get('audio').asrSubmitToken, 'server-only-token');
+});
+
 test('repository set operations strip CloudBase system ids and transaction delegates to the database', async () => {
   const db = createMemoryDatabase(baseSeed(), { rejectSystemId: true });
   const repository = createRecipeRepository(db, DEFAULT_CONFIG);
@@ -1141,6 +1162,7 @@ test('main trusts only getWXContext OPENID and emits only the permitted error lo
 function recordingServices(overrides = {}) {
   const deleted = [];
   const submitted = [];
+  let submitTokenSequence = 0;
   return {
     deleted,
     submitted,
@@ -1159,13 +1181,14 @@ function recordingServices(overrides = {}) {
     asrProvider: {
       async submit(input) {
         submitted.push(input);
-        return { taskId: 'task-1', requestId: 'asr-request-1', submittedAt: 100, expiresAt: 200 };
+        return { taskId: 1001, requestId: 'asr-request-1', submittedAt: 100, expiresAt: 200 };
       },
       async query() {
         return { status: 'transcribing', transcript: '', durationMs: 0, requestId: 'query-request', errorCode: '' };
       },
     },
     idGenerator: () => 'recording-fixed',
+    asrSubmitTokenGenerator: () => `asr-submit-${++submitTokenSequence}`,
     ...overrides,
   };
 }
@@ -1259,7 +1282,7 @@ test('submitRecording accepts only its exact reserved file and trusted MP3 metad
   assert.equal(stored.byteLength, 1024);
   assert.equal(stored.durationMs, 60_000);
   assert.equal(stored.status, 'transcribing');
-  assert.equal(stored.asrTaskId, 'task-1');
+  assert.equal(stored.asrTaskId, 1001);
 });
 
 test('submitRecording rejects a trusted duration that would exceed fifteen minutes', async () => {
@@ -1422,13 +1445,15 @@ test('deletion while ASR submission is pending prevents a late result from resur
     action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-race',
   }, 'openid-a', services);
   assert.equal(deleted.ok, true);
-  releaseSubmit({ taskId: 'late-task', requestId: 'late-request' });
+  assert.equal(db.records('recipe_recordings').get('recording-race').asrSubmitToken || '', '');
+  assert.equal(db.records('recipe_recordings').get('recording-race').asrSubmitLeaseExpiresAt || null, null);
+  releaseSubmit({ taskId: 3001, requestId: 'late-request', submittedAt: 100, expiresAt: 200 });
   const late = await submitting;
 
   assert.equal(late.error.code, 'RECORDING_DELETED');
   const stored = db.records('recipe_recordings').get('recording-race');
   assert.equal(stored.status, 'deleted');
-  assert.notEqual(stored.asrTaskId, 'late-task');
+  assert.notEqual(stored.asrTaskId, 3001);
 });
 
 test('production file adapter downloads and parses trusted MP3 bytes without retaining client metadata', async () => {
@@ -1674,7 +1699,7 @@ test('submitRecording keeps an unexpired ASR task idempotent and replaces an exp
       _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
       sourceType: 'audio', status: 'transcribing', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
       fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
-      asrTaskId: 'old-task', asrSubmittedAt: 50, asrExpiresAt: 200, transcriptRevision: 0,
+      asrTaskId: 1001, asrSubmittedAt: 50, asrExpiresAt: 200, transcriptRevision: 0,
     },
   };
   const db = createMemoryDatabase(seed);
@@ -1690,7 +1715,7 @@ test('submitRecording keeps an unexpired ASR task idempotent and replaces an exp
     asrProvider: {
       async submit(input) {
         retryServices.submitted.push(input);
-        return { taskId: 'replacement-task', requestId: 'replacement-request', submittedAt: 201, expiresAt: 301 };
+        return { taskId: 2001, requestId: 'replacement-request', submittedAt: 201, expiresAt: 301 };
       },
     },
   });
@@ -1700,7 +1725,7 @@ test('submitRecording keeps an unexpired ASR task idempotent and replaces an exp
   assert.equal(retried.ok, true);
   const stored = db.records('recipe_recordings').get('audio');
   assert.equal(stored._id, 'audio');
-  assert.equal(stored.asrTaskId, 'replacement-task');
+  assert.equal(stored.asrTaskId, 2001);
   assert.equal(stored.asrRequestId, 'replacement-request');
   assert.equal(retryServices.submitted.length, 1);
 });
@@ -1713,7 +1738,7 @@ test('concurrent retries create only one replacement ASR task', async () => {
       _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
       sourceType: 'audio', status: 'failed', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
       fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
-      asrTaskId: 'failed-task', asrSubmittedAt: 10, asrExpiresAt: 20, transcriptRevision: 0,
+      asrTaskId: 1001, asrSubmittedAt: 10, asrExpiresAt: 20, transcriptRevision: 0,
     },
   };
   const db = createMemoryDatabase(seed);
@@ -1721,7 +1746,7 @@ test('concurrent retries create only one replacement ASR task', async () => {
   const services = recordingServices({ asrProvider: {
     async submit() {
       submits += 1;
-      return { taskId: 'replacement-task', requestId: 'replacement-request', submittedAt: 100, expiresAt: 200 };
+      return { taskId: 2001, requestId: 'replacement-request', submittedAt: 100, expiresAt: 200 };
     },
   } });
   const event = {
@@ -1736,6 +1761,179 @@ test('concurrent retries create only one replacement ASR task', async () => {
   assert.equal(results.filter((item) => item.ok).length, 1);
   assert.deepEqual(results.filter((item) => !item.ok).map((item) => item.error.code), ['ASR_TASK_IN_PROGRESS']);
   assert.equal(submits, 1);
+});
+
+test('an orphaned uploading lease becomes retryable at its two-minute expiry boundary', async () => {
+  const fileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'uploading', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
+      fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
+      asrSubmitToken: 'orphan-token', asrSubmitLeaseExpiresAt: 120_100,
+      asrTaskId: '', asrSubmittedAt: null, asrExpiresAt: null, transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const services = recordingServices({
+    now: () => 120_100,
+    asrSubmitTokenGenerator: () => 'recovery-token',
+    asrProvider: { async submit() {
+      return { taskId: 2001, requestId: 'recovered-request', submittedAt: 120_100, expiresAt: 220_100 };
+    } },
+  });
+
+  const result = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId,
+  }, 'openid-a', services);
+
+  assert.equal(result.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'transcribing');
+  assert.equal(stored.asrTaskId, 2001);
+  assert.equal(stored.asrSubmitToken || '', '');
+  assert.equal(stored.asrSubmitLeaseExpiresAt || null, null);
+});
+
+test('an unexpired uploading lease blocks a concurrent submit', async () => {
+  const fileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'uploading', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
+      fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
+      asrSubmitToken: 'active-token', asrSubmitLeaseExpiresAt: 120_101,
+      asrTaskId: '', asrSubmittedAt: null, asrExpiresAt: null, transcriptRevision: 0,
+    },
+  };
+  const services = recordingServices({ now: () => 120_100 });
+
+  const result = await invoke(createMemoryDatabase(seed), {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId,
+  }, 'openid-a', services);
+
+  assert.equal(result.error.code, 'ASR_TASK_IN_PROGRESS');
+  assert.equal(services.submitted.length, 0);
+});
+
+test('a stale submit success cannot overwrite a newer lease result', async () => {
+  const fileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'failed', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
+      fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
+      asrTaskId: '', transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let now = 100;
+  let releaseFirst;
+  let firstStarted;
+  const started = new Promise((resolve) => { firstStarted = resolve; });
+  const first = recordingServices({
+    now: () => now,
+    asrSubmitTokenGenerator: () => 'first-token',
+    asrProvider: { submit() {
+      firstStarted();
+      return new Promise((resolve) => { releaseFirst = resolve; });
+    } },
+  });
+  const event = { action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId };
+  const firstCall = invoke(db, event, 'openid-a', first);
+  await started;
+  const firstLease = db.records('recipe_recordings').get('audio');
+  assert.equal(firstLease.asrSubmitToken, 'first-token');
+  assert.equal(firstLease.asrSubmitLeaseExpiresAt, 120_100);
+
+  now = 120_100;
+  const second = recordingServices({
+    now: () => now,
+    asrSubmitTokenGenerator: () => 'second-token',
+    asrProvider: { async submit() {
+      return { taskId: 2002, requestId: 'second-request', submittedAt: now, expiresAt: now + 1000 };
+    } },
+  });
+  const secondResult = await invoke(db, event, 'openid-a', second);
+  assert.equal(secondResult.ok, true);
+
+  releaseFirst({ taskId: 2001, requestId: 'first-request', submittedAt: 100, expiresAt: 1000 });
+  const staleResult = await firstCall;
+  assert.equal(staleResult.error.code, 'ASR_SUBMIT_LEASE_LOST');
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'transcribing');
+  assert.equal(stored.asrTaskId, 2002);
+  assert.equal(stored.asrRequestId, 'second-request');
+});
+
+test('a stale submit failure cannot mark a newer task failed', async () => {
+  const fileId = 'cloud://env/families/family-a/recipe-audio/audio.mp3';
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'failed', reservedCloudPath: 'families/family-a/recipe-audio/audio.mp3',
+      fileId, format: 'mp3', byteLength: 1024, durationMs: 60_000, durationCommitted: true,
+      asrTaskId: '', transcriptRevision: 0,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let now = 100;
+  let rejectFirst;
+  let firstStarted;
+  const started = new Promise((resolve) => { firstStarted = resolve; });
+  const first = recordingServices({
+    now: () => now,
+    asrSubmitTokenGenerator: () => 'first-token',
+    asrProvider: { submit() {
+      firstStarted();
+      return new Promise((resolve, reject) => { rejectFirst = reject; });
+    } },
+  });
+  const event = { action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'audio', fileId };
+  const firstCall = invoke(db, event, 'openid-a', first);
+  await started;
+
+  now = 120_100;
+  const second = recordingServices({
+    now: () => now,
+    asrSubmitTokenGenerator: () => 'second-token',
+    asrProvider: { async submit() {
+      return { taskId: 2002, requestId: 'second-request', submittedAt: now, expiresAt: now + 1000 };
+    } },
+  });
+  assert.equal((await invoke(db, event, 'openid-a', second)).ok, true);
+
+  rejectFirst(new Error('first provider failed late'));
+  const staleResult = await firstCall;
+  assert.equal(staleResult.error.code, 'ASR_SUBMIT_LEASE_LOST');
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'transcribing');
+  assert.equal(stored.asrTaskId, 2002);
+  assert.equal(stored.errorCode, '');
+});
+
+test('submitRecording rejects an invalid provider task id without persisting transcribing state', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices({ asrProvider: { async submit() {
+    return { taskId: 0, requestId: 'invalid-request', submittedAt: 100, expiresAt: 200 };
+  } } });
+  await reserveOwnedRecording(db, services);
+
+  const result = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  }, 'openid-a', services);
+
+  assert.equal(result.error.code, 'ASR_SUBMIT_RESPONSE_INVALID');
+  const stored = db.records('recipe_recordings').get('recording-fixed');
+  assert.equal(stored.status, 'failed');
+  assert.equal(stored.asrTaskId || '', '');
+  assert.equal(stored.asrSubmitToken || '', '');
+  assert.equal(stored.asrSubmitLeaseExpiresAt || null, null);
 });
 
 test('refreshWorkspace queries at most ten owned transcribing recordings in sequence order', async () => {

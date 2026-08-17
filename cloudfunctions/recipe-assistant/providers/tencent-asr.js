@@ -24,8 +24,9 @@ function createTencentAsrProvider(options = {}) {
         EmotionRecognition: 0,
         FilterModal: 0,
       });
+      const taskId = requireTaskId(response && response.Data && response.Data.TaskId, 'ASR_SUBMIT_RESPONSE_INVALID');
       return {
-        taskId: response && response.Data && response.Data.TaskId,
+        taskId,
         requestId: String(response && response.RequestId || ''),
         submittedAt,
         expiresAt: submittedAt + TASK_TTL_MS,
@@ -33,10 +34,11 @@ function createTencentAsrProvider(options = {}) {
     },
 
     async query({ taskId, submittedAt } = {}) {
+      const normalizedTaskId = requireTaskId(taskId, 'ASR_TASK_ID_INVALID');
       if (submittedAt != null && Number(clock()) > Number(submittedAt) + TASK_TTL_MS) {
         return queryResult('failed', '', 0, '', 'ASR_TASK_EXPIRED');
       }
-      const response = await client.DescribeTaskStatus({ TaskId: normalizeTaskId(taskId) });
+      const response = await client.DescribeTaskStatus({ TaskId: normalizedTaskId });
       const data = response && response.Data || {};
       const durationMs = Math.max(0, Math.round((Number(data.AudioDuration) || 0) * 1000));
       const requestId = String(response && response.RequestId || '');
@@ -80,9 +82,17 @@ function compactCredential(secretId, secretKey, token) {
   return credential;
 }
 
-function normalizeTaskId(taskId) {
+function requireTaskId(taskId, code) {
+  const validType = typeof taskId === 'number'
+    || (typeof taskId === 'string' && /^\d+$/.test(taskId));
   const numeric = Number(taskId);
-  return Number.isSafeInteger(numeric) ? numeric : taskId;
+  if (!validType || !Number.isSafeInteger(numeric) || numeric <= 0) {
+    const error = new Error('Tencent ASR task id is invalid');
+    error.name = 'TencentAsrProviderError';
+    error.code = code;
+    throw error;
+  }
+  return numeric;
 }
 
 function stripTimestampPrefixes(value) {

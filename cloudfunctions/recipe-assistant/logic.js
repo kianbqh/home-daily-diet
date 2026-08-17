@@ -53,7 +53,10 @@ function sanitize(value) {
 function sensitiveKey(key) {
   const normalized = String(key || '').toLowerCase();
   if (normalized === 'audiourls') return false;
-  return normalized.includes('openid') || /urls?$/.test(normalized);
+  return normalized.includes('openid')
+    || normalized === 'asrsubmittoken'
+    || normalized === 'asrsubmitleaseexpiresat'
+    || /urls?$/.test(normalized);
 }
 
 module.exports = {

@@ -109,6 +109,36 @@ test('query maps failed and expired tasks without exposing provider messages', a
   assert.equal(calls, 0);
 });
 
+test('submit rejects an invalid Tencent task id with a stable provider error', async () => {
+  const invalidTaskIds = [undefined, null, false, true, [1], 0, -1, 1.5, 'not-a-number', Number.MAX_SAFE_INTEGER + 1];
+  for (const taskId of invalidTaskIds) {
+    const provider = createTencentAsrProvider({ client: createClient({ create: {
+      Data: { TaskId: taskId }, RequestId: 'invalid-task-request',
+    } }) });
+    await assert.rejects(
+      provider.submit({ url: 'https://signed.example/audio.mp3' }),
+      (error) => error && error.code === 'ASR_SUBMIT_RESPONSE_INVALID',
+      String(taskId)
+    );
+  }
+});
+
+test('query rejects an invalid stored task id before calling Tencent', async () => {
+  const invalidTaskIds = [undefined, null, false, true, [1], 0, -1, 1.5, '', 'not-a-number', Number.MAX_SAFE_INTEGER + 1];
+  for (const taskId of invalidTaskIds) {
+    let calls = 0;
+    const provider = createTencentAsrProvider({ client: {
+      async DescribeTaskStatus() { calls += 1; throw new Error('must not query'); },
+    } });
+    await assert.rejects(
+      provider.query({ taskId }),
+      (error) => error && error.code === 'ASR_TASK_ID_INVALID',
+      String(taskId)
+    );
+    assert.equal(calls, 0, String(taskId));
+  }
+});
+
 test('production client prefers runtime-role temporary credentials and fixed regional defaults', async () => {
   const constructed = [];
   class Client {

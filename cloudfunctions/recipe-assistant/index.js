@@ -1,5 +1,6 @@
 const { createRecipeRepository } = require('./repository');
 const { createTencentAsrProvider } = require('./providers/tencent-asr');
+const crypto = require('node:crypto');
 const { normalizeRecipe, validateRecipe } = require('./recipe-schema');
 const {
   createRecipeError,
@@ -39,6 +40,8 @@ const MAX_WORKSPACE_DURATION_MS = 15 * 60 * 1000;
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const MAX_RECORDING_DURATION_MS = 3 * 60 * 1000;
 const RECORDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Longer than the normal cloud invocation path, but short enough to recover a crashed submission promptly.
+const ASR_SUBMIT_LEASE_MS = 2 * 60 * 1000;
 let productionAsrProvider = null;
 
 function configFor(dependencies = {}) {
@@ -286,13 +289,14 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   const fileId = requireValue(event.fileId, 'FILE_REQUIRED', '缺少录音文件');
   const fileApi = dependencies.fileApi;
   const asrProvider = dependencies.asrProvider;
+  const submitToken = createAsrSubmitToken(dependencies);
   const recording = await repository.getRecording(familyId, dishId, recordingId);
   if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
   if (recording.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
-  if (hasUnexpiredAsrTask(recording, now) || recording.status === 'uploading') {
+  if (hasUnexpiredAsrTask(recording, now) || hasActiveSubmitLease(recording, now)) {
     throw createRecipeError('ASR_TASK_IN_PROGRESS', '这段录音正在识别，请稍后刷新');
   }
-  if (recording.status !== 'reserved' && recording.status !== 'failed' && recording.status !== 'transcribing') {
+  if (!isSubmittableRecording(recording)) {
     throw createRecipeError('RECORDING_STATE_INVALID', '录音片段当前不能提交');
   }
   if (!fileIdMatchesCloudPath(fileId, recording.reservedCloudPath)) {
@@ -307,10 +311,10 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   const accepted = await repository.runTransaction(async (transaction) => {
     const current = await transaction.getRecording(familyId, dishId, recordingId);
     if (!current || current.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
-    if (hasUnexpiredAsrTask(current, now) || current.status === 'uploading') {
+    if (hasUnexpiredAsrTask(current, now) || hasActiveSubmitLease(current, now)) {
       throw createRecipeError('ASR_TASK_IN_PROGRESS', '这段录音正在识别，请稍后刷新');
     }
-    if (current.status !== 'reserved' && current.status !== 'failed' && current.status !== 'transcribing') {
+    if (!isSubmittableRecording(current)) {
       throw createRecipeError('RECORDING_STATE_INVALID', '录音片段当前不能提交');
     }
     const state = await transaction.getWorkspaceState(familyId, dishId, current.recordId);
@@ -332,6 +336,7 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     return transaction.setRecording(recordingId, {
       ...current, fileId, byteLength: metadata.byteLength, durationMs: validDuration(metadata.durationMs), durationCommitted: true,
       status: 'uploading', asrTaskId: '', asrRequestId: '', asrSubmittedAt: null, asrExpiresAt: null,
+      asrSubmitToken: submitToken, asrSubmitLeaseExpiresAt: now + ASR_SUBMIT_LEASE_MS,
       errorCode: '', updatedBy: member.memberId, updatedAt: now,
     });
   });
@@ -341,14 +346,22 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
       const url = await temporaryFileUrl(fileApi, fileId);
       task = await asrProvider.submit({ url, fileId, recordingId });
     }
+    requireAsrTaskId(task.taskId, 'ASR_SUBMIT_RESPONSE_INVALID');
   } catch (error) {
-    await repository.runTransaction(async (transaction) => {
+    const disposition = await repository.runTransaction(async (transaction) => {
       const current = await transaction.getRecording(familyId, dishId, recordingId);
-      if (!current || current.status === 'deleted') return current;
-      return transaction.setRecording(recordingId, {
-        ...current, status: 'failed', errorCode: 'ASR_SUBMIT_FAILED', updatedBy: member.memberId, updatedAt: now,
+      if (!current || current.status === 'deleted') return 'deleted';
+      if (current.status !== 'uploading' || current.asrSubmitToken !== submitToken) return 'lost';
+      await transaction.setRecording(recordingId, {
+        ...current, status: 'failed', asrSubmitToken: '', asrSubmitLeaseExpiresAt: null,
+        errorCode: error && error.code === 'ASR_SUBMIT_RESPONSE_INVALID'
+          ? 'ASR_SUBMIT_RESPONSE_INVALID' : 'ASR_SUBMIT_FAILED',
+        updatedBy: member.memberId, updatedAt: now,
       });
+      return 'owned';
     });
+    if (disposition === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
+    if (disposition === 'lost') throw createRecipeError('ASR_SUBMIT_LEASE_LOST', '录音提交已由新的请求接管');
     throw error;
   }
   const updated = await repository.runTransaction(async (transaction) => {
@@ -356,10 +369,15 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     if (!current || current.status === 'deleted') {
       throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
     }
+    if (current.status !== 'uploading' || current.asrSubmitToken !== submitToken) {
+      throw createRecipeError('ASR_SUBMIT_LEASE_LOST', '录音提交已由新的请求接管');
+    }
     return transaction.setRecording(recordingId, {
-      ...current, status: 'transcribing', asrTaskId: task.taskId || '', asrRequestId: task.requestId || '',
+      ...current, status: 'transcribing', asrTaskId: requireAsrTaskId(task.taskId, 'ASR_SUBMIT_RESPONSE_INVALID'),
+      asrRequestId: task.requestId || '',
       asrSubmittedAt: task.submittedAt == null ? now : task.submittedAt,
       asrExpiresAt: task.expiresAt == null ? null : task.expiresAt,
+      asrSubmitToken: '', asrSubmitLeaseExpiresAt: null,
       errorCode: '', updatedBy: member.memberId, updatedAt: now,
     });
   });
@@ -425,6 +443,35 @@ function hasUnexpiredAsrTask(recording, now) {
   if (!recording || recording.status !== 'transcribing' || !recording.asrTaskId) return false;
   const expiresAt = Number(recording.asrExpiresAt);
   return Number.isFinite(expiresAt) && expiresAt > now;
+}
+
+function hasActiveSubmitLease(recording, now) {
+  if (!recording || recording.status !== 'uploading' || !String(recording.asrSubmitToken || '')) return false;
+  const expiresAt = Number(recording.asrSubmitLeaseExpiresAt);
+  return Number.isFinite(expiresAt) && expiresAt > now;
+}
+
+function isSubmittableRecording(recording) {
+  return ['reserved', 'failed', 'transcribing', 'uploading'].includes(recording.status);
+}
+
+function createAsrSubmitToken(dependencies) {
+  const generated = typeof dependencies.asrSubmitTokenGenerator === 'function'
+    ? dependencies.asrSubmitTokenGenerator()
+    : crypto.randomBytes(18).toString('base64url');
+  const token = String(generated || '').trim();
+  if (!token) throw createRecipeError('INTERNAL_ERROR', '菜谱服务暂时不可用');
+  return token;
+}
+
+function requireAsrTaskId(value, code) {
+  const validType = typeof value === 'number'
+    || (typeof value === 'string' && /^\d+$/.test(value));
+  const taskId = Number(value);
+  if (!validType || !Number.isSafeInteger(taskId) || taskId <= 0) {
+    throw createRecipeError(code, '语音识别服务返回了无效任务');
+  }
+  return taskId;
 }
 
 async function addManualText(repository, member, familyId, dishId, event, dependencies, now) {
@@ -587,6 +634,7 @@ async function tombstoneRecording(repository, member, recording, fileApi, now) {
     }
     const tombstone = await transaction.setRecording(current._id, {
       ...current, status: 'deleted', deletedAt: now, audioDeletePending: Boolean(cleanupFileId),
+      asrSubmitToken: '', asrSubmitLeaseExpiresAt: null,
       updatedBy: member.memberId, updatedAt: now,
     });
     return { tombstone, cleanupFileId };

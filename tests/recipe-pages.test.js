@@ -155,6 +155,39 @@ function createRecordingWx(initialEntries = []) {
   };
 }
 
+test('record recipe status view model exposes the four product labels and safe actions', () => {
+  const { buildRecordRecipeState } = require('../utils/recipe-view-model');
+
+  assert.deepEqual(buildRecordRecipeState(null, 'record-1'), {
+    state: 'none', label: '暂无做法', actionLabel: '', draftId: '', versionId: '', actionable: false,
+  });
+  assert.equal(buildRecordRecipeState({
+    recordings: [{ status: 'transcribing' }], draft: null,
+  }, 'record-1').label, '语音转写中');
+  assert.deepEqual(buildRecordRecipeState({
+    recordings: [{ _id: 'recording-1', status: 'ready', editedTranscript: '少放盐' }], draft: null,
+  }, 'record-1'), {
+    state: 'draft', label: '菜谱草稿待确认', actionLabel: '继续整理',
+    draftId: '', versionId: '', actionable: true,
+  });
+  assert.deepEqual(buildRecordRecipeState({
+    recordings: [{ status: 'ready' }],
+    draft: { _id: 'draft-1', recordId: 'record-1', status: 'ready' },
+  }, 'record-1'), {
+    state: 'draft', label: '菜谱草稿待确认', actionLabel: '继续整理',
+    draftId: 'draft-1', versionId: '', actionable: true,
+  });
+  assert.deepEqual(buildRecordRecipeState({
+    recordings: [{ status: 'ready' }],
+    draft: {
+      _id: 'draft-1', recordId: 'record-1', status: 'confirmed', confirmedVersionId: 'version-1',
+    },
+  }, 'record-1'), {
+    state: 'confirmed', label: '已保存本次做法', actionLabel: '查看本次做法',
+    draftId: 'draft-1', versionId: 'version-1', actionable: true,
+  });
+});
+
 test('manual recipe pages are registered, package-safe, and keep history read only', () => {
   const appConfig = JSON.parse(read('app.json'));
   const draftConfig = JSON.parse(read('pages/recipe-draft/recipe-draft.json'));
@@ -712,6 +745,108 @@ test('draft clears its autosave timer on unload and after successful confirmatio
   }
 });
 
+test('draft page reloads server state on show and presents sources and explicit uncertainties', async () => {
+  const originalGetApp = global.getApp;
+  const calls = [];
+  const recipe = completeRecipe({
+    ingredients: [{ name: '鸡蛋', amountText: '', note: '', uncertain: true }],
+    uncertainties: [{ fieldPath: 'ingredients[0].amountText', message: '原话没有给出精确用量，请确认' }],
+  });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getDraft(payload) {
+          calls.push({ action: 'getDraft', payload });
+          return { draft: draftFixture({ recordId: 'record-1', sourceType: 'recording', status: 'ready', recipe, sourceRecordingIds: ['recording-1'] }) };
+        },
+        async getRecordWorkspace(payload) {
+          calls.push({ action: 'getRecordWorkspace', payload });
+          return {
+            recordings: [{
+              _id: 'recording-1', sourceType: 'audio', sequence: 1, status: 'ready',
+              rawTranscript: '鸡蛋几个我忘了', editedTranscript: '鸡蛋，具体数量不确定',
+            }],
+            audioUrls: { 'recording-1': 'https://temp.example/recording-1.mp3' },
+          };
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'));
+    await page.onLoad({ familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1' });
+    assert.equal(calls.length, 0, 'onShow owns state recovery so first display and re-entry use one path');
+    await page.onShow();
+
+    assert.deepEqual(calls.map((item) => item.action), ['getDraft', 'getRecordWorkspace']);
+    assert.equal(page.data.draftStatus, 'ready');
+    assert.equal(page.data.sourceRecordings.length, 1);
+    assert.equal(page.data.sourceRecordings[0].rawTranscript, '鸡蛋几个我忘了');
+    assert.equal(page.data.uncertaintyItems[0].fieldLabel, '食材 1 · 用量');
+
+    let scheduled = 0;
+    page.scheduleAutosave = () => { scheduled += 1; };
+    page.acknowledgeUncertainty({ currentTarget: { dataset: { index: 0 } } });
+    assert.deepEqual(page.data.recipe.uncertainties, []);
+    assert.equal(scheduled, 1);
+
+    await page.onShow();
+    assert.equal(calls.filter((item) => item.action === 'getDraft').length, 2);
+    const template = read('pages/recipe-draft/recipe-draft.wxml');
+    for (const copy of ['正在整理，可以离开页面', '重试整理', '继续手动编辑', '原始转写', '人工修订', '已确认']) {
+      assert.match(template, new RegExp(copy));
+    }
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('failed draft can switch to manual editing or retry without a background timer', async () => {
+  const originalGetApp = global.getApp;
+  const organize = deferred();
+  const calls = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getDraft() {
+          return { draft: draftFixture({
+            recordId: 'record-1', sourceType: 'recording', status: 'failed',
+            sourceRecordingIds: [], lastErrorCode: 'AI_HTTP_ERROR',
+          }) };
+        },
+        async getRecordWorkspace() {
+          return { recordings: [{ _id: 'recording-1', sequence: 1, status: 'ready', editedTranscript: '少放盐' }], audioUrls: {} };
+        },
+        organizeDraft(payload) {
+          calls.push(payload);
+          return organize.promise;
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'));
+    await page.onLoad({ familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1' });
+    await page.onShow();
+    assert.equal(page.data.draftStatus, 'failed');
+    assert.equal(page.data.manualEditing, false);
+
+    page.continueManualEditing();
+    assert.equal(page.data.manualEditing, true);
+    const retry = page.retryOrganize();
+    assert.equal(page.data.draftStatus, 'organizing');
+    assert.equal(page.data.stateMessage, '正在整理，可以离开页面');
+    assert.deepEqual(calls[0].sourceRecordingIds, ['recording-1']);
+    assert.equal(page.organizeTimer, undefined, 'organizing recovery must rely on onShow rather than polling');
+
+    organize.resolve({ draft: draftFixture({ recordId: 'record-1', status: 'ready', recipe: completeRecipe() }) });
+    await retry;
+    assert.equal(page.data.draftStatus, 'ready');
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
 test('recipe page loads an immutable selected version and edits main by cloning a draft', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
@@ -1064,6 +1199,132 @@ test('recording workspace supports transcript edits, manual text, retry, delete,
     for (const label of ['等待上传', '转写中', '可校对', '转写失败']) assert.match(read('components/recipe-recording-workspace/recipe-recording-workspace.js'), new RegExp(label));
   } finally {
     global.getApp = originalGetApp;
+  }
+});
+
+test('recording workspace lists incomplete fragments and starts one recoverable organize request', async () => {
+  const originalGetApp = global.getApp;
+  const organize = deferred();
+  const calls = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        organizeDraft(payload) {
+          calls.push(payload);
+          return organize.promise;
+        },
+      },
+    },
+  });
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', draftId: 'draft-1',
+      clips: [
+        { key: 'recording-1', recordingId: 'recording-1', sequence: 1, status: 'ready', editedTranscript: '鸡蛋三个' },
+        { key: 'recording-2', recordingId: 'recording-2', sequence: 2, status: 'transcribing', editedTranscript: '' },
+      ],
+    });
+    component.emitWorkspaceChange(component.data.clips);
+    assert.equal(component.data.readyToOrganize, false);
+    assert.deepEqual(component.data.pendingLabels, ['第 2 段（转写中）']);
+    assert.equal(await component.organizeDraft(), false);
+    assert.equal(calls.length, 0);
+
+    component.setClips([
+      { key: 'recording-1', recordingId: 'recording-1', sequence: 1, status: 'ready', editedTranscript: '鸡蛋三个' },
+      { key: 'recording-2', recordingId: 'recording-2', sequence: 2, status: 'ready', editedTranscript: '中火炒熟' },
+    ]);
+    const request = component.organizeDraft();
+    const duplicate = await component.organizeDraft();
+    assert.equal(duplicate, false);
+    assert.equal(component.data.organizeRequestPending, true);
+    assert.equal(component.data.draftStatus, 'organizing');
+    assert.equal(component.data.organizeMessage, '正在整理，可以离开页面');
+    assert.deepEqual(calls, [{
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      sourceRecordingIds: ['recording-1', 'recording-2'],
+    }]);
+    assert.deepEqual(component.events.filter((item) => item.name === 'opendraft').at(-1).detail, { draftId: 'draft-1' });
+
+    organize.resolve({ draft: draftFixture({ recordId: 'record-1', status: 'ready' }) });
+    assert.equal(await request, true);
+    assert.equal(component.data.organizeRequestPending, false);
+    assert.equal(component.data.draftStatus, 'ready');
+
+    const template = read('components/recipe-recording-workspace/recipe-recording-workspace.wxml');
+    assert.match(template, /整理成菜谱/);
+    assert.match(template, /正在整理，可以离开页面/);
+    assert.match(template, /尚未就绪/);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('dish record recipe status failures remain isolated and successful entries stay actionable', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const navigations = [];
+  const draftCreates = [];
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ family: { id: 'family-internal-1' }, members: [] }) },
+      recipeAssistant: {
+        async getRecordWorkspace({ recordId }) {
+          if (recordId === 'record-failed') throw new Error('temporary');
+          if (recordId === 'record-ready') {
+            return {
+              recordings: [{ _id: 'recording-ready', status: 'ready', editedTranscript: '少放盐' }],
+              draft: null,
+            };
+          }
+          return {
+            recordings: [{ status: 'ready' }],
+            draft: {
+              _id: 'draft-ok', recordId: 'record-ok', status: 'confirmed', confirmedVersionId: 'version-ok',
+            },
+          };
+        },
+        async createManualDraft(payload) {
+          draftCreates.push(payload);
+          return { draft: draftFixture({ _id: 'draft-created', recordId: payload.recordId }) };
+        },
+      },
+    },
+  });
+  global.wx = { navigateTo({ url }) { navigations.push(url); }, showToast() {} };
+  try {
+    const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'), {
+      dishId: 'dish-1',
+      history: [
+        { id: 'record-ok', recordDateLabel: '8月18日' },
+        { id: 'record-failed', recordDateLabel: '8月17日' },
+        { id: 'record-ready', recordDateLabel: '8月16日' },
+      ],
+    });
+    await page.refreshRecordRecipeStates();
+
+    assert.equal(page.data.history[0].recipeLabel, '已保存本次做法');
+    assert.equal(page.data.history[0].recipeActionLabel, '查看本次做法');
+    assert.equal(page.data.history[1].recipeStateError, '做法状态暂时无法读取');
+    assert.equal(page.data.history[1].recordDateLabel, '8月17日');
+    page.openRecordRecipe({ currentTarget: { dataset: { recordId: 'record-ok' } } });
+    assert.equal(navigations[0], '/pages/recipe/recipe?familyId=family-internal-1&dishId=dish-1&versionId=version-ok');
+    await page.openRecordRecipe({ currentTarget: { dataset: { recordId: 'record-ready' } } });
+    assert.deepEqual(draftCreates, [{
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-ready', sourceType: 'manual',
+    }]);
+    assert.equal(navigations[1], '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=draft-created');
+
+    const template = read('pages/dish-edit/dish-edit.wxml');
+    for (const copy of ['暂无做法', '语音转写中', '菜谱草稿待确认', '已保存本次做法']) {
+      assert.match(read('utils/recipe-view-model.js'), new RegExp(copy));
+    }
+    assert.match(template, /bindtap="openRecordRecipe"/);
+    assert.match(template, /bindtap="retryRecordRecipeState"/);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
   }
 });
 

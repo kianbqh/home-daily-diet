@@ -118,6 +118,15 @@ function visibleStatus(clip) {
   return 'pending';
 }
 
+function incompleteLabel(clip, index) {
+  const sequence = Number(clip && clip.sequence);
+  const label = `第 ${Number.isFinite(sequence) && sequence > 0 ? sequence : index + 1} 段`;
+  if (visibleStatus(clip) === 'ready' && !String(clip && clip.editedTranscript || '').trim()) {
+    return `${label}（请补充文字）`;
+  }
+  return `${label}（${STATUS_LABELS[visibleStatus(clip)]}）`;
+}
+
 function decorateClip(value) {
   const clip = { ...value };
   const displayStatus = visibleStatus(clip);
@@ -205,6 +214,10 @@ Component({
     hasContent: false,
     readyToOrganize: false,
     pendingCount: 0,
+    pendingLabels: [],
+    draftStatus: '',
+    organizeRequestPending: false,
+    organizeMessage: '',
   },
 
   observers: {
@@ -216,7 +229,8 @@ Component({
         this.activeWorkspaceKey = nextKey;
         if (this.localReservations) this.localReservations.clear();
         this.setData({
-          clips: [], draftId: '', manualTextDraft: '', workspaceError: '', asrUnavailable: false,
+          clips: [], draftId: '', draftStatus: '', manualTextDraft: '', workspaceError: '',
+          asrUnavailable: false, organizeRequestPending: false, organizeMessage: '', pendingLabels: [],
         });
       }
       this.loadLocalClips();
@@ -492,11 +506,25 @@ Component({
       });
       const localOnly = current.filter((clip) => clip.localId && !remoteIds.has(clip.recordingId));
       const draft = workspace.draft || null;
-      this.setData({
-        draftId: String(draft && (draft._id || draft.id) || ''),
-        workspaceError: '',
-      });
+      this.applyDraftState(draft);
+      this.setData({ workspaceError: '' });
       this.setClips([...remote, ...localOnly]);
+    },
+
+    applyDraftState(draft) {
+      const status = String(draft && draft.status || '');
+      const messages = {
+        organizing: '正在整理，可以离开页面',
+        ready: '菜谱草稿已整理，等待确认',
+        failed: '整理失败，可重试或继续手动编辑',
+        confirmed: '本次做法已经保存',
+      };
+      this.setData({
+        draftId: String(draft && (draft._id || draft.id) || this.data.draftId || ''),
+        draftStatus: status,
+        organizeMessage: messages[status] || '',
+        organizeRequestPending: false,
+      });
     },
 
     applyRefreshedRecordings(recordings) {
@@ -520,14 +548,70 @@ Component({
       const list = Array.isArray(clips) ? clips : [];
       const manualDraft = String(this.data.manualTextDraft || '').trim();
       const hasContent = list.length > 0 || Boolean(manualDraft);
-      const pendingCount = list.filter((clip) => visibleStatus(clip) !== 'ready').length;
-      const usable = list.filter((clip) => String(clip.editedTranscript || '').trim());
-      const readyToOrganize = usable.length > 0
-        && pendingCount === 0
-        && list.every((clip) => String(clip.editedTranscript || '').trim());
+      const incomplete = list
+        .map((clip, index) => ({ clip, index }))
+        .filter(({ clip }) => visibleStatus(clip) !== 'ready'
+          || !String(clip.editedTranscript || '').trim());
+      const pendingCount = incomplete.length;
+      const pendingLabels = incomplete.map(({ clip, index }) => incompleteLabel(clip, index));
+      const usable = list.filter((clip) => visibleStatus(clip) === 'ready'
+        && String(clip.editedTranscript || '').trim()
+        && clip.recordingId);
+      const readyToOrganize = usable.length > 0 && pendingCount === 0 && usable.length === list.length;
       const detail = { hasContent, readyToOrganize, pendingCount };
-      this.setData(detail);
+      this.setData({ ...detail, pendingLabels });
       this.triggerEvent('workspacechange', detail);
+    },
+
+    async organizeDraft() {
+      if (this.data.disabled || this.data.organizeRequestPending
+        || this.data.draftStatus === 'organizing' || !this.data.readyToOrganize) return false;
+      const assistant = this.getRecipeAssistant();
+      const draftId = String(this.data.draftId || '');
+      if (!assistant || typeof assistant.organizeDraft !== 'function') {
+        showToast('智能整理需要启用 CloudBase');
+        return false;
+      }
+      if (!draftId) {
+        showToast('请先保存本次记录，再整理菜谱');
+        return false;
+      }
+      const sourceRecordingIds = (this.data.clips || [])
+        .filter((clip) => visibleStatus(clip) === 'ready' && String(clip.editedTranscript || '').trim())
+        .map((clip) => String(clip.recordingId || ''))
+        .filter(Boolean);
+      if (!sourceRecordingIds.length) return false;
+
+      this.setData({
+        organizeRequestPending: true,
+        draftStatus: 'organizing',
+        organizeMessage: '正在整理，可以离开页面',
+      });
+      this.emitWorkspaceChange(this.data.clips || []);
+      this.triggerEvent('opendraft', { draftId });
+      try {
+        const result = await assistant.organizeDraft({
+          familyId: this.data.familyId,
+          dishId: this.data.dishId,
+          draftId,
+          sourceRecordingIds,
+        });
+        if (result && result.draft) this.applyDraftState(result.draft);
+        else this.setData({ organizeRequestPending: false });
+        this.emitWorkspaceChange(this.data.clips || []);
+        return true;
+      } catch (error) {
+        this.setData({ organizeRequestPending: false });
+        const loaded = await this.loadWorkspace({ refresh: false });
+        if (!loaded) {
+          this.setData({
+            draftStatus: 'organizing',
+            organizeMessage: '正在整理，可以离开页面',
+          });
+        }
+        this.emitWorkspaceChange(this.data.clips || []);
+        return false;
+      }
     },
 
     onTranscriptInput(event) {
@@ -723,7 +807,8 @@ Component({
       if (this.localReservations) this.localReservations.clear();
       this.destroyAudioContext();
       this.setData({
-        clips: [], manualTextDraft: '', draftId: '', workspaceError: '',
+        clips: [], manualTextDraft: '', draftId: '', draftStatus: '', workspaceError: '',
+        organizeRequestPending: false, organizeMessage: '', pendingLabels: [],
         recording: false, elapsedLabel: '00:00', remainingLabel: '03:00',
       });
       this.emitWorkspaceChange([]);

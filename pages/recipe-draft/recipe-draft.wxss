@@ -9,6 +9,176 @@
   padding: 30rpx;
 }
 
+.source-card {
+  margin-top: 26rpx;
+  padding: 28rpx;
+}
+
+.source-heading,
+.source-item-heading,
+.uncertainty-item,
+.draft-failure-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+}
+
+.source-summary,
+.source-label,
+.source-text,
+.draft-progress-card text,
+.uncertainty-summary > text,
+.uncertainty-message {
+  display: block;
+  color: #777b74;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.source-summary {
+  margin-top: 6rpx;
+}
+
+.source-toggle {
+  flex: none;
+  color: #8a6c58;
+  font-size: 24rpx;
+}
+
+.source-list {
+  margin-top: 20rpx;
+  border-top: 1rpx solid #ece7de;
+}
+
+.source-item {
+  padding: 22rpx 0;
+  border-bottom: 1rpx solid #f0ece4;
+}
+
+.source-item-heading {
+  color: #353a34;
+  font-size: 26rpx;
+  font-weight: 700;
+}
+
+.source-play,
+.uncertainty-confirm {
+  flex: none;
+  margin: 0;
+  padding: 0 20rpx;
+  border: 0;
+  border-radius: 999rpx;
+  background: #eaf2ed;
+  color: #315b49;
+  font-size: 22rpx;
+  line-height: 54rpx;
+}
+
+.source-play::after,
+.uncertainty-confirm::after {
+  border: 0;
+}
+
+.source-label {
+  margin-top: 16rpx;
+  color: #9a8a7d;
+  font-size: 21rpx;
+}
+
+.source-text {
+  margin-top: 4rpx;
+  color: #444a43;
+  white-space: pre-wrap;
+}
+
+.draft-progress-card,
+.uncertainty-summary {
+  margin-top: 22rpx;
+  padding: 26rpx;
+  border-radius: 22rpx;
+  background: #edf4ef;
+  color: #315b49;
+}
+
+.draft-progress-card.status-organizing {
+  background: #eef2f7;
+  color: #526982;
+}
+
+.draft-progress-card.status-failed {
+  background: #fff1ec;
+  color: #934735;
+}
+
+.draft-progress-card.status-confirmed {
+  background: #e8f1e9;
+}
+
+.draft-progress-title {
+  margin-bottom: 8rpx;
+  font-size: 28rpx;
+  font-weight: 700;
+}
+
+.draft-failure-actions {
+  margin-top: 20rpx;
+}
+
+.draft-failure-actions button {
+  flex: 1;
+  margin: 0;
+  font-size: 24rpx;
+}
+
+.confirmed-action {
+  width: 100%;
+  margin-top: 20rpx;
+}
+
+.organize-draft-action {
+  width: 100%;
+  margin-top: 20rpx;
+}
+
+.organize-waiting-copy {
+  margin-top: 14rpx;
+}
+
+.uncertainty-summary {
+  background: #fff8e9;
+  color: #7b6040;
+}
+
+.uncertainty-summary > text {
+  margin-top: 8rpx;
+  color: #806c52;
+}
+
+.uncertainty-item {
+  align-items: flex-start;
+  margin-top: 18rpx;
+  padding-top: 18rpx;
+  border-top: 1rpx solid #eadfc9;
+}
+
+.uncertainty-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.uncertainty-field {
+  display: block;
+  color: #5e4d39;
+  font-size: 24rpx;
+  font-weight: 700;
+}
+
+.uncertainty-message {
+  margin-top: 5rpx;
+  color: #806c52;
+}
+
 .draft-state-card {
   color: #777b74;
   text-align: center;

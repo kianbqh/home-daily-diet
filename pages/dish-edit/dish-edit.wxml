@@ -82,6 +82,17 @@
         </view>
         <text class="history-meta">{{item.reviewLabel}}</text>
         <text wx:if="{{item.myReview}}" class="history-own-review">我给了 {{item.myReview.stars}} 星</text>
+        <view class="history-recipe-state state-{{item.recipeState || 'none'}}">
+          <text wx:if="{{item.recipeStateLoading}}">做法状态读取中…</text>
+          <block wx:elif="{{item.recipeStateError}}">
+            <text>{{item.recipeStateError}}</text>
+            <button class="history-recipe-retry" data-record-id="{{item.id}}" bindtap="retryRecordRecipeState">重试</button>
+          </block>
+          <block wx:else>
+            <text>{{item.recipeLabel || '暂无做法'}}</text>
+            <button wx:if="{{item.recipeActionLabel}}" class="history-recipe-action" data-record-id="{{item.id}}" bindtap="openRecordRecipe">{{item.recipeActionLabel}}</button>
+          </block>
+        </view>
         <button wx:if="{{item.canReview}}" class="history-review-button" data-record-id="{{item.id}}" bindtap="startReview">{{item.myReview ? '修改这次评价' : '评价这次制作'}}</button>
       </view>
     </view>

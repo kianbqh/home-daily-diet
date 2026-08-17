@@ -49,6 +49,21 @@
     <button class="secondary-action" disabled="{{disabled || !manualTextDraft}}" bindtap="addManualText">保存文字说明</button>
   </view>
 
-  <view wx:if="{{pendingCount}}" class="pending-summary">还有 {{pendingCount}} 段尚未就绪，可先保存本次记录后再回来。</view>
-  <button wx:if="{{draftId}}" class="secondary-action draft-action" disabled="{{disabled}}" bindtap="openDraft">打开菜谱草稿</button>
+  <view wx:if="{{pendingCount}}" class="pending-summary">
+    <text>还有 {{pendingCount}} 段尚未就绪：</text>
+    <text wx:for="{{pendingLabels}}" wx:key="*this" class="pending-item">{{item}}</text>
+  </view>
+  <view wx:if="{{organizeMessage}}" class="organize-message status-{{draftStatus}}">
+    <text wx:if="{{draftStatus === 'organizing'}}">正在整理，可以离开页面</text>
+    <text wx:else>{{organizeMessage}}</text>
+  </view>
+
+  <view wx:if="{{draftStatus === 'failed'}}" class="draft-actions">
+    <button class="record-button organize-action" disabled="{{disabled || organizeRequestPending || !readyToOrganize}}" bindtap="organizeDraft">重试整理</button>
+    <button class="secondary-action draft-action" disabled="{{disabled}}" bindtap="openDraft">继续手动编辑</button>
+  </view>
+  <block wx:else>
+    <button wx:if="{{readyToOrganize && draftId && draftStatus !== 'ready' && draftStatus !== 'confirmed'}}" class="record-button organize-action" disabled="{{disabled || organizeRequestPending || draftStatus === 'organizing'}}" bindtap="organizeDraft">整理成菜谱</button>
+    <button wx:if="{{draftId && (draftStatus === 'organizing' || draftStatus === 'ready' || draftStatus === 'confirmed')}}" class="secondary-action draft-action" disabled="{{disabled}}" bindtap="openDraft">{{draftStatus === 'confirmed' ? '查看本次做法' : '打开菜谱草稿'}}</button>
+  </block>
 </view>

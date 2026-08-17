@@ -10,6 +10,41 @@
   </view>
 
   <block wx:else>
+    <view wx:if="{{sourceLoading || sourceError || sourceRecordings.length}}" class="card-surface source-card">
+      <view class="source-heading" bindtap="toggleSources">
+        <view>
+          <view class="section-title">整理来源</view>
+          <text class="source-summary">{{sourceLoading ? '正在读取来源…' : sourceError || sourceRecordings.length + ' 段原始记录'}}</text>
+        </view>
+        <text class="source-toggle">{{sourceExpanded ? '收起' : '展开'}}</text>
+      </view>
+      <view wx:if="{{sourceExpanded}}" class="source-list">
+        <view wx:for="{{sourceRecordings}}" wx:key="id" class="source-item">
+          <view class="source-item-heading">
+            <text>{{item.title}}</text>
+            <button wx:if="{{item.audioUrl}}" class="source-play" data-id="{{item.id}}" bindtap="playSource">{{playingSourceId === item.id ? '播放中' : '播放原始录音'}}</button>
+          </view>
+          <text class="source-label">原始转写</text>
+          <text class="source-text">{{item.rawTranscript || '无原始转写'}}</text>
+          <text class="source-label">人工修订</text>
+          <text class="source-text">{{item.editedTranscript || '未修改'}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view wx:if="{{draftStatus}}" class="draft-progress-card status-{{draftStatus}}">
+      <view class="draft-progress-title">{{draftStatus === 'organizing' ? '正在智能整理' : draftStatus === 'ready' ? '草稿待确认' : draftStatus === 'failed' ? '整理未完成' : draftStatus === 'confirmed' ? '已经保存' : '手动草稿'}}</view>
+      <text wx:if="{{draftStatus === 'organizing'}}">正在整理，可以离开页面</text>
+      <text wx:else>{{stateMessage}}</text>
+      <view wx:if="{{draftStatus === 'failed' && !manualEditing}}" class="draft-failure-actions">
+        <button class="primary-button" loading="{{organizeRequestPending}}" disabled="{{organizeRequestPending}}" bindtap="retryOrganize">重试整理</button>
+        <button class="secondary-button" disabled="{{organizeRequestPending}}" bindtap="continueManualEditing">继续手动编辑</button>
+      </view>
+      <button wx:if="{{draftStatus === 'editing' && draft.recordId && canOrganizeSources}}" class="primary-button organize-draft-action" loading="{{organizeRequestPending}}" disabled="{{organizeRequestPending}}" bindtap="retryOrganize">整理成菜谱</button>
+      <text wx:if="{{draftStatus === 'editing' && draft.recordId && sourceRecordings.length && !canOrganizeSources}}" class="organize-waiting-copy">还有来源片段尚未就绪，全部转写并校对后即可整理。</text>
+      <button wx:if="{{draftStatus === 'confirmed'}}" class="secondary-button confirmed-action" bindtap="openConfirmedRecipe">查看已保存做法</button>
+    </view>
+
     <view class="save-status {{saveState}}">
       <text class="save-dot"></text>
       <text>{{saveMessage || '等待修改'}}</text>
@@ -23,9 +58,21 @@
       </view>
     </view>
 
-    <recipe-editor value="{{recipe}}" disabled="{{confirming}}" bind:change="onRecipeChange" bind:validation="onRecipeValidation" />
+    <view wx:if="{{uncertaintyItems.length && draftStatus !== 'organizing' && draftStatus !== 'confirmed'}}" class="uncertainty-summary">
+      <view class="section-title">还有 {{uncertaintyItems.length}} 处需要家人确认</view>
+      <text>这些内容来自原话中的缺失或含糊信息，修改字段后仍请逐项点击“已确认”。</text>
+      <view wx:for="{{uncertaintyItems}}" wx:key="key" class="uncertainty-item">
+        <view class="uncertainty-copy">
+          <text class="uncertainty-field">{{item.fieldLabel}}</text>
+          <text class="uncertainty-message">{{item.message}}</text>
+        </view>
+        <button class="uncertainty-confirm" data-index="{{item.index}}" bindtap="acknowledgeUncertainty">已确认</button>
+      </view>
+    </view>
 
-    <view wx:if="{{confirmMode === 'record'}}" class="card-surface confirm-mode-card">
+    <recipe-editor wx:if="{{draftStatus !== 'organizing' && draftStatus !== 'confirmed' && (draftStatus !== 'failed' || manualEditing)}}" value="{{recipe}}" disabled="{{confirming}}" bind:change="onRecipeChange" bind:validation="onRecipeValidation" />
+
+    <view wx:if="{{draftStatus !== 'organizing' && draftStatus !== 'confirmed' && (draftStatus !== 'failed' || manualEditing) && confirmMode === 'record'}}" class="card-surface confirm-mode-card">
       <view class="section-title">这次确认后怎么保存</view>
       <view class="confirm-choice {{!publishAsMain ? 'selected' : ''}} {{publishLocked ? 'disabled' : ''}}" bindtap="chooseRecordOnly">
         <view class="choice-radio"></view>
@@ -38,12 +85,12 @@
       <view wx:if="{{publishLocked}}" class="publish-hint">当前还没有主菜谱，本次确认将同时建立家庭主菜谱。</view>
     </view>
 
-    <view wx:else class="card-surface main-confirm-card">
+    <view wx:elif="{{draftStatus !== 'organizing' && draftStatus !== 'confirmed' && (draftStatus !== 'failed' || manualEditing)}}" class="card-surface main-confirm-card">
       <view class="section-title">发布新的主菜谱版本</view>
       <text>确认后家人会看到这份最新做法，之前的版本仍保留在历史中。</text>
     </view>
 
-    <view wx:if="{{!validation.ok}}" class="validation-card">菜谱还有必填内容没有补全，请检查食材名称和步骤说明。</view>
-    <button class="primary-button confirm-button" loading="{{confirming}}" disabled="{{confirming || !validation.ok}}" bindtap="confirmRecipe">确认保存</button>
+    <view wx:if="{{draftStatus !== 'organizing' && draftStatus !== 'confirmed' && (draftStatus !== 'failed' || manualEditing) && !validation.ok}}" class="validation-card">菜谱还有必填内容没有补全，请检查食材名称和步骤说明。</view>
+    <button wx:if="{{draftStatus !== 'organizing' && draftStatus !== 'confirmed' && (draftStatus !== 'failed' || manualEditing)}}" class="primary-button confirm-button" loading="{{confirming}}" disabled="{{confirming || !validation.ok}}" bindtap="confirmRecipe">确认保存</button>
   </block>
 </view>

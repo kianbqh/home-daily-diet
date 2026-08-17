@@ -306,6 +306,48 @@
   font-size: 22rpx;
 }
 
+.history-recipe-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12rpx;
+  margin-top: 12rpx;
+  padding: 12rpx 14rpx;
+  border-radius: 14rpx;
+  background: #f2f0eb;
+  color: #72786f;
+  font-size: 22rpx;
+}
+
+.history-recipe-state.state-transcribing {
+  background: #edf1f6;
+  color: #566b82;
+}
+
+.history-recipe-state.state-draft,
+.history-recipe-state.state-confirmed {
+  background: #eaf2ed;
+  color: #315b49;
+}
+
+.history-recipe-action,
+.history-recipe-retry {
+  flex: none;
+  margin: 0;
+  padding: 0 16rpx;
+  border: 0;
+  border-radius: 999rpx;
+  background: rgba(255, 255, 255, .72);
+  color: inherit;
+  font-size: 21rpx;
+  line-height: 48rpx;
+}
+
+.history-recipe-action::after,
+.history-recipe-retry::after {
+  border: 0;
+}
+
 .history-review-button {
   display: inline-block;
   margin-top: 16rpx;

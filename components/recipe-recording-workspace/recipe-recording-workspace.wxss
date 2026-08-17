@@ -90,7 +90,8 @@
 }
 
 .workspace-message,
-.pending-summary {
+.pending-summary,
+.organize-message {
   display: block;
   margin-top: 18rpx;
   padding: 18rpx 20rpx;
@@ -99,6 +100,34 @@
   color: #7c5f2d;
   font-size: 24rpx;
   line-height: 1.5;
+}
+
+.pending-item {
+  display: block;
+  margin-top: 6rpx;
+}
+
+.organize-message {
+  background: #eaf2ed;
+  color: #315b49;
+}
+
+.organize-message.status-failed {
+  background: #fff0eb;
+  color: #934735;
+}
+
+.draft-actions {
+  display: flex;
+  gap: 16rpx;
+}
+
+.draft-actions button {
+  flex: 1;
+}
+
+.organize-action {
+  margin-top: 20rpx;
 }
 
 .clip-list {

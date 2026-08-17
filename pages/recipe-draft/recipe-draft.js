@@ -66,6 +66,18 @@ function sourceRecordingView(recording, audioUrls, index) {
   };
 }
 
+function isOrganizableSource(recording) {
+  return String(recording && recording.status || '') === 'ready'
+    && Boolean(String(recording && recording.editedTranscript || '').trim())
+    && Boolean(String(recording && (recording._id || recording.id) || ''));
+}
+
+function organizeSourceIds(recordings) {
+  return (Array.isArray(recordings) ? recordings : [])
+    .filter(isOrganizableSource)
+    .map((recording) => String(recording._id || recording.id));
+}
+
 Page({
   data: {
     familyId: '',
@@ -92,6 +104,7 @@ Page({
     sourceLoading: false,
     sourceError: '',
     sourceRecordings: [],
+    organizeSourceIds: [],
     canOrganizeSources: false,
     uncertaintyItems: [],
     playingSourceId: '',
@@ -115,6 +128,15 @@ Page({
     return this.loadDraft();
   },
 
+  hasProtectedLocalWork() {
+    return Boolean(
+      this.recipeDirty
+      || this.saveDrainPromise
+      || this.data.localConflictRecipe
+      || this.data.saveState === 'conflict'
+    );
+  },
+
   onUnload() {
     this.clearAutosaveTimer();
     this.draftLoadGeneration = (this.draftLoadGeneration || 0) + 1;
@@ -127,6 +149,7 @@ Page({
   },
 
   async loadDraft(options = {}) {
+    if (!options.allowLocalOverwrite && this.hasProtectedLocalWork()) return false;
     const recipeAssistant = this.getRecipeAssistant();
     if (!recipeAssistant) {
       this.setData({
@@ -166,7 +189,7 @@ Page({
         uncertaintyItems: uncertaintyViews(recipe),
       });
       this.applyDraftMode();
-      if (!options.keepConflict) this.setData({ localConflictRecipe: null });
+      if (options.clearConflict === true) this.setData({ localConflictRecipe: null });
       await this.loadSources(draft, generation, recipeAssistant);
       return true;
     } catch (error) {
@@ -181,9 +204,15 @@ Page({
     const recordId = String(draft && draft.recordId || '');
     if (!recordId || !recipeAssistant || typeof recipeAssistant.getRecordWorkspace !== 'function') {
       if (generation === this.draftLoadGeneration) {
-        this.setData({ sourceLoading: false, sourceError: '', sourceRecordings: [], canOrganizeSources: false });
+        this.setData({
+          sourceLoading: false,
+          sourceError: '',
+          sourceRecordings: [],
+          organizeSourceIds: [],
+          canOrganizeSources: false,
+        });
       }
-      return;
+      return false;
     }
     this.setData({ sourceLoading: true, sourceError: '' });
     try {
@@ -192,30 +221,36 @@ Page({
         dishId: this.data.dishId,
         recordId,
       });
-      if (generation !== this.draftLoadGeneration) return;
+      if (generation !== this.draftLoadGeneration) return false;
+      const allRecordings = Array.isArray(workspace && workspace.recordings) ? workspace.recordings : [];
       const selectedIds = new Set((Array.isArray(draft.sourceRecordingIds) ? draft.sourceRecordingIds : [])
         .map((value) => String(value)));
-      const recordings = (Array.isArray(workspace && workspace.recordings) ? workspace.recordings : [])
-        .filter((item) => !selectedIds.size || selectedIds.has(String(item && (item._id || item.id) || '')))
+      const draftStatus = String(draft && draft.status || 'editing');
+      const limitToSelected = selectedIds.size > 0 && !['editing', 'failed'].includes(draftStatus);
+      const recordings = allRecordings
+        .filter((item) => !limitToSelected || selectedIds.has(String(item && (item._id || item.id) || '')))
         .map((item, index) => sourceRecordingView(item, workspace && workspace.audioUrls, index));
-      const canOrganizeSources = recordings.length > 0 && recordings.every((item) => (
-        item.status === 'ready' && String(item.editedTranscript || '').trim()
-      ));
+      const nextOrganizeSourceIds = organizeSourceIds(allRecordings);
+      const canOrganizeSources = nextOrganizeSourceIds.length > 0;
       this.setData({
         sourceLoading: false,
         sourceError: '',
         sourceRecordings: recordings,
+        organizeSourceIds: nextOrganizeSourceIds,
         canOrganizeSources,
       });
+      return true;
     } catch (error) {
       if (generation === this.draftLoadGeneration) {
         this.setData({
           sourceLoading: false,
           sourceError: '来源片段暂时无法读取',
           sourceRecordings: [],
+          organizeSourceIds: [],
           canOrganizeSources: false,
         });
       }
+      return false;
     }
   },
 
@@ -311,15 +346,17 @@ Page({
       showToast('智能整理需要启用 CloudBase');
       return false;
     }
-    let sourceRecordingIds = (Array.isArray(this.data.draft.sourceRecordingIds)
-      ? this.data.draft.sourceRecordingIds
-      : [])
-      .map((value) => String(value))
-      .filter(Boolean);
-    if (!sourceRecordingIds.length && this.data.canOrganizeSources) {
-      sourceRecordingIds = (this.data.sourceRecordings || []).map((item) => String(item.id || '')).filter(Boolean);
-    }
+    this.setData({ organizeRequestPending: true });
+    const refreshed = await this.loadSources(
+      this.data.draft,
+      this.draftLoadGeneration || 0,
+      recipeAssistant,
+    );
+    const sourceRecordingIds = refreshed
+      ? (this.data.organizeSourceIds || []).map((value) => String(value)).filter(Boolean)
+      : [];
     if (!sourceRecordingIds.length) {
+      this.setData({ organizeRequestPending: false });
       showToast('没有可重新整理的来源文字');
       return false;
     }
@@ -461,7 +498,7 @@ Page({
       ? cloneRecipe(this.data.localConflictRecipe)
       : cloneRecipe(this.data.recipe);
     this.setData({ localConflictRecipe });
-    await this.loadDraft({ keepConflict: true });
+    await this.loadDraft({ allowLocalOverwrite: true });
   },
 
   reapplyLocalConflict() {

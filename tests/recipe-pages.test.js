@@ -655,6 +655,54 @@ test('refreshing a conflicted draft keeps the local copy available to reapply', 
   }
 });
 
+test('draft onShow never overwrites dirty, saving, or conflicted local work', async () => {
+  const originalGetApp = global.getApp;
+  const calls = [];
+  const remoteRecipe = completeRecipe({ familyNotes: ['云端旧内容'] });
+  const localRecipe = completeRecipe({ familyNotes: ['尚未保存的本地内容'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getDraft() {
+          calls.push('getDraft');
+          return { draft: draftFixture({ revision: 4, recipe: remoteRecipe }) };
+        },
+      },
+    },
+  });
+  try {
+    const definition = loadPage('pages/recipe-draft/recipe-draft.js');
+
+    const dirtyPage = createPageInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: localRecipe }), recipe: localRecipe,
+    });
+    dirtyPage.recipeDirty = true;
+    await dirtyPage.onShow();
+    assert.deepEqual(dirtyPage.data.recipe, localRecipe);
+
+    const savingPage = createPageInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: localRecipe }), recipe: localRecipe,
+    });
+    savingPage.saveDrainPromise = Promise.resolve(true);
+    await savingPage.onShow();
+    assert.deepEqual(savingPage.data.recipe, localRecipe);
+
+    const conflictPage = createPageInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: localRecipe }), recipe: localRecipe,
+      localConflictRecipe: localRecipe, saveState: 'conflict',
+    });
+    await conflictPage.onShow();
+    assert.deepEqual(conflictPage.data.recipe, localRecipe);
+    assert.deepEqual(conflictPage.data.localConflictRecipe, localRecipe);
+    assert.equal(calls.length, 0);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
 test('draft confirmation modes preserve record defaults and force required main publication', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
@@ -790,6 +838,7 @@ test('draft page reloads server state on show and presents sources and explicit 
     assert.deepEqual(page.data.recipe.uncertainties, []);
     assert.equal(scheduled, 1);
 
+    page.recipeDirty = false;
     await page.onShow();
     assert.equal(calls.filter((item) => item.action === 'getDraft').length, 2);
     const template = read('pages/recipe-draft/recipe-draft.wxml');
@@ -811,11 +860,18 @@ test('failed draft can switch to manual editing or retry without a background ti
         async getDraft() {
           return { draft: draftFixture({
             recordId: 'record-1', sourceType: 'recording', status: 'failed',
-            sourceRecordingIds: [], lastErrorCode: 'AI_HTTP_ERROR',
+            sourceRecordingIds: ['recording-failed', 'recording-empty'], lastErrorCode: 'AI_HTTP_ERROR',
           }) };
         },
         async getRecordWorkspace() {
-          return { recordings: [{ _id: 'recording-1', sequence: 1, status: 'ready', editedTranscript: '少放盐' }], audioUrls: {} };
+          return {
+            recordings: [
+              { _id: 'recording-failed', sequence: 1, status: 'failed', editedTranscript: '旧的失败文本' },
+              { _id: 'recording-empty', sequence: 2, status: 'ready', editedTranscript: '  ' },
+              { _id: 'recording-ready', sequence: 3, status: 'ready', editedTranscript: '少放盐' },
+            ],
+            audioUrls: {},
+          };
         },
         organizeDraft(payload) {
           calls.push(payload);
@@ -834,9 +890,10 @@ test('failed draft can switch to manual editing or retry without a background ti
     page.continueManualEditing();
     assert.equal(page.data.manualEditing, true);
     const retry = page.retryOrganize();
+    await flushPromises();
     assert.equal(page.data.draftStatus, 'organizing');
     assert.equal(page.data.stateMessage, '正在整理，可以离开页面');
-    assert.deepEqual(calls[0].sourceRecordingIds, ['recording-1']);
+    assert.deepEqual(calls[0].sourceRecordingIds, ['recording-ready']);
     assert.equal(page.organizeTimer, undefined, 'organizing recovery must rely on onShow rather than polling');
 
     organize.resolve({ draft: draftFixture({ recordId: 'record-1', status: 'ready', recipe: completeRecipe() }) });
@@ -1256,6 +1313,48 @@ test('recording workspace lists incomplete fragments and starts one recoverable 
     assert.match(template, /整理成菜谱/);
     assert.match(template, /正在整理，可以离开页面/);
     assert.match(template, /尚未就绪/);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('recording workspace blocks failed fragments but ignores blank ready fragments when choosing organize sources', async () => {
+  const originalGetApp = global.getApp;
+  const calls = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async organizeDraft(payload) {
+          calls.push(payload);
+          return { draft: draftFixture({ recordId: 'record-1', status: 'ready' }) };
+        },
+      },
+    },
+  });
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', draftId: 'draft-1',
+      clips: [
+        { key: 'ready', recordingId: 'recording-ready', sequence: 1, status: 'ready', editedTranscript: '鸡蛋三个' },
+        { key: 'failed', recordingId: 'recording-failed', sequence: 2, status: 'failed', editedTranscript: '失败片段里残留的文本' },
+      ],
+    });
+
+    component.emitWorkspaceChange(component.data.clips);
+    assert.equal(component.data.readyToOrganize, false);
+    assert.deepEqual(component.data.pendingLabels, ['第 2 段（转写失败）']);
+    assert.equal(await component.organizeDraft(), false);
+    assert.equal(calls.length, 0);
+
+    component.setClips([
+      { key: 'ready', recordingId: 'recording-ready', sequence: 1, status: 'ready', editedTranscript: '鸡蛋三个' },
+      { key: 'blank', recordingId: 'recording-blank', sequence: 2, status: 'ready', editedTranscript: '   ' },
+    ]);
+    assert.equal(component.data.readyToOrganize, true);
+    assert.deepEqual(component.data.pendingLabels, ['第 2 段（请补充文字）']);
+    assert.equal(await component.organizeDraft(), true);
+    assert.deepEqual(calls[0].sourceRecordingIds, ['recording-ready']);
   } finally {
     global.getApp = originalGetApp;
   }

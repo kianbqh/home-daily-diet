@@ -110,12 +110,16 @@ function createStorageAdapter(api, clock) {
 
 function visibleStatus(clip) {
   const status = String(clip && clip.status || '');
-  const text = String(clip && clip.editedTranscript || '').trim();
-  if (clip && clip.sourceType === 'manual_text') return 'ready';
-  if (status === 'ready' || (status === 'failed' && text)) return 'ready';
+  if (status === 'ready') return 'ready';
   if (status === 'failed') return 'failed';
   if (status === 'transcribing' || status === 'uploading') return 'transcribing';
   return 'pending';
+}
+
+function isOrganizableClip(clip) {
+  return String(clip && clip.status || '') === 'ready'
+    && Boolean(String(clip && clip.editedTranscript || '').trim())
+    && Boolean(String(clip && clip.recordingId || ''));
 }
 
 function incompleteLabel(clip, index) {
@@ -554,10 +558,9 @@ Component({
           || !String(clip.editedTranscript || '').trim());
       const pendingCount = incomplete.length;
       const pendingLabels = incomplete.map(({ clip, index }) => incompleteLabel(clip, index));
-      const usable = list.filter((clip) => visibleStatus(clip) === 'ready'
-        && String(clip.editedTranscript || '').trim()
-        && clip.recordingId);
-      const readyToOrganize = usable.length > 0 && pendingCount === 0 && usable.length === list.length;
+      const usable = list.filter(isOrganizableClip);
+      const hasBlockingStatus = list.some((clip) => String(clip && clip.status || '') !== 'ready');
+      const readyToOrganize = usable.length > 0 && !hasBlockingStatus;
       const detail = { hasContent, readyToOrganize, pendingCount };
       this.setData({ ...detail, pendingLabels });
       this.triggerEvent('workspacechange', detail);
@@ -577,7 +580,7 @@ Component({
         return false;
       }
       const sourceRecordingIds = (this.data.clips || [])
-        .filter((clip) => visibleStatus(clip) === 'ready' && String(clip.editedTranscript || '').trim())
+        .filter(isOrganizableClip)
         .map((clip) => String(clip.recordingId || ''))
         .filter(Boolean);
       if (!sourceRecordingIds.length) return false;

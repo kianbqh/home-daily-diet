@@ -1,8 +1,16 @@
 const { createRecipeRepository } = require('./repository');
 const { createTencentAsrProvider } = require('./providers/tencent-asr');
+const {
+  ALLOWED_MODELS: ALLOWED_RECIPE_MODELS,
+  DEFAULT_MODEL: DEFAULT_RECIPE_MODEL,
+  DEFAULT_PROMPT_VERSION: DEFAULT_RECIPE_PROMPT_VERSION,
+  createTokenHubProvider,
+} = require('./providers/tokenhub');
 const crypto = require('node:crypto');
 const { normalizeRecipe, validateRecipe } = require('./recipe-schema');
 const {
+  buildSourceText,
+  createInputHash,
   createRecipeError,
   publicMessage,
   requireRevision,
@@ -10,6 +18,7 @@ const {
   requireValue,
   runtimeErrorCode,
   sanitize,
+  sanitizeTokenUsage,
 } = require('./logic');
 
 const DEFAULT_CONFIG = Object.freeze({
@@ -42,7 +51,11 @@ const MAX_RECORDING_DURATION_MS = 3 * 60 * 1000;
 const RECORDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // Longer than the normal cloud invocation path, but short enough to recover a crashed submission promptly.
 const ASR_SUBMIT_LEASE_MS = 2 * 60 * 1000;
+const ORGANIZE_LEASE_MS = 10 * 60 * 1000;
+const MAX_SOURCE_CHARACTERS = 30_000;
 let productionAsrProvider = null;
+let productionRecipeProvider = null;
+let productionRecipeProviderKey = '';
 
 function configFor(dependencies = {}) {
   return { ...DEFAULT_CONFIG, ...(dependencies.config || {}) };
@@ -193,6 +206,9 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         break;
       case 'createManualDraft':
         data = await createManualDraft(repository, guards, member, familyId, dishId, event, nowMs(dependencies));
+        break;
+      case 'organizeDraft':
+        data = await organizeDraft(repository, member, familyId, dishId, event, dependencies, nowMs(dependencies));
         break;
       case 'getDraft':
         data = await getDraft(repository, familyId, dishId, event.draftId);
@@ -843,6 +859,238 @@ async function createManualDraft(repository, guards, member, familyId, dishId, e
   return { draft };
 }
 
+async function organizeDraft(repository, member, familyId, dishId, event, dependencies, now) {
+  const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
+  const sourceRecordingIds = uniqueRecordingIds(event.sourceRecordingIds);
+  const modelName = configuredRecipeModel(dependencies);
+  const promptVersion = configuredPromptVersion(dependencies);
+  const leaseId = createOrganizeLeaseId(dependencies);
+
+  const acquired = await repository.runTransaction(async (transaction) => {
+    const draft = await transaction.getDraft({ familyId, dishId, draftId });
+    if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+    if (!String(draft.recordId || '').trim()) {
+      throw createRecipeError('ACTION_INVALID', '这个草稿没有可整理的制作记录', 'validate');
+    }
+    if (draft.status === 'confirmed') {
+      throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已经确认，不能重新整理');
+    }
+    if (draft.status === 'cancelled') {
+      throw createRecipeError('ACTION_INVALID', '这个菜谱草稿已经取消');
+    }
+    if (!sourceRecordingIds.length) {
+      throw createRecipeError('SOURCE_REQUIRED', '请先选择要整理的文字片段', 'validate');
+    }
+    if (sourceRecordingIds.length > MAX_RECORDINGS) {
+      throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '每次制作最多保留 10 段录音', 'validate');
+    }
+    if (draft.status === 'organizing' && organizeLeaseIsActive(draft, now)) {
+      throw createRecipeError('ORGANIZE_IN_PROGRESS', '菜谱正在整理，请稍后再试');
+    }
+
+    const recordings = await transaction.getRecordingsByIds(
+      familyId, dishId, String(draft.recordId), sourceRecordingIds
+    );
+    if (recordings.some((recording) => !recording || recording.status === 'deleted')) {
+      throw createRecipeError('RECORDING_NOT_FOUND', '找不到选中的录音片段', 'authorize');
+    }
+    if (recordings.some((recording) => recording.status !== 'ready')) {
+      throw createRecipeError('RECORDINGS_PENDING', '还有录音片段尚未完成转写');
+    }
+
+    const orderedRecordings = recordings.slice().sort(compareRecordingSequence);
+    const sourceCharacterCount = orderedRecordings.reduce(
+      (count, recording) => count + Array.from(String(recording.editedTranscript || '').trim()).length,
+      0,
+    );
+    if (sourceCharacterCount === 0) {
+      throw createRecipeError('SOURCE_REQUIRED', '请先补充要整理的文字内容', 'validate');
+    }
+    if (sourceCharacterCount > MAX_SOURCE_CHARACTERS) {
+      throw createRecipeError('SOURCE_TOO_LONG', '整理文字不能超过 30000 个字符', 'validate');
+    }
+    const sourceText = buildSourceText(orderedRecordings);
+    const inputHash = createInputHash({ sourceText, modelName, promptVersion });
+    if (draft.status === 'ready' && draft.inputHash === inputHash) {
+      return { reused: true, draft };
+    }
+
+    const organizingDraft = await transaction.setDraft(draftId, {
+      ...draft,
+      sourceType: 'recording',
+      sourceRecordingIds: orderedRecordings.map((recording) => recording._id),
+      status: 'organizing',
+      inputHash,
+      organizeLeaseId: leaseId,
+      organizeLeaseExpiresAt: now + ORGANIZE_LEASE_MS,
+      modelProvider: 'tokenhub',
+      modelName,
+      promptVersion,
+      modelRequestId: '',
+      modelUsage: {},
+      lastErrorCode: '',
+      updatedBy: member.memberId,
+      updatedAt: now,
+    });
+    return { reused: false, draft: organizingDraft, sourceText, inputHash, leaseId };
+  });
+
+  if (acquired.reused) return { draft: acquired.draft, reused: true };
+
+  try {
+    const provider = recipeProviderFor(dependencies, modelName, promptVersion);
+    const result = await provider.organize({
+      sourceText: acquired.sourceText,
+      userId: familyModelUserId(familyId),
+    });
+    const recipe = normalizeAndValidateRecipe(result && result.recipe);
+    return repository.runTransaction(async (transaction) => {
+      const current = await transaction.getDraft({ familyId, dishId, draftId });
+      if (!current) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+      if (!organizeLeaseMatches(current, acquired.leaseId, acquired.inputHash)) {
+        return { draft: current, stale: true };
+      }
+      const readyDraft = clearOrganizeLease({
+        ...current,
+        status: 'ready',
+        recipe,
+        revision: (Number(current.revision) || 0) + 1,
+        modelProvider: 'tokenhub',
+        modelName: String(result && result.modelName || modelName).slice(0, 200),
+        promptVersion,
+        modelRequestId: String(result && result.requestId || '').slice(0, 200),
+        modelUsage: sanitizeTokenUsage(result && result.usage),
+        lastErrorCode: '',
+        updatedBy: member.memberId,
+        updatedAt: nowMs(dependencies),
+      });
+      return { draft: await transaction.setDraft(draftId, readyDraft), stale: false };
+    });
+  } catch (error) {
+    const errorCode = safeOrganizeErrorCode(error);
+    const failed = await repository.runTransaction(async (transaction) => {
+      const current = await transaction.getDraft({ familyId, dishId, draftId });
+      if (!current) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+      if (!organizeLeaseMatches(current, acquired.leaseId, acquired.inputHash)) {
+        return { draft: current, stale: true };
+      }
+      const failedDraft = clearOrganizeLease({
+        ...current,
+        status: 'failed',
+        lastErrorCode: errorCode,
+        updatedBy: member.memberId,
+        updatedAt: nowMs(dependencies),
+      });
+      return { draft: await transaction.setDraft(draftId, failedDraft), stale: false };
+    });
+    if (failed.stale) return failed;
+    throw createRecipeError(errorCode, organizeErrorMessage(errorCode));
+  }
+}
+
+function uniqueRecordingIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))];
+}
+
+function compareRecordingSequence(left, right) {
+  const leftSequence = Number(left && left.sequence);
+  const rightSequence = Number(right && right.sequence);
+  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
+  return String(left && left._id || '').localeCompare(String(right && right._id || ''));
+}
+
+function configuredRecipeModel(dependencies) {
+  const modelName = String(
+    Object.hasOwn(dependencies, 'recipeModel')
+      ? dependencies.recipeModel
+      : process.env.RECIPE_MODEL || DEFAULT_RECIPE_MODEL,
+  ).trim() || DEFAULT_RECIPE_MODEL;
+  if (!ALLOWED_RECIPE_MODELS.includes(modelName)) {
+    throw createRecipeError('AI_NOT_CONFIGURED', 'AI 整理服务尚未正确配置');
+  }
+  return modelName;
+}
+
+function configuredPromptVersion(dependencies) {
+  return String(
+    Object.hasOwn(dependencies, 'recipePromptVersion')
+      ? dependencies.recipePromptVersion
+      : process.env.RECIPE_PROMPT_VERSION || DEFAULT_RECIPE_PROMPT_VERSION,
+  ).trim() || DEFAULT_RECIPE_PROMPT_VERSION;
+}
+
+function createOrganizeLeaseId(dependencies) {
+  const generated = typeof dependencies.organizeLeaseIdGenerator === 'function'
+    ? dependencies.organizeLeaseIdGenerator()
+    : crypto.randomUUID();
+  const value = String(generated || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(value)) {
+    throw createRecipeError('INTERNAL_ERROR', '无法创建整理任务');
+  }
+  return `organize-${value.replace(/^organize-/, '')}`;
+}
+
+function organizeLeaseIsActive(draft, now) {
+  return Boolean(String(draft && draft.organizeLeaseId || '').trim())
+    && timestampMs(draft && draft.organizeLeaseExpiresAt) > now;
+}
+
+function organizeLeaseMatches(draft, leaseId, inputHash) {
+  return draft && draft.status === 'organizing'
+    && draft.organizeLeaseId === leaseId
+    && draft.inputHash === inputHash;
+}
+
+function clearOrganizeLease(draft) {
+  const cleaned = { ...draft };
+  delete cleaned.organizeLeaseId;
+  delete cleaned.organizeLeaseExpiresAt;
+  return cleaned;
+}
+
+function timestampMs(value) {
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function recipeProviderFor(dependencies, modelName, promptVersion) {
+  if (!ALLOWED_RECIPE_MODELS.includes(modelName)) {
+    throw createRecipeError('AI_NOT_CONFIGURED', 'AI 整理服务尚未正确配置');
+  }
+  const provider = dependencies.recipeProvider
+    || getProductionRecipeProvider(modelName, promptVersion);
+  if (!provider || typeof provider.organize !== 'function') {
+    throw createRecipeError('AI_NOT_CONFIGURED', 'AI 整理服务尚未正确配置');
+  }
+  return provider;
+}
+
+function familyModelUserId(familyId) {
+  return crypto.createHash('sha256').update(String(familyId || ''), 'utf8').digest('hex');
+}
+
+function safeOrganizeErrorCode(error) {
+  const code = runtimeErrorCode(error);
+  if (code === 'RECIPE_INVALID') return 'AI_OUTPUT_INVALID';
+  return [
+    'AI_NOT_CONFIGURED', 'AI_HTTP_ERROR', 'AI_OUTPUT_INVALID', 'AI_OUTPUT_TOO_LARGE',
+  ].includes(code) ? code : 'INTERNAL_ERROR';
+}
+
+function organizeErrorMessage(code) {
+  const messages = {
+    AI_NOT_CONFIGURED: 'AI 整理服务尚未配置',
+    AI_HTTP_ERROR: 'AI 整理服务暂时不可用',
+    AI_OUTPUT_INVALID: 'AI 整理结果不符合要求，请重试或手动编辑',
+    AI_OUTPUT_TOO_LARGE: 'AI 整理结果过长，请精简文字后重试',
+    INTERNAL_ERROR: '菜谱整理暂时失败，请稍后重试',
+  };
+  return messages[code] || messages.INTERNAL_ERROR;
+}
+
 async function getDraft(repository, familyId, dishId, rawDraftId) {
   const draftId = requireValue(rawDraftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
   const draft = await repository.getDraft({ familyId, dishId, draftId });
@@ -857,7 +1105,7 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
   return repository.runTransaction(async (transaction) => {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
-    if (draft.revision !== revision || draft.status === 'confirmed') {
+    if (draft.revision !== revision || draft.status === 'confirmed' || draft.status === 'organizing') {
       throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试');
     }
     const updated = await transaction.setDraft(draftId, {
@@ -880,6 +1128,9 @@ async function confirmDraft(repository, member, familyId, dishId, event, now) {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     const pointer = await transaction.getRecipePointer(familyId, dishId);
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+    if (draft.status === 'organizing') {
+      throw createRecipeError('DRAFT_CONFLICT', '菜谱正在整理，请稍后再确认');
+    }
     if (draft.revision !== revision) {
       throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试');
     }
@@ -1207,10 +1458,14 @@ async function main(event = {}, context = {}) {
       submit(input) { return getProductionAsrProvider().submit(input); },
       query(input) { return getProductionAsrProvider().query(input); },
     };
+    const recipeProvider = {
+      organize(input) { return getProductionRecipeProvider().organize(input); },
+    };
     return handleAction(event, requestContext, {
       db,
       fileApi,
       asrProvider,
+      recipeProvider,
       now: Date.now,
       logger: console,
       startedAt,
@@ -1232,6 +1487,18 @@ async function main(event = {}, context = {}) {
 function getProductionAsrProvider() {
   if (!productionAsrProvider) productionAsrProvider = createTencentAsrProvider();
   return productionAsrProvider;
+}
+
+function getProductionRecipeProvider(
+  modelName = process.env.RECIPE_MODEL || DEFAULT_RECIPE_MODEL,
+  promptVersion = process.env.RECIPE_PROMPT_VERSION || DEFAULT_RECIPE_PROMPT_VERSION,
+) {
+  const key = JSON.stringify([String(modelName), String(promptVersion), String(process.env.TOKENHUB_API_KEY || '')]);
+  if (!productionRecipeProvider || productionRecipeProviderKey !== key) {
+    productionRecipeProvider = createTokenHubProvider({ model: modelName, promptVersion });
+    productionRecipeProviderKey = key;
+  }
+  return productionRecipeProvider;
 }
 
 function createCloudFileApi(cloud) {
@@ -1329,6 +1596,8 @@ module.exports = {
   RECORD_ACTION_CONTRACTS,
   RECORD_ID_ACTIONS,
   RECORD_SCOPED_ACTIONS,
+  buildSourceText,
+  createInputHash,
   createCloudFileApi,
   createGuards,
   handleAction,

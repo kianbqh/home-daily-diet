@@ -103,6 +103,15 @@ function createRecipeRepository(db, config) {
     return recordings.filter((item) => item.sourceType !== 'workspace_state');
   }
 
+  async function getRecordingsByIds(familyId, dishId, recordId, recordingIds) {
+    const recordings = [];
+    for (const recordingId of Array.isArray(recordingIds) ? recordingIds : []) {
+      const recording = await getRecording({ familyId, dishId, recordId, recordingId });
+      recordings.push(recording);
+    }
+    return recordings;
+  }
+
   async function setRecording(id, data) {
     return id
       ? setDocument(config.recordingCollection, id, data)
@@ -135,6 +144,7 @@ function createRecipeRepository(db, config) {
     listVersions,
     createVersion,
     getRecording,
+    getRecordingsByIds,
     listRecordings,
     setRecording,
     getWorkspaceState,

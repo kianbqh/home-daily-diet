@@ -1,3 +1,5 @@
+const crypto = require('node:crypto');
+
 function createRecipeError(code, message, stage = 'action') {
   const error = new Error(message);
   error.name = 'RecipeAssistantError';
@@ -42,6 +44,50 @@ function withoutSystemId(data) {
   return payload;
 }
 
+function buildSourceText(recordings) {
+  return (Array.isArray(recordings) ? recordings : [])
+    .slice()
+    .sort(compareRecordings)
+    .map((recording, index) => {
+      const sequence = positiveInteger(recording && recording.sequence) || index + 1;
+      return `【第 ${sequence} 段】\n${String(recording && recording.editedTranscript || '').trim()}`;
+    })
+    .join('\n\n');
+}
+
+function createInputHash({ sourceText, modelName, promptVersion } = {}) {
+  const payload = JSON.stringify([
+    String(modelName || ''),
+    String(promptVersion || ''),
+    String(sourceText || ''),
+  ]);
+  return crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
+}
+
+function sanitizeTokenUsage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const allowed = [
+    'prompt_tokens', 'completion_tokens', 'total_tokens',
+    'input_tokens', 'output_tokens',
+  ];
+  return Object.fromEntries(allowed.flatMap((key) => {
+    const count = Number(value[key]);
+    return Number.isFinite(count) && count >= 0 ? [[key, count]] : [];
+  }));
+}
+
+function compareRecordings(left, right) {
+  const leftSequence = positiveInteger(left && left.sequence) || Number.MAX_SAFE_INTEGER;
+  const rightSequence = positiveInteger(right && right.sequence) || Number.MAX_SAFE_INTEGER;
+  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
+  return String(left && (left._id || left.id) || '').localeCompare(String(right && (right._id || right.id) || ''));
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 0;
+}
+
 function sanitize(value) {
   if (Array.isArray(value)) return value.map(sanitize);
   if (!value || typeof value !== 'object') return value;
@@ -56,10 +102,14 @@ function sensitiveKey(key) {
   return normalized.includes('openid')
     || normalized === 'asrsubmittoken'
     || normalized === 'asrsubmitleaseexpiresat'
+    || normalized === 'organizeleaseid'
+    || normalized === 'organizeleaseexpiresat'
     || /urls?$/.test(normalized);
 }
 
 module.exports = {
+  buildSourceText,
+  createInputHash,
   createRecipeError,
   publicMessage,
   requireRevision,
@@ -67,5 +117,6 @@ module.exports = {
   requireValue,
   runtimeErrorCode,
   sanitize,
+  sanitizeTokenUsage,
   withoutSystemId,
 };

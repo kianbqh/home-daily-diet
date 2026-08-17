@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
+const crypto = require('node:crypto');
 const validRecipe = require('./fixtures/recipe-contract.json');
 
 const {
@@ -8,6 +9,8 @@ const {
   RECORD_ACTION_CONTRACTS,
   RECORD_ID_ACTIONS,
   RECORD_SCOPED_ACTIONS,
+  buildSourceText,
+  createInputHash,
   createCloudFileApi,
   handleAction,
   main,
@@ -407,7 +410,7 @@ test('organizeDraft derives optional record ownership from the owned draft and i
     [{ draftId: 'draft-other-family', recordId: 'record-1', sourceRecordingIds: ['recording-owned'] }, 'DRAFT_NOT_FOUND', 'foreign family'],
     [{ draftId: 'draft-broken-binding', recordId: 'record-1' }, 'RECORD_NOT_FOUND', 'trusted draft binding'],
     [{ draftId: 'draft-manual', recordId: 'record-deleted' }, 'ACTION_INVALID', 'manual draft'],
-    [{ draftId: 'draft-record', recordId: 'record-deleted' }, 'ACTION_INVALID', 'forged recordId ignored'],
+    [{ draftId: 'draft-record', recordId: 'record-deleted' }, 'SOURCE_REQUIRED', 'forged recordId ignored'],
   ];
 
   for (const [payload, expectedCode, label] of cases) {
@@ -2607,4 +2610,327 @@ test('refreshWorkspace initializes edited text once and cannot resurrect a recor
   assert.equal(initial.editedTranscript, '识别结果1');
   assert.equal(db.records('recipe_recordings').get('deleted').status, 'deleted');
   assert.equal(db.records('recipe_recordings').get('deleted').rawTranscript, '');
+});
+
+function organizeSeed(options = {}) {
+  const seed = baseSeed();
+  const oldRecipe = {
+    ...clone(validRecipe),
+    ingredients: [{ ...clone(validRecipe.ingredients[0]), name: '旧菜谱' }],
+  };
+  seed.recipe_drafts = {
+    'draft-recording': {
+      _id: 'draft-recording', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sourceRecordingIds: [], sourceType: 'manual', status: 'editing', recipe: oldRecipe,
+      baseMainVersionId: '', revision: 0, inputHash: '', modelProvider: '', modelName: '',
+      promptVersion: '', lastErrorCode: '', confirmedVersionId: '', createdBy: 'member-a',
+      createdAt: 1, updatedBy: 'member-a', updatedAt: 1,
+      ...(options.draft || {}),
+    },
+  };
+  seed.recipe_recordings = {
+    'recording-first': {
+      _id: 'recording-first', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sequence: 1, sourceType: 'audio', status: 'ready', rawTranscript: '第一段原文',
+      editedTranscript: '第一段', transcriptRevision: 0, createdBy: 'member-a',
+    },
+    'recording-second': {
+      _id: 'recording-second', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sequence: 2, sourceType: 'manual_text', status: 'ready', rawTranscript: '第二段',
+      editedTranscript: '第二段', transcriptRevision: 0, createdBy: 'member-a',
+    },
+    ...(options.recordings || {}),
+  };
+  return seed;
+}
+
+function organizeEvent(sourceRecordingIds = ['recording-second', 'recording-first']) {
+  return {
+    action: 'organizeDraft', familyId: 'family-a', dishId: 'dish-1',
+    draftId: 'draft-recording', sourceRecordingIds,
+    memberId: 'forged-member', modelName: 'forged-model', inputHash: 'forged-hash',
+    organizeLeaseId: 'forged-lease',
+  };
+}
+
+function organizedRecipe(name = '新菜谱') {
+  return {
+    ...clone(validRecipe),
+    ingredients: [{ ...clone(validRecipe.ingredients[0]), name }],
+  };
+}
+
+test('buildSourceText orders selected recordings and createInputHash is an unambiguous SHA-256', () => {
+  const sourceText = buildSourceText([
+    { _id: 'second', sequence: 2, editedTranscript: '第二段' },
+    { _id: 'first', sequence: 1, editedTranscript: '第一段' },
+  ]);
+  assert.equal(sourceText, '【第 1 段】\n第一段\n\n【第 2 段】\n第二段');
+
+  const input = { sourceText, modelName: 'hy3', promptVersion: 'v1' };
+  const expected = crypto.createHash('sha256')
+    .update(JSON.stringify(['hy3', 'v1', sourceText]), 'utf8')
+    .digest('hex');
+  assert.equal(createInputHash(input), expected);
+  assert.notEqual(createInputHash({ ...input, modelName: 'deepseek-v4-flash' }), expected);
+});
+
+test('organizeDraft rejects pending, empty, and oversized sources before calling the provider', async () => {
+  const cases = [
+    {
+      code: 'RECORDINGS_PENDING',
+      seed: organizeSeed({ recordings: {
+        'recording-second': {
+          _id: 'recording-second', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+          sequence: 2, sourceType: 'audio', status: 'transcribing', editedTranscript: '',
+        },
+      } }),
+      ids: ['recording-first', 'recording-second'],
+    },
+    {
+      code: 'SOURCE_REQUIRED',
+      seed: organizeSeed({ recordings: {
+        'recording-first': {
+          _id: 'recording-first', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+          sequence: 1, sourceType: 'manual_text', status: 'ready', editedTranscript: '   ',
+        },
+      } }),
+      ids: ['recording-first'],
+    },
+    {
+      code: 'SOURCE_TOO_LONG',
+      seed: organizeSeed({ recordings: {
+        'recording-first': {
+          _id: 'recording-first', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+          sequence: 1, sourceType: 'manual_text', status: 'ready', editedTranscript: '菜'.repeat(30_001),
+        },
+      } }),
+      ids: ['recording-first'],
+    },
+  ];
+
+  for (const item of cases) {
+    let calls = 0;
+    const result = await invoke(createMemoryDatabase(item.seed), organizeEvent(item.ids), 'openid-a', {
+      recipeProvider: { async organize() { calls += 1; return { recipe: organizedRecipe() }; } },
+      recipeModel: 'hy3', recipePromptVersion: 'v1',
+      organizeLeaseIdGenerator: () => 'lease-validation',
+    });
+    assert.equal(result.error.code, item.code, item.code);
+    assert.equal(calls, 0, item.code);
+  }
+});
+
+test('organizeDraft stores a ready normalized result and reuses the same input hash without a second model call', async () => {
+  const db = createMemoryDatabase(organizeSeed());
+  let calls = 0;
+  const services = {
+    recipeModel: 'hy3', recipePromptVersion: 'v1',
+    organizeLeaseIdGenerator: () => 'lease-ready',
+    recipeProvider: { async organize(input) {
+      calls += 1;
+      assert.equal(input.sourceText, '【第 1 段】\n第一段\n\n【第 2 段】\n第二段');
+      assert.match(input.userId, /^[a-f0-9]{64}$/);
+      return {
+        recipe: { ...organizedRecipe(), ignored: 'discard-me' },
+        requestId: 'request-model-1', modelName: 'hy3', promptVersion: 'v1',
+        usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19, reasoning: 'do-not-store' },
+      };
+    } },
+  };
+
+  const first = await invoke(db, organizeEvent(), 'openid-a', services);
+  const second = await invoke(db, organizeEvent(), 'openid-a', services);
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(first.data.draft.status, 'ready');
+  assert.equal(first.data.draft.revision, 1);
+  assert.equal(first.data.draft.recipe.ingredients[0].name, '新菜谱');
+  assert.equal(Object.hasOwn(first.data.draft.recipe, 'ignored'), false);
+  assert.deepEqual(first.data.draft.sourceRecordingIds, ['recording-first', 'recording-second']);
+  assert.equal(first.data.draft.modelRequestId, 'request-model-1');
+  assert.deepEqual(first.data.draft.modelUsage, {
+    prompt_tokens: 12, completion_tokens: 7, total_tokens: 19,
+  });
+  assert.equal(Object.hasOwn(first.data.draft, 'organizeLeaseId'), false);
+  assert.equal(second.data.draft.inputHash, first.data.draft.inputHash);
+});
+
+test('organizeDraft enforces an active lease and recovers an expired lease', async () => {
+  const activeDb = createMemoryDatabase(organizeSeed({ draft: {
+    status: 'organizing', organizeLeaseId: 'lease-active', organizeLeaseExpiresAt: 1_001,
+  } }));
+  let activeCalls = 0;
+  const active = await invoke(activeDb, organizeEvent(), 'openid-a', {
+    now: () => 1_000,
+    recipeProvider: { async organize() { activeCalls += 1; return { recipe: organizedRecipe() }; } },
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-new',
+  });
+  assert.equal(active.error.code, 'ORGANIZE_IN_PROGRESS');
+  assert.equal(activeCalls, 0);
+
+  const expiredDb = createMemoryDatabase(organizeSeed({ draft: {
+    status: 'organizing', organizeLeaseId: 'lease-expired', organizeLeaseExpiresAt: 1_000,
+  } }));
+  let expiredCalls = 0;
+  const recovered = await invoke(expiredDb, organizeEvent(), 'openid-a', {
+    now: () => 1_000,
+    recipeProvider: { async organize() {
+      expiredCalls += 1;
+      return { recipe: organizedRecipe('恢复菜谱'), requestId: 'recovered', modelName: 'hy3', promptVersion: 'v1', usage: {} };
+    } },
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-recovered',
+  });
+  assert.equal(recovered.ok, true);
+  assert.equal(expiredCalls, 1);
+  assert.equal(recovered.data.draft.recipe.ingredients[0].name, '恢复菜谱');
+});
+
+test('organizeDraft failure preserves the previous recipe and transcript and stores only a public error code', async () => {
+  const db = createMemoryDatabase(organizeSeed());
+  const privateMessage = 'upstream included private transcript 第一段 and key sk-secret';
+  const result = await invoke(db, organizeEvent(), 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-failed',
+    recipeProvider: { async organize() {
+      const error = new Error(privateMessage);
+      error.name = 'TokenHubProviderError';
+      error.code = 'AI_HTTP_ERROR';
+      throw error;
+    } },
+  });
+
+  const stored = db.records('recipe_drafts').get('draft-recording');
+  assert.equal(result.error.code, 'AI_HTTP_ERROR');
+  assert.equal(stored.status, 'failed');
+  assert.equal(stored.lastErrorCode, 'AI_HTTP_ERROR');
+  assert.equal(stored.recipe.ingredients[0].name, '旧菜谱');
+  assert.equal(db.records('recipe_recordings').get('recording-first').editedTranscript, '第一段');
+  assert.equal(Object.hasOwn(stored, 'organizeLeaseId'), false);
+  assert.equal(JSON.stringify({ result, stored }).includes(privateMessage), false);
+  assert.equal(JSON.stringify({ result, stored }).includes('sk-secret'), false);
+});
+
+test('a late organizeDraft result cannot overwrite a replacement lease result', async () => {
+  const db = createMemoryDatabase(organizeSeed());
+  let releaseProvider;
+  let announceProvider;
+  const providerStarted = new Promise((resolve) => { announceProvider = resolve; });
+  const organizing = invoke(db, organizeEvent(), 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-old',
+    recipeProvider: { async organize() {
+      announceProvider();
+      return new Promise((resolve) => { releaseProvider = resolve; });
+    } },
+  });
+  await providerStarted;
+  const current = db.records('recipe_drafts').get('draft-recording');
+  await db.collection('recipe_drafts').doc('draft-recording').set({ data: {
+    ...current,
+    status: 'ready', inputHash: 'newer-hash', organizeLeaseId: 'lease-new',
+    organizeLeaseExpiresAt: 999_999, recipe: organizedRecipe('更新后的菜谱'), revision: 4,
+  } });
+  releaseProvider({
+    recipe: organizedRecipe('迟到菜谱'), requestId: 'late', modelName: 'hy3', promptVersion: 'v1', usage: {},
+  });
+
+  const result = await organizing;
+  const stored = db.records('recipe_drafts').get('draft-recording');
+  assert.equal(result.ok, true);
+  assert.equal(stored.recipe.ingredients[0].name, '更新后的菜谱');
+  assert.equal(stored.inputHash, 'newer-hash');
+  assert.equal(stored.organizeLeaseId, 'lease-new');
+  assert.equal(stored.revision, 4);
+});
+
+test('a late organizeDraft failure cannot mark a replacement lease result failed', async () => {
+  const db = createMemoryDatabase(organizeSeed());
+  let rejectProvider;
+  let announceProvider;
+  const providerStarted = new Promise((resolve) => { announceProvider = resolve; });
+  const organizing = invoke(db, organizeEvent(), 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-old-failure',
+    recipeProvider: { async organize() {
+      announceProvider();
+      return new Promise((_resolve, reject) => { rejectProvider = reject; });
+    } },
+  });
+  await providerStarted;
+  const current = db.records('recipe_drafts').get('draft-recording');
+  await db.collection('recipe_drafts').doc('draft-recording').set({ data: {
+    ...current,
+    status: 'ready', inputHash: 'replacement-hash', organizeLeaseId: 'lease-replacement',
+    organizeLeaseExpiresAt: 999_999, recipe: organizedRecipe('替代结果'), revision: 5,
+    lastErrorCode: '',
+  } });
+  const staleError = new Error('private stale failure');
+  staleError.code = 'AI_HTTP_ERROR';
+  rejectProvider(staleError);
+
+  const result = await organizing;
+  const stored = db.records('recipe_drafts').get('draft-recording');
+  assert.equal(result.ok, true);
+  assert.equal(stored.status, 'ready');
+  assert.equal(stored.recipe.ingredients[0].name, '替代结果');
+  assert.equal(stored.inputHash, 'replacement-hash');
+  assert.equal(stored.lastErrorCode, '');
+  assert.equal(stored.revision, 5);
+});
+
+test('organizeDraft rejects an unapproved configured model before acquiring a lease or calling the provider', async () => {
+  const db = createMemoryDatabase(organizeSeed());
+  let calls = 0;
+  const result = await invoke(db, organizeEvent(), 'openid-a', {
+    recipeModel: 'kimi-k2', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'must-not-use',
+    recipeProvider: { async organize() { calls += 1; return { recipe: organizedRecipe() }; } },
+  });
+
+  assert.equal(result.error.code, 'AI_NOT_CONFIGURED');
+  assert.equal(calls, 0);
+  assert.equal(db.records('recipe_drafts').get('draft-recording').status, 'editing');
+  assert.equal(Object.hasOwn(db.records('recipe_drafts').get('draft-recording'), 'organizeLeaseId'), false);
+});
+
+test('organizing drafts reject human update/confirmation and confirmed drafts cannot be organized', async () => {
+  const organizingDb = createMemoryDatabase(organizeSeed({ draft: {
+    status: 'organizing', revision: 2, organizeLeaseId: 'lease-active', organizeLeaseExpiresAt: 999_999,
+  } }));
+  const updated = await invoke(organizingDb, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'draft-recording',
+    revision: 2, recipe: organizedRecipe('人工修改'),
+  });
+  const confirmed = await invoke(organizingDb, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'draft-recording',
+    revision: 2, publishAsMain: false, baseMainVersionId: '',
+  });
+  assert.equal(updated.error.code, 'DRAFT_CONFLICT');
+  assert.equal(confirmed.error.code, 'DRAFT_CONFLICT');
+  assert.equal(organizingDb.records('recipe_drafts').get('draft-recording').recipe.ingredients[0].name, '旧菜谱');
+
+  const confirmedDb = createMemoryDatabase(organizeSeed({ draft: {
+    status: 'confirmed', confirmedVersionId: 'version-1',
+  } }));
+  const organized = await invoke(confirmedDb, organizeEvent(), 'openid-a', {
+    recipeProvider: { async organize() { throw new Error('must not call'); } },
+    recipeModel: 'hy3', recipePromptVersion: 'v1',
+  });
+  assert.equal(organized.error.code, 'DRAFT_CONFLICT');
+});
+
+test('organizeDraft rejects a selected recording outside the draft record without calling the provider', async () => {
+  const seed = organizeSeed({ recordings: {
+    foreign: {
+      _id: 'foreign', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-other',
+      sequence: 3, sourceType: 'manual_text', status: 'ready', editedTranscript: '不应读取',
+    },
+  } });
+  let calls = 0;
+  const result = await invoke(createMemoryDatabase(seed), organizeEvent(['foreign']), 'openid-a', {
+    recipeProvider: { async organize() { calls += 1; return { recipe: organizedRecipe() }; } },
+    recipeModel: 'hy3', recipePromptVersion: 'v1',
+  });
+  assert.equal(result.error.code, 'RECORDING_NOT_FOUND');
+  assert.equal(calls, 0);
+  assert.equal(JSON.stringify(result).includes('不应读取'), false);
 });

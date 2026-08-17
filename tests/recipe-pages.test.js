@@ -851,8 +851,92 @@ test('recording workspace retains a local clip and offers re-upload after upload
     assert.equal(component.data.clips[0].statusLabel, '等待上传');
     assert.equal(component.data.clips[0].uploadFailed, true);
     assert.equal(harness.storageEntries()[0].uploadStatus, 'pending');
+    assert.equal(component.hasPendingLocalClips(), true);
+    assert.equal(await component.finalizeAfterAttach(), false);
+    assert.equal(harness.storageEntries()[0].uploadStatus, 'pending');
+    assert.equal(harness.removedFiles.length, 0);
     assert.match(read('components/recipe-recording-workspace/recipe-recording-workspace.wxml'), /重新上传/);
     definition.lifetimes.detached.call(component);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('submit rejection keeps saved audio recoverable after component and controller recreation', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const harness = createRecordingWx();
+  let recipeAssistant = {
+    async reserveRecording() {
+      return {
+        recordingId: 'recording-submit-failed',
+        cloudPath: 'families/family-internal-1/recipe-audio/recording-submit-failed.mp3',
+      };
+    },
+    async uploadRecording() {
+      return 'cloud://env/families/family-internal-1/recipe-audio/recording-submit-failed.mp3';
+    },
+    async submitRecording() {
+      throw new Error('submit unavailable');
+    },
+  };
+  global.getApp = () => ({ globalData: { recipeAssistant } });
+  global.wx = harness.api;
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const first = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(first);
+    first.startRecording();
+    await harness.recorder.finish({ tempFilePath: 'wxfile://tmp/recoverable.mp3', duration: 1100 });
+    await flushPromises();
+    await flushPromises();
+
+    assert.equal(first.data.clips[0].statusLabel, '转写失败');
+    assert.equal(harness.storageEntries()[0].uploadStatus, 'pending');
+    assert.match(harness.storageEntries()[0].savedFilePath, /recoverable\.mp3$/);
+    assert.equal(harness.removedFiles.length, 0);
+    assert.equal(first.hasPendingLocalClips(), true);
+    definition.lifetimes.detached.call(first);
+
+    recipeAssistant = {
+      async reserveRecording() {
+        return {
+          recordingId: 'recording-submit-retry',
+          cloudPath: 'families/family-internal-1/recipe-audio/recording-submit-retry.mp3',
+        };
+      },
+      async uploadRecording() {
+        return 'cloud://env/families/family-internal-1/recipe-audio/recording-submit-retry.mp3';
+      },
+      async submitRecording(payload) {
+        return {
+          recording: {
+            _id: 'recording-submit-retry', sourceType: 'audio', sequence: 1,
+            status: 'transcribing', fileId: payload.fileId, durationMs: 1100,
+            editedTranscript: '', transcriptRevision: 0,
+          },
+        };
+      },
+    };
+    const second = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(second);
+
+    assert.equal(second.data.clips.length, 1);
+    assert.match(second.data.clips[0].localPath, /recoverable\.mp3$/);
+    assert.equal(second.hasPendingLocalClips(), true);
+    await second.uploadLocalClip(second.data.clips[0].localId);
+
+    assert.equal(harness.storageEntries()[0].uploadStatus, 'uploaded');
+    assert.equal(harness.removedFiles.length, 1);
+    assert.equal(second.hasPendingLocalClips(), false);
+    assert.equal(await second.finalizeAfterAttach(), true);
+    assert.deepEqual(harness.storageEntries(), []);
+    definition.lifetimes.detached.call(second);
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;

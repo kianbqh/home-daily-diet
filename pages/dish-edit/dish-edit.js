@@ -704,13 +704,40 @@ Page({
       return;
     }
     const savingRecord = this.data.isExisting && !this.data.editProfileVisible;
+    let recordWorkspace = null;
+    let recipeAssistant = null;
+    let recordFamilyId = '';
     if (savingRecord) {
       if (this.data.recordWorkspaceBusy) return;
       this.setData({ recordWorkspaceBusy: true });
+      recordWorkspace = this.getRecordingWorkspace();
+      const context = this.getRecipeContext();
+      recipeAssistant = context.recipeAssistant;
+      recordFamilyId = this.currentFamilyId();
+      const hasPendingLocalClips = Boolean(recordWorkspace
+        && typeof recordWorkspace.hasPendingLocalClips === 'function'
+        && recordWorkspace.hasPendingLocalClips());
+      if (hasPendingLocalClips) {
+        this.setData({ recordWorkspaceBusy: false });
+        showToast('仍有录音尚未上传，请重试后再保存');
+        return;
+      }
+      if (this.data.recordWorkspaceHasContent
+        && (!recordFamilyId || !recipeAssistant
+          || typeof recipeAssistant.attachRecordWorkspace !== 'function')) {
+        this.setData({ recordWorkspaceBusy: false });
+        showToast('制作过程尚未连接云端，请稍后再保存');
+        return;
+      }
     }
+    const existingRecord = savingRecord && typeof store.getState === 'function'
+      ? (store.getState().cookingRecords || []).find((item) => (
+        item.id === this.data.recordIdDraft && item.dishId === this.data.dishId
+      )) || null
+      : null;
     let image = '';
     try {
-      image = await this.uploadCurrentImage();
+      image = existingRecord ? String(existingRecord.image || '') : await this.uploadCurrentImage();
     } catch (error) {
       if (savingRecord) this.setData({ recordWorkspaceBusy: false });
       showToast('照片上传失败，请重试');
@@ -763,23 +790,29 @@ Page({
         category: this.data.selectedCategory,
         tags,
         image,
-        recordedAt: isoForDate(this.data.recordDate),
-        mealType,
+        recordedAt: existingRecord ? existingRecord.recordedAt : isoForDate(this.data.recordDate),
+        mealType: existingRecord ? existingRecord.mealType : mealType,
       };
       if (this.data.isExisting) {
-        store.addCookingRecord({ ...payload, id: this.data.recordIdDraft, dishId: this.data.dishId });
-        const familyId = this.currentFamilyId();
-        const { recipeAssistant } = this.getRecipeContext();
-        if (familyId && recipeAssistant && typeof recipeAssistant.attachRecordWorkspace === 'function') {
+        if (typeof store.addCookingRecordAndWait !== 'function') {
+          throw new Error('家庭云端保存暂时不可用');
+        }
+        await store.addCookingRecordAndWait({
+          ...payload, id: this.data.recordIdDraft, dishId: this.data.dishId,
+        });
+        let workspaceAttached = false;
+        if (recordFamilyId && recipeAssistant && typeof recipeAssistant.attachRecordWorkspace === 'function') {
           await recipeAssistant.attachRecordWorkspace({
-            familyId,
+            familyId: recordFamilyId,
             dishId: this.data.dishId,
             recordId: this.data.recordIdDraft,
           });
+          workspaceAttached = true;
         }
-        const workspace = this.getRecordingWorkspace();
-        if (workspace && typeof workspace.clearLocalClips === 'function') {
-          await workspace.clearLocalClips();
+        if (workspaceAttached && recordWorkspace
+          && typeof recordWorkspace.finalizeAfterAttach === 'function') {
+          const finalized = await recordWorkspace.finalizeAfterAttach();
+          if (!finalized) throw new Error('仍有录音尚未上传，请重试后再保存');
         }
         this.resetRecordEntry();
         this.finishAndGoBack('这次记录已追加');

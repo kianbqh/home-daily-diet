@@ -172,6 +172,12 @@ function createStore(options = {}) {
     }
   }
 
+  function familyContextStaleError() {
+    const error = new Error('家庭已切换，本次保存结果已失效');
+    error.code = 'FAMILY_CONTEXT_STALE';
+    return error;
+  }
+
   function imageCacheKey(familyId, fileId) {
     return `${familyId}\n${fileId}`;
   }
@@ -287,12 +293,36 @@ function createStore(options = {}) {
       });
   }
 
-  function commit(nextState) {
+  function commitWithCloudSave(nextState) {
     state = nextState;
     localRevision += 1;
+    const snapshot = state;
+    const revision = localRevision;
+    const context = captureFamilyContext();
     storage.saveState(state);
     notify();
-    queueCloudSave(state, localRevision, captureFamilyContext()).catch(() => {});
+    return {
+      snapshot,
+      context,
+      save: queueCloudSave(snapshot, revision, context),
+    };
+  }
+
+  function commit(nextState) {
+    const operation = commitWithCloudSave(nextState);
+    operation.save.catch(() => {});
+    return operation.snapshot;
+  }
+
+  async function commitAndWait(nextState) {
+    const operation = commitWithCloudSave(nextState);
+    try {
+      await operation.save;
+    } catch (error) {
+      if (!isCurrentFamilyContext(operation.context)) throw familyContextStaleError();
+      throw error;
+    }
+    if (!isCurrentFamilyContext(operation.context)) throw familyContextStaleError();
     return state;
   }
 
@@ -446,6 +476,9 @@ function createStore(options = {}) {
     },
     addCookingRecord(input, now) {
       return commit(addCookingRecord(state, input, now));
+    },
+    addCookingRecordAndWait(input, now) {
+      return commitAndWait(addCookingRecord(state, input, now));
     },
     updateFamily(input, now) {
       return commit(updateFamilyProfile(state, input, now));

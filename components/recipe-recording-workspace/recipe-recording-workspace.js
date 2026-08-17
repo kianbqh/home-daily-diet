@@ -412,13 +412,13 @@ Component({
         });
         fileId = await assistant.uploadRecording(reservation, clip.localPath);
         this.updateClip(clip.key, { fileId, status: 'uploading', uploadFailed: false });
-        if (this.recordingController) await this.recordingController.markUploaded(localId);
         const submitted = await assistant.submitRecording({
           familyId: this.data.familyId,
           dishId: this.data.dishId,
           recordingId: reservation.recordingId,
           fileId,
         });
+        if (this.recordingController) await this.recordingController.markUploaded(localId);
         const current = (this.data.clips || []).find((item) => item.localId === localId);
         const recording = submitted && submitted.recording;
         if (recording) {
@@ -612,6 +612,9 @@ Component({
           recordingId: clip.recordingId,
           fileId: clip.fileId,
         });
+        if (clip.localId && this.recordingController) {
+          await this.recordingController.markUploaded(clip.localId);
+        }
         if (result && result.recording) this.upsertRemoteRecording(result.recording, {});
         return true;
       } catch (error) {
@@ -685,6 +688,19 @@ Component({
         }
       }
       if (this.data.playingClipKey) this.setData({ playingClipKey: '' });
+    },
+
+    hasPendingLocalClips() {
+      if (this.data.recording || (this.uploadingLocalIds && this.uploadingLocalIds.size)) return true;
+      const key = this.getWorkspaceKey();
+      return Boolean(this.recordingController && key
+        && this.recordingController.listRecoverable(key).length);
+    },
+
+    async finalizeAfterAttach() {
+      if (this.hasPendingLocalClips()) return false;
+      await this.clearLocalClips();
+      return true;
     },
 
     async clearLocalClips() {

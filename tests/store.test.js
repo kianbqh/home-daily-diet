@@ -5,6 +5,16 @@ const { addDish, createInitialState } = require('../services/domain');
 const { createMemoryStorage } = require('../services/storage');
 const { createStore, normalizePersistedState } = require('../services/app-store');
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test('loads an empty local state and persists a new dish across store instances', () => {
   const storage = createMemoryStorage();
   const first = createStore({
@@ -18,6 +28,124 @@ test('loads an empty local state and persists a new dish across store instances'
   assert.equal(reloaded.getState().dishes.length, 1);
   assert.equal(reloaded.getState().dishes[0].name, 'Tomato eggs');
   assert.equal(reloaded.getState().cookingRecords.length, 1);
+});
+
+test('addCookingRecordAndWait resolves only after its exact family save completes', async () => {
+  const saveStarted = deferred();
+  const saveGate = deferred();
+  let savedSnapshot = null;
+  const initialState = addDish(
+    createInitialState({ familyId: 'family-record-save' }),
+    { id: 'dish-record-save', name: 'Tomato eggs' },
+    '2026-08-18T10:00:00.000Z'
+  );
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState,
+    cloudSync: {
+      async save(snapshot) {
+        savedSnapshot = JSON.parse(JSON.stringify(snapshot));
+        saveStarted.resolve();
+        await saveGate.promise;
+      },
+    },
+  });
+  assert.equal(typeof store.addCookingRecordAndWait, 'function');
+
+  let settled = false;
+  const pending = store.addCookingRecordAndWait({
+    id: 'record-awaited-save',
+    dishId: 'dish-record-save',
+    recordedAt: '2026-08-18T11:00:00.000Z',
+  }).then((result) => {
+    settled = true;
+    return result;
+  });
+  await saveStarted.promise;
+
+  assert.equal(settled, false);
+  assert.equal(store.getState().cookingRecords.some((item) => item.id === 'record-awaited-save'), true);
+  assert.equal(savedSnapshot.cookingRecords.some((item) => item.id === 'record-awaited-save'), true);
+
+  saveGate.resolve();
+  const result = await pending;
+  assert.equal(result.cookingRecords.some((item) => item.id === 'record-awaited-save'), true);
+});
+
+test('addCookingRecordAndWait surfaces the exact cloud save failure', async () => {
+  const initialState = addDish(
+    createInitialState({ familyId: 'family-record-failure' }),
+    { id: 'dish-record-failure', name: 'Tomato eggs' },
+    '2026-08-18T10:00:00.000Z'
+  );
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState,
+    cloudSync: {
+      async save() {
+        throw new Error('family state save rejected');
+      },
+    },
+  });
+  assert.equal(typeof store.addCookingRecordAndWait, 'function');
+
+  await assert.rejects(
+    () => store.addCookingRecordAndWait({
+      id: 'record-cloud-failure',
+      dishId: 'dish-record-failure',
+      recordedAt: '2026-08-18T11:00:00.000Z',
+    }),
+    /family state save rejected/
+  );
+  assert.equal(store.getState().cookingRecords.some((item) => item.id === 'record-cloud-failure'), true);
+});
+
+test('addCookingRecordAndWait rejects when its family changes during the save', async () => {
+  const saveStarted = deferred();
+  const saveGate = deferred();
+  const familyB = createInitialState({
+    familyId: 'family-record-b', memberId: 'member-b', memberName: 'Family B member',
+  });
+  const initialState = addDish(
+    createInitialState({ familyId: 'family-record-a', memberId: 'member-a' }),
+    { id: 'dish-record-a', name: 'Tomato eggs' },
+    '2026-08-18T10:00:00.000Z'
+  );
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState,
+    cloudSync: {
+      async save() {
+        saveStarted.resolve();
+        await saveGate.promise;
+      },
+      async acceptInvite() {
+        return {
+          state: familyB,
+          member: { memberId: 'member-b', displayName: 'Family B member' },
+        };
+      },
+    },
+  });
+  assert.equal(typeof store.addCookingRecordAndWait, 'function');
+
+  const pending = store.addCookingRecordAndWait({
+    id: 'record-stale-family',
+    dishId: 'dish-record-a',
+    recordedAt: '2026-08-18T11:00:00.000Z',
+  });
+  await saveStarted.promise;
+  const joining = store.joinFamilyByInvite('BBBBBB', {
+    id: 'member-b', displayName: 'Family B member',
+  });
+  saveGate.resolve();
+
+  await assert.rejects(
+    () => pending,
+    (error) => error && error.code === 'FAMILY_CONTEXT_STALE'
+  );
+  await joining;
+  assert.equal(store.getState().family.id, 'family-record-b');
 });
 
 test('does not persist a device-local image path when cloud image upload is unavailable', async () => {

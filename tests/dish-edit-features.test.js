@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { addDish, createInitialState } = require('../services/domain');
+const { createStore } = require('../services/app-store');
+const { createMemoryStorage } = require('../services/storage');
 
 function loadPage() {
   const modulePath = require.resolve('../pages/dish-edit/dish-edit.js');
@@ -25,6 +27,16 @@ function createPageInstance(definition, data = {}) {
       if (callback) callback();
     },
   };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 test('dish detail template uses record-level half-star reviews and selectable category chips', () => {
@@ -90,7 +102,7 @@ test('detail page submits a half-star review for the selected production record'
   global.wx = originalWx;
 });
 
-test('saving an appended record clears only the current record photo after upload', async () => {
+test('saving an appended record finalizes local audio only after cloud save and workspace attach', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   let added = null;
@@ -102,6 +114,10 @@ test('saving an appended record clears only the current record photo after uploa
       return `cloud://${filePath}`;
     },
     addCookingRecord(input) {
+      calls.push('legacy-add');
+      added = input;
+    },
+    async addCookingRecordAndWait(input) {
       calls.push('add');
       added = input;
     },
@@ -134,7 +150,11 @@ test('saving an appended record clears only the current record photo after uploa
     displayImage: 'local-photo.jpg',
     recordingFamilyKey: 'family-internal-1',
   });
-  page.selectComponent = () => ({ async clearLocalClips() { calls.push('clear-local'); } });
+  page.selectComponent = () => ({
+    hasPendingLocalClips() { return false; },
+    async finalizeAfterAttach() { calls.push('finalize-local'); return true; },
+    async clearLocalClips() { calls.push('unsafe-clear-local'); },
+  });
   page.startRecordEntry();
   const reservedRecordId = page.data.recordIdDraft;
   page.startRecordEntry();
@@ -147,7 +167,7 @@ test('saving an appended record clears only the current record photo after uploa
   assert.equal(page.data.image, '');
   assert.equal(page.data.displayImage, '');
   assert.equal(page.data.recordIdDraft, '');
-  assert.deepEqual(calls, ['upload', 'add', 'attach', 'clear-local']);
+  assert.deepEqual(calls, ['upload', 'add', 'attach', 'finalize-local']);
   await new Promise((resolve) => setTimeout(resolve, 500));
 
   global.getApp = originalGetApp;
@@ -246,6 +266,230 @@ test('existing dish details cancel only after explicit confirmation and clear cl
   global.wx = originalWx;
 });
 
+test('append save awaits the exact gated family-state cloud save before workspace attach', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const saveStarted = deferred();
+  const saveGate = deferred();
+  let attachCount = 0;
+  let finalized = false;
+  const initialState = addDish(
+    createInitialState({ familyId: 'family-internal-1' }),
+    { id: 'dish-1', name: 'Tomato eggs' },
+    '2026-08-18T09:00:00.000Z'
+  );
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState,
+    cloudSync: {
+      async save() {
+        saveStarted.resolve();
+        await saveGate.promise;
+      },
+    },
+  });
+  const recipeAssistant = {
+    async attachRecordWorkspace() { attachCount += 1; },
+  };
+  global.getApp = () => ({ globalData: { store, recipeAssistant } });
+  global.wx = { showToast() {}, navigateBack() {} };
+  try {
+    const page = createPageInstance(loadPage(), {
+      isExisting: true,
+      editProfileVisible: false,
+      isArchived: false,
+      recordFormVisible: true,
+      dishId: 'dish-1',
+      nameDraft: 'Tomato eggs',
+      recordIdDraft: 'record-1787000000100-1',
+      recordDate: '2026-08-18',
+      mealType: 'dinner',
+      recordingFamilyKey: 'family-internal-1',
+    });
+    page.selectComponent = () => ({
+      hasPendingLocalClips() { return false; },
+      async finalizeAfterAttach() { finalized = true; return true; },
+      async clearLocalClips() { throw new Error('unsafe legacy cleanup'); },
+    });
+
+    const saving = page.save();
+    await saveStarted.promise;
+    assert.equal(attachCount, 0, 'attach must wait until family_states contains the new record');
+    assert.equal(finalized, false);
+
+    saveGate.resolve();
+    await saving;
+    assert.equal(attachCount, 1);
+    assert.equal(finalized, true);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } finally {
+    saveGate.resolve();
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('append save retry reuses the locally committed photo after the first cloud save fails', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  let saveCalls = 0;
+  let uploadCalls = 0;
+  let attachCalls = 0;
+  const initialState = addDish(
+    createInitialState({ familyId: 'family-internal-1' }),
+    { id: 'dish-1', name: 'Tomato eggs' },
+    '2026-08-18T09:00:00.000Z'
+  );
+  const store = createStore({
+    storage: createMemoryStorage(),
+    initialState,
+    cloudSync: {
+      async save() {
+        saveCalls += 1;
+        if (saveCalls === 1) throw new Error('first family save failed');
+      },
+      async uploadImage() {
+        uploadCalls += 1;
+        return `cloud://env/retry-photo-${uploadCalls}.jpg`;
+      },
+    },
+  });
+  const recipeAssistant = {
+    async attachRecordWorkspace() { attachCalls += 1; },
+  };
+  global.getApp = () => ({ globalData: { store, recipeAssistant } });
+  global.wx = {
+    showLoading() {}, hideLoading() {}, showToast() {}, navigateBack() {},
+  };
+  try {
+    const page = createPageInstance(loadPage(), {
+      isExisting: true,
+      editProfileVisible: false,
+      isArchived: false,
+      recordFormVisible: true,
+      dishId: 'dish-1',
+      nameDraft: 'Tomato eggs',
+      recordIdDraft: 'record-1787000000100-4',
+      recordDate: '2026-08-18',
+      mealType: 'dinner',
+      image: 'wxfile://retry-photo.jpg',
+      displayImage: 'wxfile://retry-photo.jpg',
+      recordingFamilyKey: 'family-internal-1',
+    });
+    page.selectComponent = () => ({
+      hasPendingLocalClips() { return false; },
+      async finalizeAfterAttach() { return true; },
+    });
+
+    await page.save();
+    assert.equal(page.data.recordFormVisible, true);
+    assert.equal(
+      store.getState().cookingRecords.find((item) => item.id === 'record-1787000000100-4').image,
+      'cloud://env/retry-photo-1.jpg'
+    );
+    assert.deepEqual({ saveCalls, uploadCalls, attachCalls }, {
+      saveCalls: 1, uploadCalls: 1, attachCalls: 0,
+    });
+
+    await page.save();
+    assert.deepEqual({ saveCalls, uploadCalls, attachCalls }, {
+      saveCalls: 2, uploadCalls: 1, attachCalls: 1,
+    });
+    assert.equal(page.data.recordFormVisible, false);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('append save keeps pending local audio and the form when CloudBase assistant is absent', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  const store = {
+    getState: () => ({ family: { id: 'family-internal-1' } }),
+    addCookingRecord() { calls.push('legacy-add'); },
+    async addCookingRecordAndWait() { calls.push('add'); },
+  };
+  global.getApp = () => ({ globalData: { store, recipeAssistant: null } });
+  global.wx = { showToast(options) { calls.push(`toast:${options.title}`); } };
+  try {
+    const page = createPageInstance(loadPage(), {
+      isExisting: true,
+      editProfileVisible: false,
+      isArchived: false,
+      recordFormVisible: true,
+      dishId: 'dish-1',
+      nameDraft: 'Tomato eggs',
+      recordIdDraft: 'record-1787000000100-2',
+      recordDate: '2026-08-18',
+      mealType: 'dinner',
+      recordingFamilyKey: 'family-internal-1',
+    });
+    page.selectComponent = () => ({
+      hasPendingLocalClips() { return true; },
+      async finalizeAfterAttach() { calls.push('finalize'); return false; },
+      async clearLocalClips() { calls.push('unsafe-clear'); },
+    });
+
+    await page.save();
+
+    assert.equal(calls.some((item) => item === 'add' || item === 'legacy-add'), false);
+    assert.equal(calls.includes('finalize'), false);
+    assert.equal(calls.includes('unsafe-clear'), false);
+    assert.equal(page.data.recordFormVisible, true);
+    assert.equal(page.data.recordIdDraft, 'record-1787000000100-2');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('append save does not attach, clear, or close while a failed local clip is pending', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  const store = {
+    getState: () => ({ family: { id: 'family-internal-1' } }),
+    addCookingRecord() { calls.push('legacy-add'); },
+    async addCookingRecordAndWait() { calls.push('add'); },
+  };
+  const recipeAssistant = {
+    async attachRecordWorkspace() { calls.push('attach'); },
+  };
+  global.getApp = () => ({ globalData: { store, recipeAssistant } });
+  global.wx = { showToast(options) { calls.push(`toast:${options.title}`); } };
+  try {
+    const page = createPageInstance(loadPage(), {
+      isExisting: true,
+      editProfileVisible: false,
+      isArchived: false,
+      recordFormVisible: true,
+      dishId: 'dish-1',
+      nameDraft: 'Tomato eggs',
+      recordIdDraft: 'record-1787000000100-3',
+      recordDate: '2026-08-18',
+      mealType: 'dinner',
+      recordingFamilyKey: 'family-internal-1',
+    });
+    page.selectComponent = () => ({
+      hasPendingLocalClips() { return true; },
+      async finalizeAfterAttach() { calls.push('finalize'); return false; },
+      async clearLocalClips() { calls.push('unsafe-clear'); },
+    });
+
+    await page.save();
+
+    assert.equal(calls.some((item) => ['add', 'legacy-add', 'attach', 'finalize', 'unsafe-clear'].includes(item)), false);
+    assert.equal(page.data.recordFormVisible, true);
+    assert.equal(page.data.recordIdDraft, 'record-1787000000100-3');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('append record entry recovers the newest local workspace before generating an id', () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
@@ -297,6 +541,7 @@ test('a failed local cooking-record save never attaches the recording workspace'
       return `cloud://${filePath}`;
     },
     addCookingRecord() { calls.push('add'); throw new Error('local save failed'); },
+    async addCookingRecordAndWait() { calls.push('add'); throw new Error('local save failed'); },
   };
   global.getApp = () => ({
     globalData: {

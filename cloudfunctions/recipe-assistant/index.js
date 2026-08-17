@@ -182,7 +182,8 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
         break;
       case 'attachRecordWorkspace':
         data = await attachRecordWorkspace(
-          repository, member, familyId, dishId, event.recordId, dependencies, nowMs(dependencies)
+          repository, member, familyId, dishId, event.recordId, dependencies,
+          nowMs(dependencies), recordAuthorization
         );
         break;
       case 'cancelRecordWorkspace':
@@ -598,8 +599,14 @@ async function updateTranscript(repository, member, familyId, dishId, event, now
   });
 }
 
-async function attachRecordWorkspace(repository, member, familyId, dishId, rawRecordId, dependencies, now) {
+async function attachRecordWorkspace(
+  repository, member, familyId, dishId, rawRecordId, dependencies, now, authorization
+) {
   const recordId = requireValue(rawRecordId, 'RECORD_REQUIRED', '缺少制作记录');
+  await finishWorkspaceClaim(
+    dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, 'attached', now,
+    { createIfMissing: Boolean(authorization && authorization.hasWorkspace) }
+  );
   const recordings = await repository.listRecordings(familyId, dishId, recordId);
   for (const recording of recordings) {
     await repository.runTransaction(async (transaction) => {
@@ -618,9 +625,6 @@ async function attachRecordWorkspace(repository, member, familyId, dishId, rawRe
       return transaction.setDraft(current._id, { ...current, draftExpiresAt: null, updatedAt: now });
     });
   }
-  await finishWorkspaceClaim(
-    dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, 'attached', now
-  );
   return { attached: true };
 }
 
@@ -629,7 +633,8 @@ async function cancelRecordWorkspace(repository, member, familyId, dishId, rawRe
   const fileApi = dependencies.fileApi;
   await finishWorkspaceClaim(
     dependencies.db, configFor(dependencies), familyId, dishId, recordId, member.memberId, 'cancelled', now,
-    { createIfMissing: Boolean(authorization && authorization.kind === 'provisional') }
+    { createIfMissing: Boolean(authorization
+      && (authorization.kind === 'provisional' || authorization.hasWorkspace)) }
   );
   const recordings = await repository.listRecordings(familyId, dishId, recordId);
   for (const recording of recordings.filter((item) => item.status !== 'deleted' && item.draftExpiresAt != null)) {
@@ -1141,7 +1146,7 @@ async function finishWorkspaceClaim(
 ) {
   if (!db || typeof db.runTransaction !== 'function') return;
   const claimId = workspaceClaimDocumentId(recordId);
-  await db.runTransaction(async (transaction) => {
+  return db.runTransaction(async (transaction) => {
     const current = await getDocument(transaction, config.recordingCollection, claimId);
     if (!current) {
       if (!options.createIfMissing) return null;
@@ -1149,7 +1154,8 @@ async function finishWorkspaceClaim(
         familyId, dishId, recordId, sourceType: 'workspace_state', workspaceClaim: true,
         workspaceFamilyId: familyId, workspaceDishId: dishId,
         workspaceRecordId: recordId, status, createdBy: memberId,
-        createdAt: now, updatedBy: memberId, updatedAt: now, draftExpiresAt: now + RECORDING_TTL_MS,
+        createdAt: now, updatedBy: memberId, updatedAt: now,
+        draftExpiresAt: status === 'attached' ? null : now + RECORDING_TTL_MS,
       };
       await transaction.collection(config.recordingCollection).doc(claimId).set({ data: claim });
       return { ...claim, _id: claimId };
@@ -1162,7 +1168,8 @@ async function finishWorkspaceClaim(
     if (current.status === 'temporary' || current.status === 'cancelled') {
       if (current.createdBy !== memberId) throw workspaceNotFound();
     }
-    if (current.status !== 'temporary') return current;
+    if (current.status === status) return current;
+    if (current.status !== 'temporary') throw workspaceNotFound();
     const updated = {
       ...current, status, updatedBy: memberId, updatedAt: now,
       draftExpiresAt: status === 'attached' ? null : current.draftExpiresAt,

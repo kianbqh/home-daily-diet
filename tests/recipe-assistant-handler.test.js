@@ -1531,6 +1531,124 @@ test('cancellation tombstones the claim before its cleanup snapshot can miss a c
   }
 });
 
+test('cancelled claim atomically wins over an in-flight attach and retry stays idempotent', async () => {
+  const recordId = 'record-1787000000040-1';
+  const recordingId = 'recording-cancel-wins';
+  const claimId = `workspace-claim-${recordId}`;
+  let pauseClaimTransition = false;
+  let claimPaused = false;
+  let releaseAttach;
+  let markAttachPaused;
+  const attachReleased = new Promise((resolve) => { releaseAttach = resolve; });
+  const attachPaused = new Promise((resolve) => { markAttachPaused = resolve; });
+  const db = createMemoryDatabase(baseSeed(), {
+    async afterTransactionRead({ name, id }) {
+      if (!pauseClaimTransition || claimPaused
+        || name !== 'recipe_recordings' || id !== claimId) return;
+      claimPaused = true;
+      markAttachPaused();
+      await attachReleased;
+    },
+  });
+  const services = recordingServices({ idGenerator: () => recordingId });
+  const reserved = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId, format: 'mp3',
+  }, 'openid-a', services);
+  assert.equal(reserved.ok, true);
+  db.records('family_states').get('family-a').cookingRecords.push({
+    id: recordId, familyId: 'family-a', dishId: 'dish-1',
+  });
+
+  pauseClaimTransition = true;
+  const attaching = invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  await attachPaused;
+  const cancelled = await invoke(db, {
+    action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  releaseAttach();
+  const attached = await attaching;
+
+  assert.equal(cancelled.ok, true);
+  assert.equal(attached.ok, false);
+  assert.equal(attached.error.code, 'RECORD_NOT_FOUND');
+  assert.equal(db.records('recipe_recordings').get(claimId).status, 'cancelled');
+  assert.equal(db.records('recipe_recordings').get(recordingId).status, 'deleted');
+  const activeSegments = [...db.records('recipe_recordings').values()].filter((item) => (
+    item.recordId === recordId && item.sourceType !== 'workspace_state' && item.status !== 'deleted'
+  ));
+  assert.equal(activeSegments.length, 0);
+
+  const cancelRetry = await invoke(db, {
+    action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  const attachRetry = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  assert.equal(cancelRetry.ok, true);
+  assert.equal(attachRetry.ok, false);
+  assert.equal(attachRetry.error.code, 'RECORD_NOT_FOUND');
+});
+
+test('attached claim atomically wins over an in-flight cancel and retry stays idempotent', async () => {
+  const recordId = 'record-1787000000040-2';
+  const recordingId = 'recording-attach-wins';
+  const claimId = `workspace-claim-${recordId}`;
+  let pauseClaimTransition = false;
+  let claimPaused = false;
+  let releaseCancel;
+  let markCancelPaused;
+  const cancelReleased = new Promise((resolve) => { releaseCancel = resolve; });
+  const cancelPaused = new Promise((resolve) => { markCancelPaused = resolve; });
+  const db = createMemoryDatabase(baseSeed(), {
+    async afterTransactionRead({ name, id }) {
+      if (!pauseClaimTransition || claimPaused
+        || name !== 'recipe_recordings' || id !== claimId) return;
+      claimPaused = true;
+      markCancelPaused();
+      await cancelReleased;
+    },
+  });
+  const services = recordingServices({ idGenerator: () => recordingId });
+  const reserved = await invoke(db, {
+    action: 'reserveRecording', familyId: 'family-a', dishId: 'dish-1', recordId, format: 'mp3',
+  }, 'openid-a', services);
+  assert.equal(reserved.ok, true);
+  db.records('family_states').get('family-a').cookingRecords.push({
+    id: recordId, familyId: 'family-a', dishId: 'dish-1',
+  });
+
+  pauseClaimTransition = true;
+  const cancelling = invoke(db, {
+    action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  await cancelPaused;
+  const attached = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  releaseCancel();
+  const cancelled = await cancelling;
+
+  assert.equal(attached.ok, true);
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.error.code, 'RECORD_NOT_FOUND');
+  assert.equal(db.records('recipe_recordings').get(claimId).status, 'attached');
+  const stored = db.records('recipe_recordings').get(recordingId);
+  assert.notEqual(stored.status, 'deleted');
+  assert.equal(stored.draftExpiresAt, null);
+
+  const attachRetry = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  const cancelRetry = await invoke(db, {
+    action: 'cancelRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId,
+  }, 'openid-a', services);
+  assert.equal(attachRetry.ok, true);
+  assert.equal(cancelRetry.ok, false);
+  assert.equal(cancelRetry.error.code, 'RECORD_NOT_FOUND');
+});
+
 test('pre-save IDs fail closed and archived dishes cannot open a new workspace', async () => {
   const db = createMemoryDatabase(baseSeed());
   const services = recordingServices();

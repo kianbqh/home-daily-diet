@@ -714,6 +714,14 @@ Page({
       const context = this.getRecipeContext();
       recipeAssistant = context.recipeAssistant;
       recordFamilyId = this.currentFamilyId();
+      const hasUncommittedInput = Boolean(recordWorkspace
+        && typeof recordWorkspace.hasUncommittedInput === 'function'
+        && recordWorkspace.hasUncommittedInput());
+      if (hasUncommittedInput) {
+        this.setData({ recordWorkspaceBusy: false });
+        showToast('请先添加或清空文字说明');
+        return;
+      }
       const hasPendingLocalClips = Boolean(recordWorkspace
         && typeof recordWorkspace.hasPendingLocalClips === 'function'
         && recordWorkspace.hasPendingLocalClips());

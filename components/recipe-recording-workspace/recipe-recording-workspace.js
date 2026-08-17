@@ -697,8 +697,16 @@ Component({
         && this.recordingController.listRecoverable(key).length);
     },
 
+    hasUncommittedInput() {
+      return Boolean(String(this.data.manualTextDraft || '').trim());
+    },
+
+    canFinalizeWorkspace() {
+      return !this.hasPendingLocalClips() && !this.hasUncommittedInput();
+    },
+
     async finalizeAfterAttach() {
-      if (this.hasPendingLocalClips()) return false;
+      if (!this.canFinalizeWorkspace()) return false;
       await this.clearLocalClips();
       return true;
     },

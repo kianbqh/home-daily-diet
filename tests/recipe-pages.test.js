@@ -863,6 +863,23 @@ test('recording workspace retains a local clip and offers re-upload after upload
   }
 });
 
+test('recording workspace keeps unsaved manual text distinct from pending local audio', async () => {
+  const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+  const component = createComponentInstance(definition, {
+    familyId: 'family-internal-1',
+    dishId: 'dish-1',
+    recordId: 'record-1',
+    disabled: false,
+    manualTextDraft: ' 少放盐，出锅前再放葱 ',
+  });
+
+  assert.equal(component.hasPendingLocalClips(), false);
+  assert.equal(component.hasUncommittedInput(), true);
+  assert.equal(component.canFinalizeWorkspace(), false);
+  assert.equal(await component.finalizeAfterAttach(), false);
+  assert.equal(component.data.manualTextDraft, ' 少放盐，出锅前再放葱 ');
+});
+
 test('submit rejection keeps saved audio recoverable after component and controller recreation', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

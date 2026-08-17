@@ -490,6 +490,58 @@ test('append save does not attach, clear, or close while a failed local clip is 
   }
 });
 
+test('append save preserves unsaved manual text without saving, attaching, or finalizing', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  let manualTextDraft = '少放盐，出锅前再放葱';
+  const store = {
+    getState: () => ({ family: { id: 'family-internal-1' } }),
+    addCookingRecord() { calls.push('legacy-add'); },
+    async addCookingRecordAndWait() { calls.push('add'); },
+  };
+  const recipeAssistant = {
+    async attachRecordWorkspace() { calls.push('attach'); },
+  };
+  global.getApp = () => ({ globalData: { store, recipeAssistant } });
+  global.wx = { showToast(options) { calls.push(`toast:${options.title}`); } };
+  try {
+    const page = createPageInstance(loadPage(), {
+      isExisting: true,
+      editProfileVisible: false,
+      isArchived: false,
+      recordFormVisible: true,
+      recordWorkspaceHasContent: true,
+      dishId: 'dish-1',
+      nameDraft: 'Tomato eggs',
+      recordIdDraft: 'record-1787000000100-4',
+      recordDate: '2026-08-18',
+      mealType: 'dinner',
+      recordingFamilyKey: 'family-internal-1',
+    });
+    page.selectComponent = () => ({
+      hasUncommittedInput() { return Boolean(manualTextDraft.trim()); },
+      hasPendingLocalClips() { return false; },
+      canFinalizeWorkspace() { return false; },
+      async finalizeAfterAttach() {
+        calls.push('finalize');
+        manualTextDraft = '';
+        return true;
+      },
+    });
+
+    await page.save();
+
+    assert.equal(calls.some((item) => ['add', 'legacy-add', 'attach', 'finalize'].includes(item)), false);
+    assert.equal(manualTextDraft, '少放盐，出锅前再放葱');
+    assert.equal(page.data.recordFormVisible, true);
+    assert.equal(page.data.recordIdDraft, 'record-1787000000100-4');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('append record entry recovers the newest local workspace before generating an id', () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

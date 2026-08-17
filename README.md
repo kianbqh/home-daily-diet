@@ -17,7 +17,7 @@
 - 菜品照片可选；照片上传失败时仍会保存菜名。
 - 记录菜品页面不包含评价和备注板块。
 
-当前版本不包含聊天、公开菜谱社区、语音识别或 LLM 菜谱解析。
+已发布版本不包含聊天、公开菜谱社区、语音识别或 LLM 菜谱解析。当前开发分支正在实现仅供家庭使用的语音做法记录和结构化菜谱，尚未作为线上稳定功能发布。
 
 ## CloudBase 配置
 
@@ -72,6 +72,20 @@ cloudfunctions/family-access
 npm test
 node scripts/smoke-check.js
 ```
+
+### 脱敏模型评测
+
+开发分支提供 Hy3 与 DeepSeek 的菜谱抽取评测工具。命令默认是 `dry-run`，只校验样例、模型白名单和报告结构，不访问 TokenHub，也不会产生模型费用：
+
+```powershell
+node scripts/evaluate-recipe-models.js --fixture tests/fixtures/recipe-transcripts.sample.json --models hy3,deepseek-v4-flash --dry-run --out $env:TEMP\recipe-eval.json
+```
+
+只有显式传入 `--live` 才会调用 TokenHub。实时评测需要单独配置 `TOKENHUB_API_KEY`，并在 Schema 成功率为 100%、未标记的不实精确事实为 0、关键事实召回率不低于 0.9 时通过上线门槛。
+
+评分采用确定性的精确事实编码：食材与用量写成 `食材|用量`，步骤说明、火候、时长、关键点、技巧、失败经验和家庭经验各自作为一个事实；比较前只做 Unicode 规范化、去除首尾空白、合并连续空白和英文小写化，不做模糊匹配。`expectedFacts` 用于召回率，`forbiddenFacts` 只列本样例明确禁止出现的精确事实。
+
+仓库只保留两条虚构、脱敏的普通话样例。真实家庭转写只能放在已忽略的 `tests/fixtures/private/`，不得提交到 Git。报告和常规控制台输出不包含完整转写或 API Key。
 
 微信开发者工具项目目录：
 

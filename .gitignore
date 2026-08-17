@@ -18,3 +18,6 @@ Thumbs.db
 .env.*
 !.env.example
 *.local
+
+# Private evaluation inputs must never enter Git
+tests/fixtures/private/

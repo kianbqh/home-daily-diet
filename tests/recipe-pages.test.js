@@ -165,6 +165,13 @@ test('record recipe status view model exposes the four product labels and safe a
     recordings: [{ status: 'transcribing' }], draft: null,
   }, 'record-1').label, '语音转写中');
   assert.deepEqual(buildRecordRecipeState({
+    recordings: [{ status: 'transcribing' }],
+    draft: { _id: 'draft-pending', recordId: 'record-1', status: 'ready' },
+  }, 'record-1'), {
+    state: 'draft', label: '菜谱草稿待确认', actionLabel: '继续整理',
+    draftId: 'draft-pending', versionId: '', actionable: true,
+  });
+  assert.deepEqual(buildRecordRecipeState({
     recordings: [{ _id: 'recording-1', status: 'ready', editedTranscript: '少放盐' }], draft: null,
   }, 'record-1'), {
     state: 'draft', label: '菜谱草稿待确认', actionLabel: '继续整理',
@@ -1360,6 +1367,42 @@ test('recording workspace blocks failed fragments but ignores blank ready fragme
   }
 });
 
+test('recording workspace ignores a late organize result after switching cooking records', async () => {
+  const originalGetApp = global.getApp;
+  const organize = deferred();
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        organizeDraft() { return organize.promise; },
+      },
+    },
+  });
+  try {
+    const definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    const component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-a', draftId: 'draft-a',
+      clips: [{ key: 'ready-a', recordingId: 'recording-a', status: 'ready', editedTranscript: '少放盐' }],
+      readyToOrganize: true,
+    });
+    component.activeWorkspaceKey = component.getWorkspaceKey();
+
+    const pending = component.organizeDraft();
+    component.setData({
+      recordId: 'record-b', draftId: 'draft-b', draftStatus: '',
+      organizeRequestPending: false, organizeMessage: '', clips: [],
+    });
+    component.activeWorkspaceKey = component.getWorkspaceKey();
+    organize.resolve({ draft: draftFixture({ _id: 'draft-a', recordId: 'record-a', status: 'ready' }) });
+
+    assert.equal(await pending, false);
+    assert.equal(component.data.draftId, 'draft-b');
+    assert.equal(component.data.draftStatus, '');
+    assert.equal(component.data.organizeMessage, '');
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
 test('dish record recipe status failures remain isolated and successful entries stay actionable', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
@@ -1424,6 +1467,47 @@ test('dish record recipe status failures remain isolated and successful entries 
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;
+  }
+});
+
+test('late history image resolution merges into current records without clearing recipe state', async () => {
+  const originalGetApp = global.getApp;
+  const resolved = deferred();
+  global.getApp = () => ({
+    globalData: {
+      store: {
+        resolveImageUrls() { return resolved.promise; },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'), {
+      history: [{
+        id: 'record-1', image: 'cloud://env/history.jpg', displayImage: '',
+        recipeLabel: '暂无做法', recipeStateError: '',
+      }],
+      reviews: [],
+    });
+    const generation = page.beginImageResolution('history');
+    page.resolveHistoryImages(page.data.history, page.data.reviews, generation);
+    page.setData({
+      history: [{
+        ...page.data.history[0],
+        recipeLabel: '已保存本次做法',
+        recipeActionLabel: '查看本次做法',
+        recipeStateError: '保留当前状态',
+      }],
+    });
+
+    resolved.resolve(new Map([['cloud://env/history.jpg', 'https://temp.example/history.jpg']]));
+    await flushPromises();
+
+    assert.equal(page.data.history[0].displayImage, 'https://temp.example/history.jpg');
+    assert.equal(page.data.history[0].recipeLabel, '已保存本次做法');
+    assert.equal(page.data.history[0].recipeActionLabel, '查看本次做法');
+    assert.equal(page.data.history[0].recipeStateError, '保留当前状态');
+  } finally {
+    global.getApp = originalGetApp;
   }
 });
 

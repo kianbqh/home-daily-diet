@@ -230,6 +230,7 @@ Component({
       const nextKey = this.getWorkspaceKey();
       if (nextKey !== this.activeWorkspaceKey) {
         this.destroyAudioContext();
+        this.organizeRequestGeneration = (this.organizeRequestGeneration || 0) + 1;
         this.activeWorkspaceKey = nextKey;
         if (this.localReservations) this.localReservations.clear();
         this.setData({
@@ -248,6 +249,7 @@ Component({
       this.localReservations = new Map();
       this.uploadingLocalIds = new Set();
       this.workspaceLoadGeneration = 0;
+      this.organizeRequestGeneration = 0;
       this.activeWorkspaceKey = this.getWorkspaceKey();
       this.createController();
       this.loadLocalClips();
@@ -256,6 +258,7 @@ Component({
     detached() {
       this.componentAttached = false;
       this.workspaceLoadGeneration = (this.workspaceLoadGeneration || 0) + 1;
+      this.organizeRequestGeneration = (this.organizeRequestGeneration || 0) + 1;
       this.destroyAudioContext();
       if (typeof this.unsubscribeController === 'function') this.unsubscribeController();
       this.unsubscribeController = null;
@@ -584,6 +587,19 @@ Component({
         .map((clip) => String(clip.recordingId || ''))
         .filter(Boolean);
       if (!sourceRecordingIds.length) return false;
+      const requestWorkspaceKey = this.getWorkspaceKey();
+      const requestGeneration = (this.organizeRequestGeneration || 0) + 1;
+      this.organizeRequestGeneration = requestGeneration;
+      const requestPayload = {
+        familyId: this.data.familyId,
+        dishId: this.data.dishId,
+        draftId,
+        sourceRecordingIds,
+      };
+      const requestIsCurrent = () => (
+        requestGeneration === this.organizeRequestGeneration
+        && requestWorkspaceKey === this.getWorkspaceKey()
+      );
 
       this.setData({
         organizeRequestPending: true,
@@ -593,19 +609,17 @@ Component({
       this.emitWorkspaceChange(this.data.clips || []);
       this.triggerEvent('opendraft', { draftId });
       try {
-        const result = await assistant.organizeDraft({
-          familyId: this.data.familyId,
-          dishId: this.data.dishId,
-          draftId,
-          sourceRecordingIds,
-        });
+        const result = await assistant.organizeDraft(requestPayload);
+        if (!requestIsCurrent()) return false;
         if (result && result.draft) this.applyDraftState(result.draft);
         else this.setData({ organizeRequestPending: false });
         this.emitWorkspaceChange(this.data.clips || []);
         return true;
       } catch (error) {
+        if (!requestIsCurrent()) return false;
         this.setData({ organizeRequestPending: false });
         const loaded = await this.loadWorkspace({ refresh: false });
+        if (!requestIsCurrent()) return false;
         if (!loaded) {
           this.setData({
             draftStatus: 'organizing',

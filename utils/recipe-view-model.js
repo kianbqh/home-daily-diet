@@ -76,6 +76,18 @@ function buildRecordRecipeState(workspace, recordId) {
     };
   }
 
+  if (draft && sameRecord && ['editing', 'organizing', 'ready', 'failed'].includes(draft.status)) {
+    const actionable = ['editing', 'ready', 'failed'].includes(draft.status);
+    return {
+      state: 'draft',
+      label: '菜谱草稿待确认',
+      actionLabel: actionable ? '继续整理' : '',
+      draftId,
+      versionId: '',
+      actionable,
+    };
+  }
+
   const recordings = (Array.isArray(workspace.recordings) ? workspace.recordings : [])
     .filter((item) => item && item.status !== 'deleted');
   if (recordings.some((item) => item.status !== 'ready')) {
@@ -99,17 +111,6 @@ function buildRecordRecipeState(workspace, recordId) {
     };
   }
 
-  if (draft && sameRecord && ['editing', 'organizing', 'ready', 'failed'].includes(draft.status)) {
-    const actionable = ['editing', 'ready', 'failed'].includes(draft.status);
-    return {
-      state: 'draft',
-      label: '菜谱草稿待确认',
-      actionLabel: actionable ? '继续整理' : '',
-      draftId,
-      versionId: '',
-      actionable,
-    };
-  }
   return empty;
 }
 

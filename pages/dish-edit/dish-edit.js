@@ -655,19 +655,23 @@ Page({
     resolveCloudFileUrls(cloudFileIds, store)
       .then((urls) => {
         if (!this.isCurrentImageResolution('history', generation)) return;
+        const historyImages = new Map(history.map((record) => [
+          String(record && (record.id || record._id) || ''),
+          isCloudFileId(record.image) ? urls.get(record.image) || '' : record.displayImage,
+        ]));
+        const reviewImages = new Map(reviews.map((review) => [
+          String(review && (review.id || review._id) || ''),
+          isCloudFileId(review.recordImage) ? urls.get(review.recordImage) || '' : review.displayRecordImage,
+        ]));
         this.setData({
-          history: history.map((record) => ({
-            ...record,
-            displayImage: isCloudFileId(record.image)
-              ? urls.get(record.image) || ''
-              : record.displayImage,
-          })),
-          reviews: reviews.map((review) => ({
-            ...review,
-            displayRecordImage: isCloudFileId(review.recordImage)
-              ? urls.get(review.recordImage) || ''
-              : review.displayRecordImage,
-          })),
+          history: (this.data.history || []).map((record) => {
+            const key = String(record && (record.id || record._id) || '');
+            return historyImages.has(key) ? { ...record, displayImage: historyImages.get(key) } : record;
+          }),
+          reviews: (this.data.reviews || []).map((review) => {
+            const key = String(review && (review.id || review._id) || '');
+            return reviewImages.has(key) ? { ...review, displayRecordImage: reviewImages.get(key) } : review;
+          }),
         });
       })
       .catch(() => {});

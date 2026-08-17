@@ -1936,6 +1936,130 @@ test('submitRecording rejects an invalid provider task id without persisting tra
   assert.equal(stored.asrSubmitLeaseExpiresAt || null, null);
 });
 
+test('refreshWorkspace ignores a stale ready result when a retry reuses the Tencent task id', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3',
+      asrTaskId: 1001, asrSubmittedAt: 10, asrExpiresAt: 1000,
+      asrRequestId: 'old-request', rawTranscript: '', editedTranscript: '', transcriptRevision: 0, errorCode: '',
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let releaseQuery;
+  let markQueryStarted;
+  const queryStarted = new Promise((resolve) => { markQueryStarted = resolve; });
+  const services = recordingServices({ asrProvider: { query(input) {
+    return new Promise((resolve) => {
+      releaseQuery = resolve;
+      markQueryStarted(input);
+    });
+  } } });
+
+  const refreshing = invoke(db, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+  assert.deepEqual(await queryStarted, { taskId: 1001, submittedAt: 10, expiresAt: 1000 });
+
+  Object.assign(db.records('recipe_recordings').get('audio'), {
+    status: 'transcribing', asrTaskId: '1001', asrSubmittedAt: '20', asrExpiresAt: '2000',
+    asrRequestId: 'new-request', rawTranscript: '', editedTranscript: '', transcriptRevision: 0, errorCode: '',
+  });
+  releaseQuery({
+    status: 'ready', transcript: '过期识别文字', durationMs: 1000,
+    requestId: 'stale-ready-request', errorCode: '',
+  });
+  const result = await refreshing;
+
+  assert.equal(result.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'transcribing');
+  assert.equal(stored.asrTaskId, '1001');
+  assert.equal(stored.asrSubmittedAt, '20');
+  assert.equal(stored.asrRequestId, 'new-request');
+  assert.equal(stored.rawTranscript, '');
+  assert.equal(stored.editedTranscript, '');
+  assert.equal(stored.errorCode, '');
+});
+
+test('refreshWorkspace ignores a stale failure when a retry reuses the Tencent task id', async () => {
+  const seed = baseSeed();
+  seed.recipe_recordings = {
+    audio: {
+      _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+      sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3',
+      asrTaskId: '2001', asrSubmittedAt: '30', asrExpiresAt: '1000',
+      asrRequestId: 'old-request', rawTranscript: '', editedTranscript: '', transcriptRevision: 0, errorCode: '',
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let releaseQuery;
+  let markQueryStarted;
+  const queryStarted = new Promise((resolve) => { markQueryStarted = resolve; });
+  const services = recordingServices({ asrProvider: { query(input) {
+    return new Promise((resolve) => {
+      releaseQuery = resolve;
+      markQueryStarted(input);
+    });
+  } } });
+
+  const refreshing = invoke(db, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+  await queryStarted;
+
+  Object.assign(db.records('recipe_recordings').get('audio'), {
+    status: 'transcribing', asrTaskId: 2001, asrSubmittedAt: 40, asrExpiresAt: 2000,
+    asrRequestId: 'new-request', rawTranscript: '', editedTranscript: '', transcriptRevision: 0, errorCode: '',
+  });
+  releaseQuery({
+    status: 'failed', transcript: '', durationMs: 0,
+    requestId: 'stale-failure-request', errorCode: 'ASR_TASK_FAILED',
+  });
+  const result = await refreshing;
+
+  assert.equal(result.ok, true);
+  const stored = db.records('recipe_recordings').get('audio');
+  assert.equal(stored.status, 'transcribing');
+  assert.equal(stored.asrTaskId, 2001);
+  assert.equal(stored.asrSubmittedAt, 40);
+  assert.equal(stored.asrRequestId, 'new-request');
+  assert.equal(stored.errorCode, '');
+});
+
+test('refreshWorkspace rejects a malformed stored ASR generation before querying the provider', async () => {
+  const invalidSubmittedAtValues = [undefined, null, false, '', 'not-a-timestamp', -1, 1.5, Number.MAX_SAFE_INTEGER + 1];
+  for (const asrSubmittedAt of invalidSubmittedAtValues) {
+    const seed = baseSeed();
+    seed.recipe_recordings = {
+      audio: {
+        _id: 'audio', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sequence: 1,
+        sourceType: 'audio', status: 'transcribing', fileId: 'cloud://env/families/family-a/recipe-audio/audio.mp3',
+        asrTaskId: 3001, asrSubmittedAt, asrExpiresAt: 1000,
+        asrRequestId: 'existing-request', rawTranscript: '', editedTranscript: '', transcriptRevision: 0, errorCode: '',
+      },
+    };
+    let queryCalls = 0;
+    const services = recordingServices({ asrProvider: { async query() {
+      queryCalls += 1;
+      return { status: 'ready', transcript: '不应写入', durationMs: 1000, requestId: 'unexpected', errorCode: '' };
+    } } });
+    const db = createMemoryDatabase(seed);
+
+    const result = await invoke(db, {
+      action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+    }, 'openid-a', services);
+
+    assert.equal(result.error.code, 'ASR_TASK_GENERATION_INVALID', String(asrSubmittedAt));
+    assert.equal(queryCalls, 0, String(asrSubmittedAt));
+    const stored = db.records('recipe_recordings').get('audio');
+    assert.equal(stored.status, 'transcribing', String(asrSubmittedAt));
+    assert.equal(stored.rawTranscript, '', String(asrSubmittedAt));
+    assert.equal(stored.asrRequestId, 'existing-request', String(asrSubmittedAt));
+  }
+});
+
 test('refreshWorkspace queries at most ten owned transcribing recordings in sequence order', async () => {
   const seed = baseSeed();
   seed.recipe_recordings = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`audio-${index + 1}`, {

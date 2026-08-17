@@ -395,15 +395,16 @@ async function refreshWorkspace(repository, member, familyId, dishId, rawRecordI
     .slice(0, 10);
   const refreshed = [];
   for (const candidate of candidates) {
+    const generation = requireAsrTaskGeneration(candidate);
     const result = await asrProvider.query({
-      taskId: candidate.asrTaskId,
-      submittedAt: candidate.asrSubmittedAt,
+      taskId: generation.taskId,
+      submittedAt: generation.submittedAt,
       expiresAt: candidate.asrExpiresAt,
     });
     const updated = await repository.runTransaction(async (transaction) => {
       const current = await transaction.getRecording(familyId, dishId, candidate._id);
       if (!current || current.status === 'deleted' || current.recordId !== recordId) return current;
-      if (current.status !== 'transcribing' || String(current.asrTaskId) !== String(candidate.asrTaskId)) return current;
+      if (current.status !== 'transcribing' || !sameAsrTaskGeneration(current, generation)) return current;
       if (result.status === 'transcribing') {
         return transaction.setRecording(candidate._id, {
           ...current,
@@ -465,13 +466,40 @@ function createAsrSubmitToken(dependencies) {
 }
 
 function requireAsrTaskId(value, code) {
-  const validType = typeof value === 'number'
-    || (typeof value === 'string' && /^\d+$/.test(value));
-  const taskId = Number(value);
-  if (!validType || !Number.isSafeInteger(taskId) || taskId <= 0) {
+  const taskId = normalizeSafeInteger(value, 1);
+  if (taskId == null) {
     throw createRecipeError(code, '语音识别服务返回了无效任务');
   }
   return taskId;
+}
+
+function requireAsrTaskGeneration(recording) {
+  const generation = normalizeAsrTaskGeneration(recording);
+  if (!generation) {
+    throw createRecipeError('ASR_TASK_GENERATION_INVALID', '语音识别任务信息无效');
+  }
+  return generation;
+}
+
+function sameAsrTaskGeneration(recording, expected) {
+  const actual = normalizeAsrTaskGeneration(recording);
+  return Boolean(actual
+    && actual.taskId === expected.taskId
+    && actual.submittedAt === expected.submittedAt);
+}
+
+function normalizeAsrTaskGeneration(recording) {
+  const taskId = normalizeSafeInteger(recording && recording.asrTaskId, 1);
+  const submittedAt = normalizeSafeInteger(recording && recording.asrSubmittedAt, 0);
+  return taskId == null || submittedAt == null ? null : { taskId, submittedAt };
+}
+
+function normalizeSafeInteger(value, minimum) {
+  const validType = typeof value === 'number'
+    || (typeof value === 'string' && /^\d+$/.test(value));
+  if (!validType) return null;
+  const normalized = Number(value);
+  return Number.isSafeInteger(normalized) && normalized >= minimum ? normalized : null;
 }
 
 async function addManualText(repository, member, familyId, dishId, event, dependencies, now) {

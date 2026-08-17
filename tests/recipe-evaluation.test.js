@@ -40,16 +40,28 @@ test('scores canonical recipe facts deterministically without fuzzy invention ma
   });
 
   assert.equal(canonicalizeFact('  DeepSeek   V4  '), 'deepseek v4');
-  assert.deepEqual([...collectRecipeFacts(recipe)].sort(), ['中大火', '炒到凝固', '鸡蛋|3个'].sort());
+  assert.deepEqual([...collectRecipeFacts(recipe)].sort(), [
+    'ingredient=鸡蛋|3个',
+    'step.heat=中大火',
+    'step.instruction=炒到凝固',
+  ].sort());
   assert.deepEqual(scoreRecipe({
     recipe,
-    expectedFacts: ['鸡蛋|3个', '中大火'],
-    forbiddenFacts: ['180度'],
+    expectedFacts: [
+      'ingredient=鸡蛋|3个',
+      'step.instruction=炒到凝固',
+      'step.heat=中大火',
+    ],
+    forbiddenFacts: ['*=180度'],
   }), {
     schemaPass: true,
     unsupportedFacts: 0,
     factRecall: 1,
     fieldAccuracy: 1,
+    expectedHits: 3,
+    expectedCount: 3,
+    fieldCorrectCount: 3,
+    fieldUnionCount: 3,
   });
 });
 
@@ -66,16 +78,99 @@ test('counts explicit forbidden precise facts and reports recall and field accur
         uncertain: false,
       }],
     }),
-    expectedFacts: ['鸡蛋|3个', '中大火'],
-    forbiddenFacts: ['180度'],
+    expectedFacts: [
+      'ingredient=鸡蛋|3个',
+      'step.instruction=炒到凝固',
+      'step.heat=中大火',
+    ],
+    forbiddenFacts: ['*=180度'],
   });
 
   assert.deepEqual(score, {
     schemaPass: true,
     unsupportedFacts: 1,
+    factRecall: 0.6667,
+    fieldAccuracy: 0.5,
+    expectedHits: 2,
+    expectedCount: 3,
+    fieldCorrectCount: 2,
+    fieldUnionCount: 4,
+  });
+});
+
+test('counts unlisted precise inventions and facts placed in the wrong field', () => {
+  const invented = scoreRecipe({
+    recipe: validRecipe({
+      ingredients: [{ name: '鸡蛋', amountText: '3个', note: '', uncertain: false }],
+      steps: [{
+        order: 1,
+        instruction: '炒熟',
+        heat: '',
+        durationText: '200度',
+        keyPoint: '',
+        uncertain: false,
+      }],
+    }),
+    expectedFacts: ['ingredient=鸡蛋|3个', 'step.instruction=炒熟'],
+    forbiddenFacts: ['*=180度'],
+  });
+  assert.equal(invented.unsupportedFacts, 1);
+  assert.equal(invented.expectedHits, 2);
+  assert.equal(invented.expectedCount, 2);
+  const inventedReport = buildEvaluationReport({
+    mode: 'live',
+    models: ['hy3'],
+    caseResults: [{ id: 'invented', model: 'hy3', ...invented }],
+  });
+  assert.equal(inventedReport.models[0].summary.gates.unsupportedFacts, false);
+  assert.equal(inventedReport.releaseGate.passed, false);
+
+  const wrongField = scoreRecipe({
+    recipe: validRecipe({
+      steps: [{
+        order: 1,
+        instruction: '炒熟',
+        heat: '',
+        durationText: '',
+        keyPoint: '',
+        uncertain: false,
+      }],
+      tips: ['中火'],
+    }),
+    expectedFacts: ['step.instruction=炒熟', 'step.heat=中火'],
+    forbiddenFacts: [],
+  });
+  assert.deepEqual(wrongField, {
+    schemaPass: true,
+    unsupportedFacts: 1,
     factRecall: 0.5,
     fieldAccuracy: 0.3333,
+    expectedHits: 1,
+    expectedCount: 2,
+    fieldCorrectCount: 1,
+    fieldUnionCount: 3,
   });
+});
+
+test('does not count explicitly uncertain candidate facts as precise inventions', () => {
+  const score = scoreRecipe({
+    recipe: validRecipe({
+      steps: [{
+        order: 1,
+        instruction: '炒熟',
+        heat: '',
+        durationText: '200度',
+        keyPoint: '',
+        uncertain: false,
+      }],
+      uncertainties: [{ fieldPath: 'steps[0].durationText', message: '录音里没说清楚' }],
+    }),
+    expectedFacts: ['step.instruction=炒熟'],
+    forbiddenFacts: [],
+  });
+
+  assert.equal(score.unsupportedFacts, 0);
+  assert.equal(score.fieldAccuracy, 1);
 });
 
 test('builds per-model release gates and fails any live model below a required threshold', () => {
@@ -86,11 +181,15 @@ test('builds per-model release gates and fails any live model below a required t
     caseResults: [
       {
         id: 'case-1', model: 'hy3', schemaPass: true, unsupportedFacts: 0,
-        factRecall: 1, fieldAccuracy: 1, latencyMs: 20, inputTokens: 10, outputTokens: 5,
+        factRecall: 1, fieldAccuracy: 1,
+        expectedHits: 2, expectedCount: 2, fieldCorrectCount: 2, fieldUnionCount: 2,
+        latencyMs: 20, inputTokens: 10, outputTokens: 5,
       },
       {
         id: 'case-1', model: 'deepseek-v4-flash', schemaPass: true, unsupportedFacts: 1,
-        factRecall: 0.8, fieldAccuracy: 0.5, latencyMs: 30, inputTokens: 12, outputTokens: 6,
+        factRecall: 0.8, fieldAccuracy: 0.5,
+        expectedHits: 8, expectedCount: 10, fieldCorrectCount: 5, fieldUnionCount: 10,
+        latencyMs: 30, inputTokens: 12, outputTokens: 6,
       },
     ],
   });
@@ -103,13 +202,47 @@ test('builds per-model release gates and fails any live model below a required t
   assert.equal(report.releaseGate.passed, false);
 });
 
+test('uses raw micro-average recall for release gates and rounds only the displayed metric', () => {
+  const unequalCases = buildEvaluationReport({
+    mode: 'live',
+    models: ['hy3'],
+    caseResults: [
+      {
+        id: 'small', model: 'hy3', schemaPass: true, unsupportedFacts: 0,
+        factRecall: 1, fieldAccuracy: 1,
+        expectedHits: 1, expectedCount: 1, fieldCorrectCount: 1, fieldUnionCount: 1,
+      },
+      {
+        id: 'large', model: 'hy3', schemaPass: true, unsupportedFacts: 0,
+        factRecall: 0.8, fieldAccuracy: 0.8,
+        expectedHits: 8, expectedCount: 10, fieldCorrectCount: 8, fieldUnionCount: 10,
+      },
+    ],
+  });
+  assert.equal(unequalCases.models[0].summary.factRecall, 0.8182);
+  assert.equal(unequalCases.models[0].summary.gates.factRecall, false);
+
+  const roundingBoundary = buildEvaluationReport({
+    mode: 'live',
+    models: ['hy3'],
+    caseResults: [{
+      id: 'boundary', model: 'hy3', schemaPass: true, unsupportedFacts: 0,
+      factRecall: 0.89996, fieldAccuracy: 1,
+      expectedHits: 22499, expectedCount: 25000,
+      fieldCorrectCount: 1, fieldUnionCount: 1,
+    }],
+  });
+  assert.equal(roundingBoundary.models[0].summary.factRecall, 0.9);
+  assert.equal(roundingBoundary.models[0].summary.gates.factRecall, false);
+});
+
 test('dry-run validates the matrix without creating providers, making requests, or copying transcripts', async () => {
   let providerCalls = 0;
   const transcript = 'PRIVATE_TRANSCRIPT_MUST_NOT_ENTER_REPORT';
   const report = await evaluateFixture({
     fixture: [{
       id: 'dry-case', transcript,
-      expectedFacts: ['土豆|2个'], forbiddenFacts: ['180度'],
+      expectedFacts: ['ingredient=土豆|2个'], forbiddenFacts: ['*=180度'],
     }],
     models: ['hy3', 'deepseek-v4-flash'],
     live: false,
@@ -128,6 +261,7 @@ test('dry-run validates the matrix without creating providers, making requests, 
   assert.deepEqual(report.models[0].cases[0], {
     id: 'dry-case', model: 'hy3', status: 'not_run',
     schemaPass: null, unsupportedFacts: null, factRecall: null, fieldAccuracy: null,
+    expectedHits: null, expectedCount: null, fieldCorrectCount: null, fieldUnionCount: null,
     latencyMs: 0, inputTokens: 0, outputTokens: 0,
   });
   assert.equal(JSON.stringify(report).includes(transcript), false);
@@ -139,7 +273,12 @@ test('live evaluation uses only injected approved providers and maps usage witho
   const report = await evaluateFixture({
     fixture: [{
       id: 'live-case', transcript: '鸡蛋三个，中大火炒熟。',
-      expectedFacts: ['鸡蛋|3个', '中大火'], forbiddenFacts: ['180度'],
+      expectedFacts: [
+        'ingredient=鸡蛋|3个',
+        'step.instruction=炒熟',
+        'step.heat=中大火',
+      ],
+      forbiddenFacts: ['*=180度'],
     }],
     models: ['hy3'],
     live: true,
@@ -193,7 +332,12 @@ test('live CLI writes a transcript-free report and exits one when a release gate
   const transcript = 'TRANSCRIPT_SENT_TO_PROVIDER_BUT_NOT_REPORT';
   fs.writeFileSync(fixturePath, JSON.stringify([{
     id: 'gate-case', transcript,
-    expectedFacts: ['鸡蛋|3个', '中大火'], forbiddenFacts: ['180度'],
+    expectedFacts: [
+      'ingredient=鸡蛋|3个',
+      'step.instruction=炒熟',
+      'step.heat=中大火',
+    ],
+    forbiddenFacts: ['*=180度'],
   }]), 'utf8');
   try {
     const exitCode = await runCli([
@@ -239,6 +383,8 @@ test('committed fixture contains exactly two fictional sanitized Mandarin sample
     assert.ok(item.transcript.length > 10);
     assert.ok(Array.isArray(item.expectedFacts));
     assert.ok(Array.isArray(item.forbiddenFacts));
+    item.expectedFacts.forEach((fact) => assert.match(fact, /^[a-z.]+=/));
+    item.forbiddenFacts.forEach((fact) => assert.match(fact, /^(?:\*|[a-z.]+)=/));
     assert.doesNotMatch(item.transcript, /(?:openid|wxid_|1\d{10}|@|PRIVATE_)/i);
   });
 });

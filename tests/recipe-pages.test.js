@@ -788,6 +788,92 @@ test('reapplying after a main conflict persists the refreshed main pointer for c
   }
 });
 
+test('reapplying a conflict creates and saves a replacement when the remote draft is confirmed', async () => {
+  const originalGetApp = global.getApp;
+  const localRecipe = completeRecipe({ familyNotes: ['已确认后仍要保留的本地修改'] });
+  const creates = [];
+  const updates = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async createManualDraft(payload) {
+          creates.push(payload);
+          return { draft: draftFixture({
+            _id: 'draft-replacement', recordId: 'record-1', revision: 0,
+            status: 'editing', baseMainVersionId: 'version-new',
+          }) };
+        },
+        async updateDraft(payload) {
+          updates.push(payload);
+          return { draft: draftFixture({
+            _id: 'draft-replacement', recordId: 'record-1', revision: 1,
+            status: 'editing', recipe: payload.recipe,
+            baseMainVersionId: payload.baseMainVersionId,
+          }) };
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-confirmed',
+      draft: draftFixture({
+        _id: 'draft-confirmed', recordId: 'record-1', status: 'confirmed', revision: 5,
+      }),
+      draftStatus: 'confirmed', confirmMode: 'record', recipe: completeRecipe(),
+      localConflictRecipe: localRecipe, saveState: 'conflict',
+    });
+
+    const saved = await page.reapplyLocalConflict();
+
+    assert.equal(saved, true);
+    assert.deepEqual(creates, [{
+      familyId: 'family-internal-1', dishId: 'dish-1',
+      sourceType: 'manual', recordId: 'record-1',
+    }]);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].draftId, 'draft-replacement');
+    assert.deepEqual(updates[0].recipe, localRecipe);
+    assert.equal(page.data.draftId, 'draft-replacement');
+    assert.equal(page.data.draftStatus, 'editing');
+    assert.equal(page.data.localConflictRecipe, null);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('a failed replacement keeps the local conflict copy when the remote draft is organizing', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const localRecipe = completeRecipe({ familyNotes: ['创建新草稿失败也不能丢'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async createManualDraft() { throw new Error('network unavailable'); },
+      },
+    },
+  });
+  global.wx = { showToast() {} };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-organizing',
+      draft: draftFixture({ _id: 'draft-organizing', status: 'organizing', revision: 2 }),
+      draftStatus: 'organizing', recipe: completeRecipe(),
+      localConflictRecipe: localRecipe, saveState: 'conflict',
+    });
+
+    const saved = await page.reapplyLocalConflict();
+
+    assert.equal(saved, false);
+    assert.deepEqual(page.data.localConflictRecipe, localRecipe);
+    assert.equal(page.data.saveState, 'conflict');
+    assert.equal(page.data.saveMessage, '云端已被家人更新');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('a repeated draft conflict preserves the reapplied local copy and remains recoverable', async () => {
   const originalGetApp = global.getApp;
   const localRecipe = completeRecipe({ familyNotes: ['这份本地内容不能丢'] });

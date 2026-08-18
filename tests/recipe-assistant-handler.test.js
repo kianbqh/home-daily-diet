@@ -565,6 +565,43 @@ test('updateDraft re-reads and compares revision inside runTransaction', async (
   assert.equal(db.records('recipe_drafts').get('draft-race').revision, 1);
 });
 
+test('a conflict reapply reopens the same confirmed draft and remains reachable by its cooking record', async () => {
+  const seed = baseSeed();
+  seed.recipe_drafts = {
+    'draft-confirmed-record': {
+      _id: 'draft-confirmed-record', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sourceType: 'recording', status: 'confirmed', recipe: clone(validRecipe), revision: 4,
+      baseMainVersionId: 'version-current', confirmedVersionId: 'version-record-1',
+      createdBy: 'member-a', createdAt: 1, updatedBy: 'member-a', updatedAt: 2,
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  const localRecipe = { ...clone(validRecipe), familyNotes: ['重新应用后仍可找回'] };
+
+  const ordinary = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
+    draftId: 'draft-confirmed-record', revision: 4, recipe: localRecipe,
+  });
+  const reopened = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
+    draftId: 'draft-confirmed-record', revision: 4, recipe: localRecipe,
+    baseMainVersionId: 'version-current', reopenAfterConflict: true,
+  });
+  const workspace = await invoke(db, {
+    action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  });
+
+  assert.equal(ordinary.error.code, 'DRAFT_CONFLICT');
+  assert.equal(reopened.ok, true);
+  assert.equal(reopened.data.draft._id, 'draft-confirmed-record');
+  assert.equal(reopened.data.draft.status, 'editing');
+  assert.equal(reopened.data.draft.confirmedVersionId, '');
+  assert.equal(reopened.data.draft.revision, 5);
+  assert.deepEqual(reopened.data.draft.recipe.familyNotes, ['重新应用后仍可找回']);
+  assert.equal(workspace.data.draft._id, 'draft-confirmed-record');
+  assert.deepEqual(workspace.data.draft.recipe.familyNotes, ['重新应用后仍可找回']);
+});
+
 test('recipe validation errors do not echo raw recipe content in responses or logs', async () => {
   const logs = [];
   const db = createMemoryDatabase(baseSeed());
@@ -2994,6 +3031,44 @@ test('a late organizeDraft result cannot overwrite a replacement lease result', 
   assert.equal(stored.inputHash, 'newer-hash');
   assert.equal(stored.organizeLeaseId, 'lease-new');
   assert.equal(stored.revision, 4);
+});
+
+test('reapplying an organizing draft settles its lease and a late model result cannot overwrite it', async () => {
+  const db = createMemoryDatabase(organizeSeed());
+  let releaseProvider;
+  let announceProvider;
+  const providerStarted = new Promise((resolve) => { announceProvider = resolve; });
+  const organizing = invoke(db, organizeEvent(), 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-reapply',
+    recipeProvider: { async organize() {
+      announceProvider();
+      return new Promise((resolve) => { releaseProvider = resolve; });
+    } },
+  });
+  await providerStarted;
+  const current = db.records('recipe_drafts').get('draft-recording');
+  const localRecipe = organizedRecipe('本地重新应用');
+
+  const reopened = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
+    draftId: 'draft-recording', revision: current.revision, recipe: localRecipe,
+    baseMainVersionId: current.baseMainVersionId, reopenAfterConflict: true,
+  });
+  releaseProvider({
+    recipe: organizedRecipe('迟到模型结果'), requestId: 'late-after-reapply',
+    modelName: 'hy3', promptVersion: 'v1', usage: {},
+  });
+  await organizing;
+
+  const stored = db.records('recipe_drafts').get('draft-recording');
+  const operations = [...db.records('recipe_usage_daily').values()]
+    .filter((item) => item.sourceType === 'usage_operation');
+  assert.equal(reopened.ok, true);
+  assert.equal(stored.status, 'editing');
+  assert.equal(stored.recipe.ingredients[0].name, '本地重新应用');
+  assert.equal(Object.hasOwn(stored, 'organizeLeaseId'), false);
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0].status, 'settled');
 });
 
 test('a late organizeDraft failure cannot mark a replacement lease result failed', async () => {

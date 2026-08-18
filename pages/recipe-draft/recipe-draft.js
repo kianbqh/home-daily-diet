@@ -428,10 +428,12 @@ Page({
     }, 800);
   },
 
-  async saveDraftNow() {
+  async saveDraftNow(options = {}) {
     this.clearAutosaveTimer();
     if (this.saveDrainPromise) return this.saveDrainPromise;
-    if (this.data.draftStatus === 'organizing' || this.data.draftStatus === 'confirmed') return false;
+    const reopenAfterConflict = options.reopenAfterConflict === true;
+    if (!reopenAfterConflict
+      && (this.data.draftStatus === 'organizing' || this.data.draftStatus === 'confirmed')) return false;
     const validation = validateRecipe(this.data.recipe);
     this.setData({ validation });
     if (!validation.ok || !this.data.draft) {
@@ -443,12 +445,12 @@ Page({
       this.setData({ saveState: 'error', saveMessage: '家庭菜谱需要启用 CloudBase' });
       return false;
     }
-    this.saveDrainPromise = this.drainDraftSaves(recipeAssistant)
+    this.saveDrainPromise = this.drainDraftSaves(recipeAssistant, { reopenAfterConflict })
       .finally(() => { this.saveDrainPromise = null; });
     return this.saveDrainPromise;
   },
 
-  async drainDraftSaves(recipeAssistant) {
+  async drainDraftSaves(recipeAssistant, options = {}) {
     let shouldSave = this.recipeDirty
       || this.lastSavedRecipeJson !== JSON.stringify(normalizeRecipe(this.data.recipe));
     while (shouldSave) {
@@ -472,6 +474,7 @@ Page({
           revision,
           recipe,
           baseMainVersionId,
+          ...(options.reopenAfterConflict ? { reopenAfterConflict: true } : {}),
         });
         const draft = result && result.draft
           ? result.draft
@@ -480,11 +483,16 @@ Page({
         const hasNewerEdit = (this.editGeneration || 0) !== generation;
         this.recipeDirty = hasNewerEdit;
         shouldSave = hasNewerEdit;
+        const draftStatus = String(draft.status || this.data.draftStatus || 'editing');
         this.setData({
           draft,
+          draftStatus,
+          stateMessage: DRAFT_STATE_MESSAGES[draftStatus] || '',
+          manualEditing: draftStatus !== 'failed',
           saveState: hasNewerEdit ? 'saving' : 'saved',
           saveMessage: hasNewerEdit ? '保存中' : '已保存',
         });
+        this.applyDraftMode();
       } catch (error) {
         if (error && error.code === 'DRAFT_CONFLICT') {
           const localConflictRecipe = cloneRecipe(this.data.recipe);
@@ -554,44 +562,8 @@ Page({
     if (!this.data.localConflictRecipe) return false;
     this.clearAutosaveTimer();
     const recipe = cloneRecipe(this.data.localConflictRecipe);
-    if (this.data.draftStatus === 'organizing' || this.data.draftStatus === 'confirmed') {
-      const recipeAssistant = this.getRecipeAssistant();
-      if (!recipeAssistant || typeof recipeAssistant.createManualDraft !== 'function') {
-        showToast('家庭菜谱需要启用 CloudBase');
-        return false;
-      }
-      const recordId = String(this.data.draft && this.data.draft.recordId || '');
-      try {
-        const result = await recipeAssistant.createManualDraft({
-          familyId: this.data.familyId,
-          dishId: this.data.dishId,
-          sourceType: recordId ? 'manual' : 'edit_main',
-          recordId,
-        });
-        const replacement = result && result.draft;
-        const replacementId = String(replacement && (replacement._id || replacement.id) || '');
-        if (!replacement || !replacementId) throw new Error('missing replacement draft');
-        this.lastSavedRecipeJson = JSON.stringify(cloneRecipe(replacement.recipe));
-        this.setData({
-          draftId: replacementId,
-          draft: replacement,
-          draftStatus: String(replacement.status || 'editing'),
-          stateMessage: DRAFT_STATE_MESSAGES[replacement.status] || DRAFT_STATE_MESSAGES.editing,
-          manualEditing: true,
-          organizeRequestPending: false,
-        });
-        this.applyDraftMode();
-      } catch (_) {
-        this.recipeDirty = false;
-        this.setData({
-          localConflictRecipe: recipe,
-          saveState: 'conflict',
-          saveMessage: CONFLICT_MESSAGE,
-        });
-        showToast('暂时无法创建新的菜谱草稿');
-        return false;
-      }
-    }
+    const reopenAfterConflict = this.data.draftStatus === 'organizing'
+      || this.data.draftStatus === 'confirmed';
     this.recipeDirty = true;
     this.editGeneration = (this.editGeneration || 0) + 1;
     this.setData({
@@ -599,8 +571,17 @@ Page({
       uncertaintyItems: uncertaintyViews(recipe),
       validation: validateRecipe(recipe),
     });
-    const saved = await this.saveDraftNow();
-    if (saved) this.setData({ localConflictRecipe: null });
+    const saved = await this.saveDraftNow({ reopenAfterConflict });
+    if (saved) {
+      this.setData({ localConflictRecipe: null });
+    } else {
+      this.recipeDirty = false;
+      this.setData({
+        localConflictRecipe: recipe,
+        saveState: 'conflict',
+        saveMessage: CONFLICT_MESSAGE,
+      });
+    }
     return saved;
   },
 

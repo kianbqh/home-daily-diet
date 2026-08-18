@@ -1277,16 +1277,44 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
   const baseMainVersionId = hasBaseMainVersionId
     ? String(event.baseMainVersionId || '').trim()
     : undefined;
+  const reopenAfterConflict = event.reopenAfterConflict === true;
   return repository.runTransaction(async (transaction) => {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
-    if (draft.revision !== revision || draft.status === 'confirmed' || draft.status === 'organizing') {
+    const terminalStatus = draft.status === 'confirmed' || draft.status === 'organizing';
+    if (draft.revision !== revision || (terminalStatus && !reopenAfterConflict)) {
       throw createConflictError(
         'DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试', draft, draft.revision
       );
     }
+    if (reopenAfterConflict && draft.status === 'organizing') {
+      const operationId = String(draft.organizeUsageOperationId || '').trim();
+      if (operationId) {
+        const usageInput = {
+          familyId,
+          operationId,
+          billingTimestamp: timestampMs(draft.organizeUsageReservedAt) || now,
+          now,
+        };
+        if (draft.organizeRequestIssuedAt == null) {
+          await transaction.releaseOrganizeUsage(usageInput);
+        } else {
+          await transaction.settleOrganizeUsage(usageInput);
+        }
+      }
+    }
+    const editableDraft = reopenAfterConflict && terminalStatus
+      ? {
+        ...clearOrganizeLease(draft),
+        status: 'editing',
+        confirmedVersionId: '',
+        organizeUsageOperationId: '',
+        organizeUsageReservedAt: null,
+        lastErrorCode: '',
+      }
+      : draft;
     const updated = await transaction.setDraft(draftId, {
-      ...draft,
+      ...editableDraft,
       recipe,
       ...(hasBaseMainVersionId ? { baseMainVersionId } : {}),
       revision: revision + 1,

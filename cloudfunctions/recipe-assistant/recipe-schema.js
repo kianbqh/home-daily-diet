@@ -66,9 +66,18 @@ function normalizeRecipe(value) {
 }
 
 function validateRecipe(value) {
+  return validateRecipeShape(value, { allowBlankRequiredFields: false });
+}
+
+function validateDraftRecipe(value) {
+  return validateRecipeShape(value, { allowBlankRequiredFields: true });
+}
+
+function validateRecipeShape(value, options = {}) {
   const recipe = normalizeRecipe(value);
   const errors = [];
   const input = object(value);
+  const allowBlankRequiredFields = options.allowBlankRequiredFields === true;
   const validateText = (item, path) => { if (item.length > LIMITS.fieldChars) errors.push(`${path} exceeds the maximum character count`); };
   const validateFields = (item, path, fields) => fields.forEach((field) => validateText(item[field], `${path}.${field}`));
 
@@ -81,7 +90,7 @@ function validateRecipe(value) {
   recipe.ingredients.forEach((item, index) => {
     requireFields(list(input.ingredients)[index], `ingredients[${index}]`, ['name', 'amountText', 'note', 'uncertain']);
     requireTypes(list(input.ingredients)[index], `ingredients[${index}]`, { name: 'string', amountText: 'string', note: 'string', uncertain: 'boolean' });
-    if (!item.name) errors.push(`ingredients[${index}].name must not be blank`);
+    if (!allowBlankRequiredFields && !item.name) errors.push(`ingredients[${index}].name must not be blank`);
     validateFields(item, `ingredients[${index}]`, ['name', 'amountText', 'note']);
   });
   recipe.steps.forEach((item, index) => {
@@ -91,7 +100,7 @@ function validateRecipe(value) {
     if (Number.isInteger(object(original).order) && object(original).order < 1) {
       errors.push(`steps[${index}].order must be at least 1`);
     }
-    if (!item.instruction) errors.push(`steps[${index}].instruction must not be blank`);
+    if (!allowBlankRequiredFields && !item.instruction) errors.push(`steps[${index}].instruction must not be blank`);
     validateFields(item, `steps[${index}]`, ['instruction', 'heat', 'durationText', 'keyPoint']);
   });
   recipe.tips.forEach((item, index) => {
@@ -110,8 +119,8 @@ function validateRecipe(value) {
   recipe.uncertainties.forEach((item, index) => {
     requireFields(list(input.uncertainties)[index], `uncertainties[${index}]`, ['fieldPath', 'message']);
     requireTypes(list(input.uncertainties)[index], `uncertainties[${index}]`, { fieldPath: 'string', message: 'string' });
-    if (!item.fieldPath) errors.push(`uncertainties[${index}].fieldPath must not be blank`);
-    if (!item.message) errors.push(`uncertainties[${index}].message must not be blank`);
+    if (!allowBlankRequiredFields && !item.fieldPath) errors.push(`uncertainties[${index}].fieldPath must not be blank`);
+    if (!allowBlankRequiredFields && !item.message) errors.push(`uncertainties[${index}].message must not be blank`);
     validateFields(item, `uncertainties[${index}]`, ['fieldPath', 'message']);
   });
   if (Buffer.byteLength(JSON.stringify(recipe), 'utf8') > LIMITS.recipeBytes) errors.push('recipe exceeds the maximum normalized JSON size');
@@ -155,6 +164,7 @@ module.exports = {
   LIMITS,
   RECIPE_JSON_SCHEMA,
   normalizeRecipe,
+  validateDraftRecipe,
   validateRecipe,
   buildRecipePrompt,
   buildRecipeSystemPrompt,

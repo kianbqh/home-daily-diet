@@ -7,7 +7,7 @@ const {
   createTokenHubProvider,
 } = require('./providers/tokenhub');
 const crypto = require('node:crypto');
-const { normalizeRecipe, validateRecipe } = require('./recipe-schema');
+const { normalizeRecipe, validateDraftRecipe, validateRecipe } = require('./recipe-schema');
 const {
   buildSourceText,
   createInputHash,
@@ -1489,7 +1489,7 @@ async function getDraft(repository, familyId, dishId, rawDraftId) {
 async function updateDraft(repository, member, familyId, dishId, event, now) {
   const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
   const revision = requireRevision(event.revision);
-  const recipe = normalizeAndValidateRecipe(event.recipe);
+  const recipe = normalizeAndValidateDraftRecipe(event.recipe);
   const hasBaseMainVersionId = Object.prototype.hasOwnProperty.call(event, 'baseMainVersionId');
   const baseMainVersionId = hasBaseMainVersionId
     ? String(event.baseMainVersionId || '').trim()
@@ -1671,6 +1671,12 @@ function emptyRecipe() {
 function normalizeAndValidateRecipe(value) {
   const validation = validateRecipe(value);
   if (!validation.ok) throw createRecipeError('RECIPE_INVALID', '菜谱内容不符合要求', 'validate');
+  return normalizeRecipe(value);
+}
+
+function normalizeAndValidateDraftRecipe(value) {
+  const validation = validateDraftRecipe(value);
+  if (!validation.ok) throw createRecipeError('RECIPE_INVALID', '菜谱草稿不符合要求', 'validate');
   return normalizeRecipe(value);
 }
 

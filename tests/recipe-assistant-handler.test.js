@@ -538,6 +538,34 @@ test('updateDraft normalizes valid recipes, increments revision, and rejects a s
   assert.equal(JSON.stringify(stale.error).includes('ingredients'), false);
 });
 
+test('updateDraft preserves an incomplete working draft while confirmDraft keeps final validation strict', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const created = await invoke(db, {
+    action: 'createManualDraft', familyId: 'family-a', dishId: 'dish-1', sourceType: 'manual',
+  });
+  const partialRecipe = {
+    ...clone(validRecipe),
+    ingredients: [{ ...validRecipe.ingredients[0], name: '   ' }],
+    steps: [{ ...validRecipe.steps[0], instruction: '' }],
+  };
+
+  const saved = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+    revision: 0, recipe: partialRecipe,
+  });
+  const confirmed = await invoke(db, {
+    action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
+    revision: 1, publishAsMain: true, baseMainVersionId: '',
+  });
+
+  assert.equal(saved.ok, true);
+  assert.equal(saved.data.draft.recipe.ingredients[0].name, '');
+  assert.equal(saved.data.draft.recipe.steps[0].instruction, '');
+  assert.equal(confirmed.error.code, 'RECIPE_INVALID');
+  assert.equal(db.records('recipe_versions').size, 0);
+  assert.equal(db.records('recipe_drafts').get(created.data.draft._id).status, 'editing');
+});
+
 test('updateDraft re-reads and compares revision inside runTransaction', async () => {
   const seed = baseSeed();
   seed.recipe_drafts = {
@@ -619,7 +647,10 @@ test('recipe validation errors do not echo raw recipe content in responses or lo
   const result = await invoke(db, {
     action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: created.data.draft._id,
     revision: 0,
-    recipe: { ...clone(validRecipe), ingredients: [{ ...validRecipe.ingredients[0], name: '', note: secret }] },
+    recipe: {
+      ...clone(validRecipe),
+      ingredients: [{ name: '', amountText: '', note: secret }],
+    },
   }, 'openid-a', { logger: { error(value) { logs.push(value); } } });
   const serialized = JSON.stringify({ result, logs });
 

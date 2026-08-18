@@ -388,6 +388,63 @@ test('switches a dirty manual draft only after its pending autosave finishes', a
   }
 });
 
+test('switches an incomplete manual draft to voice only after preserving the partial recipe', async () => {
+  const originalGetApp = global.getApp;
+  const originalGetCurrentPages = global.getCurrentPages;
+  const originalWx = global.wx;
+  const operations = [];
+  const updateCalls = [];
+  const partialRecipe = completeRecipe({
+    ingredients: [{ name: '', amountText: '两个', note: '', uncertain: false }],
+    steps: [{ order: 1, instruction: '', heat: '小火', durationText: '', keyPoint: '', uncertain: false }],
+  });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async updateDraft(payload) {
+          operations.push('save');
+          updateCalls.push(payload);
+          return { draft: draftFixture({ revision: 1, recipe: payload.recipe }) };
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draftId: 'draft-1',
+      draft: draftFixture(),
+      recipe: partialRecipe,
+      manualDraft: true,
+      manualEditing: true,
+      draftStatus: 'editing',
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+    page.lastSavedRecipeJson = JSON.stringify(completeRecipe());
+    page.autosaveTimer = 29;
+    global.getCurrentPages = () => [{
+      startVoiceRecipeEntry() { operations.push('voice'); },
+    }, page];
+    global.wx = {
+      navigateBack() { operations.push('back'); },
+      redirectTo() { throw new Error('the previous page should remain usable'); },
+    };
+
+    const switched = await page.switchToVoiceRecording();
+
+    assert.equal(switched, true);
+    assert.deepEqual(operations, ['save', 'voice', 'back']);
+    assert.deepEqual(updateCalls[0].recipe, partialRecipe);
+    assert.equal(page.recipeDirty, false);
+  } finally {
+    global.getApp = originalGetApp;
+    global.getCurrentPages = originalGetCurrentPages;
+    global.wx = originalWx;
+  }
+});
+
 test('recipe editor emits a complete normalized recipe and validation without app or cloud access', () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
@@ -795,6 +852,57 @@ test('draft save drain serializes overlapping edits and persists the latest gene
     assert.equal(page.recipeDirty, false);
     assert.equal(page.data.saveState, 'saved');
     assert.equal(page.data.localConflictRecipe, null);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('unload save drain carries the latest revision into a queued newer edit', async () => {
+  const originalGetApp = global.getApp;
+  const requests = [];
+  const pending = [];
+  const firstRecipe = completeRecipe({ familyNotes: ['离页前第一版'] });
+  const latestRecipe = completeRecipe({ familyNotes: ['离页前第二版'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        updateDraft(payload) {
+          requests.push(payload);
+          const request = deferred();
+          pending.push(request);
+          return request.promise;
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: firstRecipe }),
+      recipe: firstRecipe,
+      validation: { ok: true, errors: [] },
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+
+    page.saveDraftNow();
+    page.onRecipeChange({ detail: { recipe: latestRecipe } });
+    const unloadSave = page.onUnload();
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].revision, 3);
+    pending[0].resolve({ draft: draftFixture({ revision: 4, recipe: firstRecipe }) });
+    await flushPromises();
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].revision, 4);
+    assert.deepEqual(requests[1].recipe, latestRecipe);
+
+    pending[1].resolve({ draft: draftFixture({ revision: 5, recipe: latestRecipe }) });
+    assert.equal(await unloadSave, true);
+    assert.equal(page.recipeDirty, false);
   } finally {
     global.getApp = originalGetApp;
   }
@@ -1319,7 +1427,48 @@ test('draft confirmation modes preserve record defaults and force required main 
   }
 });
 
-test('draft clears its autosave timer on unload and after successful confirmation', async () => {
+test('draft flushes a pending autosave before unload completes', async () => {
+  const originalGetApp = global.getApp;
+  const originalClearTimeout = global.clearTimeout;
+  const cleared = [];
+  const updates = [];
+  global.clearTimeout = (id) => { cleared.push(id); };
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async updateDraft(payload) {
+          updates.push(payload);
+          return { draft: draftFixture({ revision: 1, recipe: payload.recipe }) };
+        },
+      },
+    },
+  });
+  try {
+    const definition = loadPage('pages/recipe-draft/recipe-draft.js');
+    const recipe = completeRecipe({ familyNotes: ['离页前刚输入的内容'] });
+    const page = createPageInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture(), recipe, validation: { ok: true, errors: [] },
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+    page.lastSavedRecipeJson = JSON.stringify(completeRecipe());
+    page.autosaveTimer = 17;
+
+    await page.onUnload();
+
+    assert.deepEqual(cleared, [17]);
+    assert.equal(updates.length, 1);
+    assert.deepEqual(updates[0].recipe, recipe);
+    assert.equal(page.recipeDirty, false);
+    assert.equal(page.autosaveTimer, null);
+  } finally {
+    global.getApp = originalGetApp;
+    global.clearTimeout = originalClearTimeout;
+  }
+});
+
+test('draft clears its autosave timer after successful confirmation', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   const originalClearTimeout = global.clearTimeout;
@@ -1337,12 +1486,11 @@ test('draft clears its autosave timer on unload and after successful confirmatio
       familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
       draft: draftFixture(), recipe: completeRecipe(), validation: { ok: true, errors: [] },
     });
-    page.autosaveTimer = 17;
-    page.onUnload();
     page.autosaveTimer = 23;
+
     await page.confirmRecipe();
 
-    assert.deepEqual(cleared, [17, 23]);
+    assert.deepEqual(cleared, [23]);
     assert.equal(page.autosaveTimer, null);
   } finally {
     global.getApp = originalGetApp;

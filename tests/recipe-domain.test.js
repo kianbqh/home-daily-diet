@@ -35,6 +35,29 @@ test('creates an empty complete recipe shape', () => {
 });
 
 for (const [name, contract] of implementations) {
+  test(`${name} accepts blank working fields for draft persistence but not final confirmation`, () => {
+    const partialRecipe = {
+      ...fixture,
+      ingredients: [{ ...fixture.ingredients[0], name: '   ' }],
+      steps: [{ ...fixture.steps[0], instruction: '' }],
+    };
+
+    assert.deepEqual(contract.validateDraftRecipe(partialRecipe), { ok: true, errors: [] });
+    assert.equal(contract.validateRecipe(partialRecipe).ok, false);
+  });
+
+  test(`${name} still rejects malformed field types while persisting a draft`, () => {
+    const malformedRecipe = {
+      ...fixture,
+      ingredients: [{ ...fixture.ingredients[0], uncertain: 'false' }],
+    };
+
+    const result = contract.validateDraftRecipe(malformedRecipe);
+
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes('ingredients[0].uncertain')));
+  });
+
   test(`${name} rejects an ingredient with a blank name without echoing recipe content`, () => {
     const result = contract.validateRecipe({
       ...fixture,

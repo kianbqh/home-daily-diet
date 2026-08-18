@@ -1,4 +1,9 @@
-const { emptyRecipe, normalizeRecipe, validateRecipe } = require('../../services/recipe-domain');
+const {
+  emptyRecipe,
+  normalizeRecipe,
+  validateDraftRecipe,
+  validateRecipe,
+} = require('../../services/recipe-domain');
 
 function cloneRecipe(value) {
   return normalizeRecipe(JSON.parse(JSON.stringify(normalizeRecipe(value || emptyRecipe()))));
@@ -140,9 +145,13 @@ Page({
   },
 
   onUnload() {
-    this.clearAutosaveTimer();
+    const pendingSave = this.autosaveTimer != null || this.recipeDirty
+      ? this.saveDraftNow()
+      : this.saveDrainPromise;
     this.draftLoadGeneration = (this.draftLoadGeneration || 0) + 1;
     this.destroySourceAudio();
+    this.isUnloading = true;
+    return Promise.resolve(pendingSave == null ? true : pendingSave).catch(() => false);
   },
 
   clearAutosaveTimer() {
@@ -469,8 +478,9 @@ Page({
       && (this.data.draftStatus === 'organizing' || this.data.draftStatus === 'confirmed')) return false;
     const validation = validateRecipe(this.data.recipe);
     this.setData({ validation });
-    if (!validation.ok || !this.data.draft) {
-      this.setData({ saveState: 'invalid', saveMessage: '请先补全必填内容' });
+    const draftValidation = validateDraftRecipe(this.data.recipe);
+    if (!draftValidation.ok || !this.data.draft) {
+      this.setData({ saveState: 'invalid', saveMessage: '请检查菜谱内容' });
       return false;
     }
     const recipeAssistant = this.getRecipeAssistant();
@@ -484,20 +494,22 @@ Page({
   },
 
   async drainDraftSaves(recipeAssistant, options = {}) {
+    let currentDraft = this.data.draft;
     let shouldSave = this.recipeDirty
       || this.lastSavedRecipeJson !== JSON.stringify(normalizeRecipe(this.data.recipe));
     while (shouldSave) {
       this.clearAutosaveTimer();
       const validation = validateRecipe(this.data.recipe);
       this.setData({ validation });
-      if (!validation.ok || !this.data.draft) {
-        this.setData({ saveState: 'invalid', saveMessage: '请先补全必填内容' });
+      const draftValidation = validateDraftRecipe(this.data.recipe);
+      if (!draftValidation.ok || !currentDraft) {
+        this.setData({ saveState: 'invalid', saveMessage: '请检查菜谱内容' });
         return false;
       }
       const recipe = cloneRecipe(this.data.recipe);
       const generation = this.editGeneration || 0;
-      const revision = this.data.draft.revision;
-      const baseMainVersionId = String(this.data.draft.baseMainVersionId || '');
+      const revision = currentDraft.revision;
+      const baseMainVersionId = String(currentDraft.baseMainVersionId || '');
       this.setData({ saveState: 'saving', saveMessage: '保存中' });
       try {
         const result = await recipeAssistant.updateDraft({
@@ -511,28 +523,37 @@ Page({
         });
         const draft = result && result.draft
           ? result.draft
-          : { ...this.data.draft, revision: revision + 1 };
+          : { ...currentDraft, revision: revision + 1 };
+        currentDraft = draft;
         this.lastSavedRecipeJson = JSON.stringify(recipe);
         const hasNewerEdit = (this.editGeneration || 0) !== generation;
         this.recipeDirty = hasNewerEdit;
         shouldSave = hasNewerEdit;
         const draftStatus = String(draft.status || this.data.draftStatus || 'editing');
-        this.setData({
-          draft,
-          draftStatus,
-          stateMessage: DRAFT_STATE_MESSAGES[draftStatus] || '',
-          manualEditing: draftStatus !== 'failed',
-          saveState: hasNewerEdit ? 'saving' : 'saved',
-          saveMessage: hasNewerEdit ? '保存中' : '已保存',
-        });
-        this.applyDraftMode();
+        if (!this.isUnloading) {
+          this.setData({
+            draft,
+            draftStatus,
+            stateMessage: DRAFT_STATE_MESSAGES[draftStatus] || '',
+            manualEditing: draftStatus !== 'failed',
+            saveState: hasNewerEdit ? 'saving' : 'saved',
+            saveMessage: hasNewerEdit ? '保存中' : '已保存',
+          });
+          this.applyDraftMode();
+        }
       } catch (error) {
         if (error && error.code === 'DRAFT_CONFLICT') {
+          if (this.isUnloading) {
+            this.recipeDirty = true;
+            return false;
+          }
           const localConflictRecipe = cloneRecipe(this.data.recipe);
           await this.resolveDraftConflict(localConflictRecipe);
           return false;
         }
-        this.setData({ saveState: 'error', saveMessage: '暂时无法保存，请稍后重试' });
+        if (!this.isUnloading) {
+          this.setData({ saveState: 'error', saveMessage: '暂时无法保存，请稍后重试' });
+        }
         return false;
       }
     }

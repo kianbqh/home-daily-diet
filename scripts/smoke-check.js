@@ -108,6 +108,8 @@ const requiredGuideFragments = [
   '仅管理端可读写', 'Node.js 20.19', 'index.main', 'CreateRecTask', 'DescribeTaskStatus',
   'TOKENHUB_API_KEY', 'ASR_SECRET_ID', '50%', '80%', '100%',
   '麦克风', '原始语音', 'TokenHub', '彻底删除',
+  '只读访问 `family_members` 和 `family_states`',
+  '客户端仅允许上传', 'wx.cloud.uploadFile',
 ];
 const missingGuideFragments = requiredGuideFragments.filter((fragment) => !setupGuide.includes(fragment));
 if (missingGuideFragments.length) {

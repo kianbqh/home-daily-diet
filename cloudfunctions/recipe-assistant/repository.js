@@ -201,8 +201,14 @@ function createRecipeRepository(db, config, options = {}) {
 
   async function listExpiredRecordingArtifacts(now, limit = 20) {
     const expiresAt = expirationFilter(now);
-    if (!expiresAt) return [];
-    return query(config.recordingCollection, { draftExpiresAt: expiresAt }, {
+    const excludesWorkspaceState = db.command && typeof db.command.neq === 'function'
+      ? db.command.neq('workspace_state')
+      : null;
+    if (!expiresAt || !excludesWorkspaceState) return [];
+    return query(config.recordingCollection, {
+      draftExpiresAt: expiresAt,
+      sourceType: excludesWorkspaceState,
+    }, {
       orderBy: 'draftExpiresAt', order: 'asc', limit: Math.min(Math.max(Number(limit) || 20, 1), 20),
     });
   }

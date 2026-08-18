@@ -25,6 +25,9 @@ function createLifecycleDatabase(seed = {}) {
     gt(value) {
       return { __operator: 'gt', value };
     },
+    neq(value) {
+      return { __operator: 'neq', value };
+    },
   };
 
   function records(name) {
@@ -38,6 +41,9 @@ function createLifecycleDatabase(seed = {}) {
     }
     if (expected && expected.__operator === 'gt') {
       return actual != null && String(actual) > String(expected.value);
+    }
+    if (expected && expected.__operator === 'neq') {
+      return actual !== expected.value;
     }
     return actual === expected;
   }
@@ -366,6 +372,34 @@ test('an expired cleanup claim prevents a later attachment from reporting succes
   assert.equal(db.records('recipe_recordings').get('workspace-claim-record-1').cleanupPending, true);
   assert.equal(attach.ok, false);
   assert.equal(attach.error.code, 'WORKSPACE_EXPIRED');
+});
+
+test('expired workspace-state rows cannot starve ordinary recording cleanup', async () => {
+  const now = 1_786_000_000_000;
+  const recordings = {};
+  for (let index = 0; index < 20; index += 1) {
+    const recordId = `legacy-${String(index).padStart(2, '0')}`;
+    recordings[`workspace-claim-${recordId}`] = {
+      familyId: 'family-a', dishId: 'dish-1', recordId,
+      sourceType: 'workspace_state', workspaceClaim: true,
+      workspaceFamilyId: 'family-a', workspaceDishId: 'dish-1', workspaceRecordId: recordId,
+      status: 'temporary', createdBy: 'member-a', draftExpiresAt: now - 2_000 + index,
+    };
+  }
+  recordings['expired-audio-after-claims'] = {
+    familyId: 'family-a', dishId: 'dish-1', recordId: 'record-audio',
+    sourceType: 'audio', status: 'ready', createdBy: 'member-a', fileId: '', draftExpiresAt: now - 1,
+  };
+  const db = createLifecycleDatabase({ recipe_recordings: recordings });
+  const repository = createRecipeRepository(db, DEFAULT_CONFIG);
+
+  await cleanupExpiredWorkspaces(repository, null, now, 20);
+  await cleanupExpiredWorkspaces(repository, null, now, 20);
+
+  assert.equal(db.records('recipe_recordings').has('expired-audio-after-claims'), false);
+  assert.equal([...db.records('recipe_recordings').values()].filter(
+    (item) => item.sourceType === 'workspace_state'
+  ).length, 21);
 });
 
 test('opportunistic cleanup processes at most twenty indexed expired artifacts and retries failed files', async () => {

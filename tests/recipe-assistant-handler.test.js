@@ -1914,6 +1914,13 @@ test('deletion while ASR submission is pending prevents a late result from resur
   const stored = db.records('recipe_recordings').get('recording-race');
   assert.equal(stored.status, 'deleted');
   assert.notEqual(stored.asrTaskId, 3001);
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const operation = [...db.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation');
+  assert.equal(usage.asrSeconds, 180);
+  assert.equal(Object.keys(usage.reservations).length, 0);
+  assert.equal(operation.status, 'settled');
+  assert.equal(operation.settled, 180);
 });
 
 test('production file adapter downloads and parses trusted MP3 bytes without retaining client metadata', async () => {
@@ -2327,6 +2334,14 @@ test('a stale submit success cannot overwrite a newer lease result', async () =>
   assert.equal(stored.status, 'transcribing');
   assert.equal(stored.asrTaskId, 2002);
   assert.equal(stored.asrRequestId, 'second-request');
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const operations = [...db.records('recipe_usage_daily').values()]
+    .filter((item) => item.sourceType === 'usage_operation');
+  assert.equal(usage.asrSeconds, 360);
+  assert.equal(Object.keys(usage.reservations).length, 1);
+  assert.equal(operations.find((item) => item.createdAt === 100).status, 'settled');
+  assert.equal(operations.find((item) => item.createdAt === 100).settled, 180);
+  assert.equal(operations.find((item) => item.createdAt === 120_100).status, 'reserved');
 });
 
 test('a stale submit failure cannot mark a newer task failed', async () => {
@@ -3064,6 +3079,39 @@ test('ASR ready after the Shanghai day boundary settles the reservation day', as
   assert.equal(refreshed.ok, true);
   assert.equal(db.records('recipe_usage_daily').get('family-a|2026-08-13').asrSeconds, 12.5);
   assert.equal(db.records('recipe_usage_daily').has('family-a|2026-08-14'), false);
+});
+
+test('a terminal ASR task failure consumes the reservation and clears the active entry', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices({
+    asrProvider: {
+      async submit() {
+        return { taskId: 1001, requestId: 'submitted', submittedAt: 100, expiresAt: 1000 };
+      },
+      async query() {
+        return { status: 'failed', transcript: '', durationMs: 0, requestId: 'failed', errorCode: 'ASR_TASK_FAILED' };
+      },
+    },
+  });
+  await reserveOwnedRecording(db, services);
+  const submitted = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  }, 'openid-a', services);
+  assert.equal(submitted.ok, true);
+
+  const refreshed = await invoke(db, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+
+  assert.equal(refreshed.ok, true);
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const operation = [...db.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation');
+  assert.equal(usage.asrSeconds, 180);
+  assert.equal(Object.keys(usage.reservations).length, 0);
+  assert.equal(operation.status, 'settled');
+  assert.equal(operation.settled, 180);
 });
 
 test('organizeDraft releases a pre-request failure but consumes issued invalid output', async () => {

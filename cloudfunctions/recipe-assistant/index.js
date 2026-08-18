@@ -431,15 +431,23 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     if (disposition === 'lost') throw createRecipeError('ASR_SUBMIT_LEASE_LOST', '录音提交已由新的请求接管');
     throw error;
   }
-  const updated = await repository.runTransaction(async (transaction) => {
+  const finalized = await repository.runTransaction(async (transaction) => {
     const current = await transaction.getRecording(familyId, dishId, recordingId);
     if (!current || current.status === 'deleted') {
-      throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
+      await transaction.settleAsrUsage({
+        familyId, operationId: usageOperationId, actualSeconds: ASR_RESERVATION_SECONDS,
+        billingTimestamp: now, now: nowMs(dependencies),
+      });
+      return { disposition: 'deleted', recording: current };
     }
     if (current.status !== 'uploading' || current.asrSubmitToken !== submitToken) {
-      throw createRecipeError('ASR_SUBMIT_LEASE_LOST', '录音提交已由新的请求接管');
+      await transaction.settleAsrUsage({
+        familyId, operationId: usageOperationId, actualSeconds: ASR_RESERVATION_SECONDS,
+        billingTimestamp: now, now: nowMs(dependencies),
+      });
+      return { disposition: 'lost', recording: current };
     }
-    return transaction.setRecording(recordingId, {
+    const updated = await transaction.setRecording(recordingId, {
       ...current, status: 'transcribing', asrTaskId: requireAsrTaskId(task.taskId, 'ASR_SUBMIT_RESPONSE_INVALID'),
       asrRequestId: task.requestId || '',
       asrSubmittedAt: task.submittedAt == null ? now : task.submittedAt,
@@ -447,8 +455,11 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
       asrSubmitToken: '', asrSubmitLeaseExpiresAt: null,
       errorCode: '', updatedBy: member.memberId, updatedAt: now,
     });
+    return { disposition: 'owned', recording: updated };
   });
-  return { recording: updated };
+  if (finalized.disposition === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
+  if (finalized.disposition === 'lost') throw createRecipeError('ASR_SUBMIT_LEASE_LOST', '录音提交已由新的请求接管');
+  return { recording: finalized.recording };
 }
 
 async function refreshWorkspace(repository, member, familyId, dishId, rawRecordId, dependencies, now) {
@@ -500,6 +511,15 @@ async function refreshWorkspace(repository, member, familyId, dishId, rawRecordI
           errorCode: '',
           updatedBy: member.memberId,
           updatedAt: now,
+        });
+      }
+      if (current.asrUsageOperationId) {
+        await transaction.settleAsrUsage({
+          familyId,
+          operationId: current.asrUsageOperationId,
+          actualSeconds: ASR_RESERVATION_SECONDS,
+          billingTimestamp: current.asrUsageReservedAt,
+          now,
         });
       }
       return transaction.setRecording(candidate._id, {

@@ -12,6 +12,7 @@ const {
   buildSourceText,
   createInputHash,
   createRecipeError,
+  createUsageOperationId,
   publicMessage,
   requireRevision,
   requireTranscriptRevision,
@@ -51,6 +52,7 @@ const MAX_RECORDING_DURATION_MS = 3 * 60 * 1000;
 const RECORDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // Longer than the normal cloud invocation path, but short enough to recover a crashed submission promptly.
 const ASR_SUBMIT_LEASE_MS = 2 * 60 * 1000;
+const ASR_RESERVATION_SECONDS = 180;
 const ORGANIZE_LEASE_MS = 10 * 60 * 1000;
 const MAX_SOURCE_CHARACTERS = 30_000;
 let productionAsrProvider = null;
@@ -336,6 +338,10 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   const fileApi = dependencies.fileApi;
   const asrProvider = dependencies.asrProvider;
   const submitToken = createAsrSubmitToken(dependencies);
+  const usageOperationId = createUsageOperationId({
+    kind: 'asr', familyId, artifactId: recordingId, leaseId: submitToken,
+    parameter: String(ASR_RESERVATION_SECONDS),
+  });
   const recording = await repository.getRecording(familyId, dishId, recordingId);
   if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
   if (recording.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
@@ -353,6 +359,9 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
   if (metadata.durationMs > MAX_RECORDING_DURATION_MS) throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '每段录音不能超过 3 分钟');
   if (metadata.format !== 'mp3' || recording.format !== 'mp3') {
     throw createRecipeError('RECORDING_FORMAT_INVALID', '录音格式必须为 MP3');
+  }
+  if (dependencies.asrProviderConfigured === false) {
+    throw createRecipeError('ASR_NOT_CONFIGURED', '语音识别服务尚未配置');
   }
   const accepted = await repository.runTransaction(async (transaction) => {
     const current = await transaction.getRecording(familyId, dishId, recordingId);
@@ -375,6 +384,9 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     if (totalDuration > MAX_WORKSPACE_DURATION_MS) {
       throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '单次制作录音累计不能超过 15 分钟');
     }
+    await transaction.reserveAsrUsage({
+      familyId, seconds: ASR_RESERVATION_SECONDS, operationId: usageOperationId, now,
+    });
     await transaction.setWorkspaceState(familyId, dishId, current.recordId, {
       ...(state || {}), familyId, dishId, recordId: current.recordId, sourceType: 'workspace_state',
       createdBy: state && state.createdBy || member.memberId,
@@ -387,18 +399,28 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
       ...current, fileId, byteLength: metadata.byteLength, durationMs: validDuration(metadata.durationMs), durationCommitted: true,
       status: 'uploading', asrTaskId: '', asrRequestId: '', asrSubmittedAt: null, asrExpiresAt: null,
       asrSubmitToken: submitToken, asrSubmitLeaseExpiresAt: now + ASR_SUBMIT_LEASE_MS,
+      asrUsageOperationId: usageOperationId,
+      asrUsageReservedAt: now,
       errorCode: '', updatedBy: member.memberId, updatedAt: now,
     });
   });
   let task = {};
+  let requestIssued = false;
   try {
     if (asrProvider && typeof asrProvider.submit === 'function') {
       const url = await temporaryFileUrl(fileApi, fileId);
+      requestIssued = true;
       task = await asrProvider.submit({ url, fileId, recordingId });
     }
     requireAsrTaskId(task.taskId, 'ASR_SUBMIT_RESPONSE_INVALID');
   } catch (error) {
+    if (error && error.requestIssued === false) requestIssued = false;
     const disposition = await repository.runTransaction(async (transaction) => {
+      if (!requestIssued) {
+        await transaction.releaseAsrUsage({
+          familyId, operationId: usageOperationId, billingTimestamp: now, now: nowMs(dependencies),
+        });
+      }
       const current = await transaction.getRecording(familyId, dishId, recordingId);
       if (!current || current.status === 'deleted') return 'deleted';
       if (current.status !== 'uploading' || current.asrSubmitToken !== submitToken) return 'lost';
@@ -465,6 +487,15 @@ async function refreshWorkspace(repository, member, familyId, dishId, rawRecordI
       if (result.status === 'ready') {
         const transcript = String(result.transcript || '').trim();
         const preserveEdit = Number(current.transcriptRevision) > 0 || String(current.editedTranscript || '').trim() !== '';
+        if (current.asrUsageOperationId) {
+          await transaction.settleAsrUsage({
+            familyId,
+            operationId: current.asrUsageOperationId,
+            actualSeconds: Math.max(0, Number(result.durationMs) || 0) / 1000,
+            billingTimestamp: current.asrUsageReservedAt,
+            now,
+          });
+        }
         return transaction.setRecording(candidate._id, {
           ...current,
           status: 'ready',
@@ -914,6 +945,11 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
     if (draft.status === 'ready' && draft.inputHash === inputHash) {
       return { reused: true, draft };
     }
+    recipeProviderFor(dependencies, modelName, promptVersion);
+    const usageOperationId = createUsageOperationId({
+      kind: 'organize', familyId, artifactId: draftId, leaseId, parameter: inputHash,
+    });
+    await transaction.reserveOrganizeUsage({ familyId, operationId: usageOperationId, now });
 
     const organizingDraft = await transaction.setDraft(draftId, {
       ...draft,
@@ -923,6 +959,8 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
       inputHash,
       organizeLeaseId: leaseId,
       organizeLeaseExpiresAt: now + ORGANIZE_LEASE_MS,
+      organizeUsageOperationId: usageOperationId,
+      organizeUsageReservedAt: now,
       modelProvider: 'tokenhub',
       modelName,
       promptVersion,
@@ -932,13 +970,18 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
       updatedBy: member.memberId,
       updatedAt: now,
     });
-    return { reused: false, draft: organizingDraft, sourceText, inputHash, leaseId };
+    return {
+      reused: false, draft: organizingDraft, sourceText, inputHash, leaseId,
+      usageOperationId, usageReservedAt: now,
+    };
   });
 
   if (acquired.reused) return { draft: acquired.draft, reused: true };
 
+  const provider = recipeProviderFor(dependencies, modelName, promptVersion);
+  let requestIssued = false;
   try {
-    const provider = recipeProviderFor(dependencies, modelName, promptVersion);
+    requestIssued = true;
     const result = await provider.organize({
       sourceText: acquired.sourceText,
       userId: familyModelUserId(familyId),
@@ -947,6 +990,10 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
     return repository.runTransaction(async (transaction) => {
       const current = await transaction.getDraft({ familyId, dishId, draftId });
       if (!current) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+      await transaction.settleOrganizeUsage({
+        familyId, operationId: acquired.usageOperationId,
+        billingTimestamp: acquired.usageReservedAt, now: nowMs(dependencies),
+      });
       if (!organizeLeaseMatches(current, acquired.leaseId, acquired.inputHash)) {
         return { draft: current, stale: true };
       }
@@ -967,10 +1014,17 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
       return { draft: await transaction.setDraft(draftId, readyDraft), stale: false };
     });
   } catch (error) {
+    if (error && error.requestIssued === false) requestIssued = false;
     const errorCode = safeOrganizeErrorCode(error);
     const failed = await repository.runTransaction(async (transaction) => {
       const current = await transaction.getDraft({ familyId, dishId, draftId });
       if (!current) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+      const usageInput = {
+        familyId, operationId: acquired.usageOperationId,
+        billingTimestamp: acquired.usageReservedAt, now: nowMs(dependencies),
+      };
+      if (requestIssued) await transaction.settleOrganizeUsage(usageInput);
+      else await transaction.releaseOrganizeUsage(usageInput);
       if (!organizeLeaseMatches(current, acquired.leaseId, acquired.inputHash)) {
         return { draft: current, stale: true };
       }
@@ -1058,6 +1112,9 @@ function timestampMs(value) {
 
 function recipeProviderFor(dependencies, modelName, promptVersion) {
   if (!ALLOWED_RECIPE_MODELS.includes(modelName)) {
+    throw createRecipeError('AI_NOT_CONFIGURED', 'AI 整理服务尚未正确配置');
+  }
+  if (dependencies.recipeProviderConfigured === false) {
     throw createRecipeError('AI_NOT_CONFIGURED', 'AI 整理服务尚未正确配置');
   }
   const provider = dependencies.recipeProvider
@@ -1455,17 +1512,33 @@ async function main(event = {}, context = {}) {
     const db = cloud.database(runtimeEnv ? { env: runtimeEnv } : {});
     const fileApi = createCloudFileApi(cloud);
     const asrProvider = {
-      submit(input) { return getProductionAsrProvider().submit(input); },
+      submit(input) {
+        try {
+          return getProductionAsrProvider().submit(input);
+        } catch (error) {
+          error.requestIssued = false;
+          throw error;
+        }
+      },
       query(input) { return getProductionAsrProvider().query(input); },
     };
     const recipeProvider = {
-      organize(input) { return getProductionRecipeProvider().organize(input); },
+      async organize(input) {
+        try {
+          return await getProductionRecipeProvider().organize(input);
+        } catch (error) {
+          if (runtimeErrorCode(error) === 'AI_NOT_CONFIGURED') error.requestIssued = false;
+          throw error;
+        }
+      },
     };
     return handleAction(event, requestContext, {
       db,
       fileApi,
       asrProvider,
+      asrProviderConfigured: productionAsrConfigured(process.env),
       recipeProvider,
+      recipeProviderConfigured: Boolean(String(process.env.TOKENHUB_API_KEY || '').trim()),
       now: Date.now,
       logger: console,
       startedAt,
@@ -1482,6 +1555,14 @@ async function main(event = {}, context = {}) {
     if (typeof console !== 'undefined' && typeof console.error === 'function') console.error(log);
     return { ok: false, error: { code, message: publicMessage(error) } };
   }
+}
+
+function productionAsrConfigured(env = {}) {
+  const runtimeId = env.TENCENTCLOUD_SECRETID || env.TENCENTCLOUD_SECRET_ID;
+  const runtimeKey = env.TENCENTCLOUD_SECRETKEY || env.TENCENTCLOUD_SECRET_KEY;
+  const dedicatedId = env.ASR_SECRET_ID;
+  const dedicatedKey = env.ASR_SECRET_KEY;
+  return Boolean((runtimeId && runtimeKey) || (dedicatedId && dedicatedKey));
 }
 
 function getProductionAsrProvider() {

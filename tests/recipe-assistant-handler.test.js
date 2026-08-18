@@ -2934,3 +2934,165 @@ test('organizeDraft rejects a selected recording outside the draft record withou
   assert.equal(calls, 0);
   assert.equal(JSON.stringify(result).includes('不应读取'), false);
 });
+
+test('submitRecording reserves 180 seconds, releases only a definite no-request failure, and settles ready duration once', async () => {
+  const failedDb = createMemoryDatabase(baseSeed());
+  const failedServices = recordingServices({
+    asrProvider: { async submit() {
+      const error = new Error('configuration failed before request');
+      error.code = 'ASR_NOT_CONFIGURED';
+      error.requestIssued = false;
+      throw error;
+    } },
+  });
+  await reserveOwnedRecording(failedDb, failedServices);
+  const failed = await invoke(failedDb, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3', operationId: 'forged-client-operation',
+  }, 'openid-a', failedServices);
+
+  assert.equal(failed.ok, false);
+  const failedUsage = failedDb.records('recipe_usage_daily').get('family-a|1970-01-01');
+  assert.equal(failedUsage.asrSeconds, 0);
+  assert.equal(Object.values(failedUsage.reservations)[0].status, 'released');
+  assert.equal(Object.hasOwn(failedUsage.reservations, 'forged-client-operation'), false);
+
+  const readyDb = createMemoryDatabase(baseSeed());
+  const readyServices = recordingServices({
+    asrProvider: {
+      async submit() { return { taskId: 1001, requestId: 'submit-safe', submittedAt: 100, expiresAt: 200 }; },
+      async query() {
+        return { status: 'ready', transcript: '只存录音文档', durationMs: 12_500, requestId: 'ready-safe', errorCode: '' };
+      },
+    },
+  });
+  await reserveOwnedRecording(readyDb, readyServices);
+  const submitted = await invoke(readyDb, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3', operationId: 'forged-client-operation',
+  }, 'openid-a', readyServices);
+  assert.equal(submitted.ok, true);
+  assert.equal(readyDb.records('recipe_usage_daily').get('family-a|1970-01-01').asrSeconds, 180);
+
+  await invoke(readyDb, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', readyServices);
+  await invoke(readyDb, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', readyServices);
+
+  const readyUsage = readyDb.records('recipe_usage_daily').get('family-a|1970-01-01');
+  assert.equal(readyUsage.asrSeconds, 12.5);
+  assert.equal(Object.values(readyUsage.reservations)[0].status, 'settled');
+  assert.equal(Object.values(readyUsage.reservations)[0].settled, 12.5);
+  assert.equal(JSON.stringify(submitted.data).includes('UsageOperation'), false);
+});
+
+test('ASR quota rejection does not call the provider', async () => {
+  const seed = baseSeed();
+  seed.recipe_usage_daily = {
+    'family-a|1970-01-01': {
+      _id: 'family-a|1970-01-01', familyId: 'family-a', billingDate: '1970-01-01',
+      billingTimezone: 'Asia/Shanghai', asrSeconds: 3600, organizeCalls: 0, reservations: {},
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let calls = 0;
+  const services = recordingServices({
+    asrProvider: { async submit() { calls += 1; throw new Error('must not call'); } },
+  });
+  await reserveOwnedRecording(db, services);
+
+  const result = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  }, 'openid-a', services);
+
+  assert.equal(result.error.code, 'DAILY_ASR_LIMIT');
+  assert.equal(calls, 0);
+  assert.equal(db.records('recipe_recordings').get('recording-fixed').status, 'reserved');
+});
+
+test('ASR ready after the Shanghai day boundary settles the reservation day', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  let clock = Date.parse('2026-08-13T15:59:59.900Z');
+  const services = recordingServices({
+    now: () => clock,
+    asrProvider: {
+      async submit() {
+        return { taskId: 1001, requestId: 'before-midnight', submittedAt: clock, expiresAt: clock + 60_000 };
+      },
+      async query() {
+        return { status: 'ready', transcript: '跨日结果', durationMs: 12_500, requestId: 'after-midnight', errorCode: '' };
+      },
+    },
+  });
+  await reserveOwnedRecording(db, services);
+  const submitted = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  }, 'openid-a', services);
+  assert.equal(submitted.ok, true);
+
+  clock = Date.parse('2026-08-13T16:00:00.100Z');
+  const refreshed = await invoke(db, {
+    action: 'refreshWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  }, 'openid-a', services);
+
+  assert.equal(refreshed.ok, true);
+  assert.equal(db.records('recipe_usage_daily').get('family-a|2026-08-13').asrSeconds, 12.5);
+  assert.equal(db.records('recipe_usage_daily').has('family-a|2026-08-14'), false);
+});
+
+test('organizeDraft releases a pre-request failure but consumes issued invalid output', async () => {
+  const preflightDb = createMemoryDatabase(organizeSeed());
+  const preflight = await invoke(preflightDb, organizeEvent(), 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-preflight',
+    recipeProvider: { async organize() {
+      const error = new Error('missing configuration before fetch');
+      error.code = 'AI_NOT_CONFIGURED';
+      error.requestIssued = false;
+      throw error;
+    } },
+  });
+
+  assert.equal(preflight.error.code, 'AI_NOT_CONFIGURED');
+  const preflightUsage = preflightDb.records('recipe_usage_daily').get('family-a|1970-01-01');
+  assert.equal(preflightUsage.organizeCalls, 0);
+  assert.equal(Object.values(preflightUsage.reservations)[0].status, 'released');
+
+  const invalidDb = createMemoryDatabase(organizeSeed());
+  const invalid = await invoke(invalidDb, organizeEvent(), 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-invalid-output',
+    recipeProvider: { async organize() { return { recipe: { title: 'invalid provider output' } }; } },
+  });
+
+  assert.equal(invalid.error.code, 'AI_OUTPUT_INVALID');
+  const invalidUsage = invalidDb.records('recipe_usage_daily').get('family-a|1970-01-01');
+  assert.equal(invalidUsage.organizeCalls, 1);
+  assert.equal(Object.values(invalidUsage.reservations)[0].status, 'settled');
+  assert.equal(JSON.stringify(invalidUsage).includes('invalid provider output'), false);
+});
+
+test('organize quota rejection does not call the provider or store caller content', async () => {
+  const seed = organizeSeed();
+  seed.recipe_usage_daily = {
+    'family-a|1970-01-01': {
+      _id: 'family-a|1970-01-01', familyId: 'family-a', billingDate: '1970-01-01',
+      billingTimezone: 'Asia/Shanghai', asrSeconds: 0, organizeCalls: 20, reservations: {},
+    },
+  };
+  const db = createMemoryDatabase(seed);
+  let calls = 0;
+  const result = await invoke(db, {
+    ...organizeEvent(), operationId: 'forged-operation', apiKey: 'sk-do-not-store', rawProvider: { private: true },
+  }, 'openid-a', {
+    recipeModel: 'hy3', recipePromptVersion: 'v1', organizeLeaseIdGenerator: () => 'lease-over-limit',
+    recipeProvider: { async organize() { calls += 1; return { recipe: organizedRecipe() }; } },
+  });
+
+  assert.equal(result.error.code, 'DAILY_ORGANIZE_LIMIT');
+  assert.equal(calls, 0);
+  assert.equal(db.records('recipe_drafts').get('draft-recording').status, 'editing');
+  assert.equal(JSON.stringify(db.records('recipe_usage_daily').get('family-a|1970-01-01')).includes('sk-do-not-store'), false);
+});

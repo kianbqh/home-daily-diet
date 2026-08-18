@@ -1,5 +1,12 @@
 const crypto = require('node:crypto');
 
+const BILLING_TIMEZONE = 'Asia/Shanghai';
+const BILLING_TIMEZONE_OFFSET_MINUTES = 8 * 60;
+const ASR_DAILY_SECONDS = 3600;
+const ORGANIZE_DAILY_CALLS = 20;
+const MAX_USAGE_RESERVATIONS = 128;
+const RELEASED_RESERVATION_RETENTION_MS = 15 * 60 * 1000;
+
 function createRecipeError(code, message, stage = 'action') {
   const error = new Error(message);
   error.name = 'RecipeAssistantError';
@@ -64,6 +71,41 @@ function createInputHash({ sourceText, modelName, promptVersion } = {}) {
   return crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
 }
 
+function usageDocumentId(familyId, timestamp = Date.now()) {
+  const normalizedFamilyId = boundedUsagePart(familyId);
+  const time = Number(timestamp);
+  if (!Number.isFinite(time)) {
+    throw createRecipeError('USAGE_OPERATION_INVALID', '用量操作信息无效', 'validate');
+  }
+  const billingDate = new Date(time + BILLING_TIMEZONE_OFFSET_MINUTES * 60 * 1000)
+    .toISOString().slice(0, 10);
+  return `${normalizedFamilyId}|${billingDate}`;
+}
+
+function createUsageOperationId({ kind, familyId, artifactId, leaseId, parameter = '' } = {}) {
+  const normalizedKind = String(kind || '').trim();
+  if (!['asr', 'organize'].includes(normalizedKind)) {
+    throw createRecipeError('USAGE_OPERATION_INVALID', '用量操作信息无效', 'validate');
+  }
+  const parts = [familyId, artifactId, leaseId].map(boundedUsagePart);
+  const normalizedParameter = String(parameter == null ? '' : parameter);
+  if (normalizedParameter.length > 500) {
+    throw createRecipeError('USAGE_OPERATION_INVALID', '用量操作信息无效', 'validate');
+  }
+  const digest = crypto.createHash('sha256')
+    .update(JSON.stringify([normalizedKind, ...parts, normalizedParameter]), 'utf8')
+    .digest('hex');
+  return `${normalizedKind}-${digest}`;
+}
+
+function boundedUsagePart(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized || normalized.length > 300) {
+    throw createRecipeError('USAGE_OPERATION_INVALID', '用量操作信息无效', 'validate');
+  }
+  return normalized;
+}
+
 function sanitizeTokenUsage(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const allowed = [
@@ -102,15 +144,25 @@ function sensitiveKey(key) {
   return normalized.includes('openid')
     || normalized === 'asrsubmittoken'
     || normalized === 'asrsubmitleaseexpiresat'
+    || normalized === 'asrusagereservedat'
+    || normalized.endsWith('usageoperationid')
     || normalized === 'organizeleaseid'
     || normalized === 'organizeleaseexpiresat'
+    || normalized === 'organizeusagereservedat'
     || /urls?$/.test(normalized);
 }
 
 module.exports = {
+  ASR_DAILY_SECONDS,
+  BILLING_TIMEZONE,
+  BILLING_TIMEZONE_OFFSET_MINUTES,
+  MAX_USAGE_RESERVATIONS,
+  ORGANIZE_DAILY_CALLS,
+  RELEASED_RESERVATION_RETENTION_MS,
   buildSourceText,
   createInputHash,
   createRecipeError,
+  createUsageOperationId,
   publicMessage,
   requireRevision,
   requireTranscriptRevision,
@@ -118,5 +170,6 @@ module.exports = {
   runtimeErrorCode,
   sanitize,
   sanitizeTokenUsage,
+  usageDocumentId,
   withoutSystemId,
 };

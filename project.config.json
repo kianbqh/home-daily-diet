@@ -23,6 +23,14 @@
                 "type": "folder"
             },
             {
+                "value": ".superpowers",
+                "type": "folder"
+            },
+            {
+                "value": ".worktrees",
+                "type": "folder"
+            },
+            {
                 "value": "docs",
                 "type": "folder"
             },
@@ -33,6 +41,14 @@
             {
                 "value": "tests",
                 "type": "folder"
+            },
+            {
+                "value": ".env",
+                "type": "file"
+            },
+            {
+                "value": ".env.example",
+                "type": "file"
             },
             {
                 "value": "README.md",

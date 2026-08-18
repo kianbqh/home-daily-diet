@@ -33,6 +33,36 @@ function createPageInstance(definition, data = {}) {
   };
 }
 
+test('phase two recipe routes, components, and cloud function files are registered', () => {
+  const appConfig = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+  const recipeDraftConfig = JSON.parse(fs.readFileSync('pages/recipe-draft/recipe-draft.json', 'utf8'));
+  const dishDetailConfig = JSON.parse(fs.readFileSync('pages/dish-edit/dish-edit.json', 'utf8'));
+  const requiredFiles = [
+    'pages/recipe/recipe.js',
+    'pages/recipe/recipe.wxml',
+    'pages/recipe-draft/recipe-draft.js',
+    'pages/recipe-draft/recipe-draft.wxml',
+    'components/recipe-editor/recipe-editor.js',
+    'components/recipe-recording-workspace/recipe-recording-workspace.js',
+    'cloudfunctions/recipe-assistant/index.js',
+    'cloudfunctions/recipe-assistant/providers/tencent-asr.js',
+    'cloudfunctions/recipe-assistant/providers/tokenhub.js',
+    'cloudfunctions/recipe-assistant/package-lock.json',
+  ];
+
+  assert.equal(appConfig.pages.includes('pages/recipe/recipe'), true);
+  assert.equal(appConfig.pages.includes('pages/recipe-draft/recipe-draft'), true);
+  assert.equal(
+    recipeDraftConfig.usingComponents['recipe-editor'],
+    '/components/recipe-editor/recipe-editor'
+  );
+  assert.equal(
+    dishDetailConfig.usingComponents['recipe-recording-workspace'],
+    '/components/recipe-recording-workspace/recipe-recording-workspace'
+  );
+  requiredFiles.forEach((file) => assert.equal(fs.existsSync(file), true, file));
+});
+
 test('refreshable pages expose pull-down lifecycle methods and enable native refresh globally', () => {
   const appConfig = JSON.parse(fs.readFileSync('app.json', 'utf8'));
   const pagePaths = [

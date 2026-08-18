@@ -15,15 +15,32 @@ const requiredFiles = [
   'services/cloudbase-sync.js',
   'services/app-bootstrap.js',
   'services/app-store.js',
+  'services/recipe-assistant.js',
   'cloudfunctions/family-access/index.js',
   'cloudfunctions/family-access/logic.js',
   'cloudfunctions/family-access/package.json',
+  'cloudfunctions/recipe-assistant/index.js',
+  'cloudfunctions/recipe-assistant/logic.js',
+  'cloudfunctions/recipe-assistant/repository.js',
+  'cloudfunctions/recipe-assistant/recipe-schema.js',
+  'cloudfunctions/recipe-assistant/providers/tencent-asr.js',
+  'cloudfunctions/recipe-assistant/providers/tokenhub.js',
+  'cloudfunctions/recipe-assistant/package.json',
+  'cloudfunctions/recipe-assistant/package-lock.json',
   'utils/format.js',
   'utils/page-refresh.js',
   'utils/view-model.js',
   'components/dish-card/dish-card.js',
   'components/dish-card/dish-card.wxml',
   'components/dish-card/dish-card.wxss',
+  'components/recipe-editor/recipe-editor.js',
+  'components/recipe-editor/recipe-editor.json',
+  'components/recipe-editor/recipe-editor.wxml',
+  'components/recipe-editor/recipe-editor.wxss',
+  'components/recipe-recording-workspace/recipe-recording-workspace.js',
+  'components/recipe-recording-workspace/recipe-recording-workspace.json',
+  'components/recipe-recording-workspace/recipe-recording-workspace.wxml',
+  'components/recipe-recording-workspace/recipe-recording-workspace.wxss',
   'pages/index/index.js',
   'pages/index/index.wxml',
   'pages/index/index.wxss',
@@ -33,6 +50,14 @@ const requiredFiles = [
   'pages/dish-edit/dish-edit.js',
   'pages/dish-edit/dish-edit.wxml',
   'pages/dish-edit/dish-edit.wxss',
+  'pages/recipe/recipe.js',
+  'pages/recipe/recipe.json',
+  'pages/recipe/recipe.wxml',
+  'pages/recipe/recipe.wxss',
+  'pages/recipe-draft/recipe-draft.js',
+  'pages/recipe-draft/recipe-draft.json',
+  'pages/recipe-draft/recipe-draft.wxml',
+  'pages/recipe-draft/recipe-draft.wxss',
   'pages/meal/meal.js',
   'pages/meal/meal.wxml',
   'pages/meal/meal.wxss',
@@ -42,6 +67,8 @@ const requiredFiles = [
   'pages/trash/trash.js',
   'pages/trash/trash.wxml',
   'pages/trash/trash.wxss',
+  '.env.example',
+  'docs/cloudbase-phase-two-setup.md',
 ];
 
 const missing = requiredFiles.filter((file) => !fs.existsSync(path.join(root, file)));
@@ -50,10 +77,50 @@ if (missing.length) {
   process.exit(1);
 }
 
+const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
+const envValues = new Map(envExample.split(/\r?\n/).filter(Boolean).map((line) => {
+  const separator = line.indexOf('=');
+  return separator < 0 ? [line, ''] : [line.slice(0, separator), line.slice(separator + 1)];
+}));
+const expectedEnvironment = new Map([
+  ['TOKENHUB_API_KEY', 'replace-in-cloud-function-console'],
+  ['RECIPE_MODEL', 'hy3'],
+  ['RECIPE_PROMPT_VERSION', 'v1'],
+  ['ASR_SECRET_ID', 'replace-in-cloud-function-console'],
+  ['ASR_SECRET_KEY', 'replace-in-cloud-function-console'],
+  ['ASR_SESSION_TOKEN', ''],
+  ['ASR_REGION', 'ap-shanghai'],
+  ['ASR_ENGINE', '16k_zh'],
+]);
+const environmentMismatches = [...expectedEnvironment].filter(
+  ([key, value]) => envValues.get(key) !== value
+);
+if (environmentMismatches.length) {
+  console.error(`SMOKE FAIL: phase two environment example mismatch\n${environmentMismatches.map(
+    ([key, value]) => `${key}: expected ${value || '<empty>'}`
+  ).join('\n')}`);
+  process.exit(1);
+}
+
+const setupGuide = fs.readFileSync(path.join(root, 'docs/cloudbase-phase-two-setup.md'), 'utf8');
+const requiredGuideFragments = [
+  'recipe_recordings', 'recipe_drafts', 'family_recipes', 'recipe_versions', 'recipe_usage_daily',
+  '仅管理端可读写', 'Node.js 20.19', 'index.main', 'CreateRecTask', 'DescribeTaskStatus',
+  'TOKENHUB_API_KEY', 'ASR_SECRET_ID', '50%', '80%', '100%',
+  '麦克风', '原始语音', 'TokenHub', '彻底删除',
+];
+const missingGuideFragments = requiredGuideFragments.filter((fragment) => !setupGuide.includes(fragment));
+if (missingGuideFragments.length) {
+  console.error(`SMOKE FAIL: phase two setup guide is incomplete\n${missingGuideFragments.join('\n')}`);
+  process.exit(1);
+}
+
 const expectedPages = [
   'pages/index/index',
   'pages/dishes/dishes',
   'pages/dish-edit/dish-edit',
+  'pages/recipe/recipe',
+  'pages/recipe-draft/recipe-draft',
   'pages/meal/meal',
   'pages/family/family',
   'pages/trash/trash',
@@ -72,6 +139,8 @@ const expectedReleaseConfig = {
   memberCollection: 'family_members',
   inviteCollection: 'family_invites',
   accessFunction: 'family-access',
+  recipeFunction: 'recipe-assistant',
+  recipeAudioPrefix: 'families/',
 };
 const actualReleaseConfig = {
   appid: projectConfig.appid,
@@ -81,6 +150,8 @@ const actualReleaseConfig = {
   memberCollection: cloudConfig.memberCollection,
   inviteCollection: cloudConfig.inviteCollection,
   accessFunction: cloudConfig.accessFunction,
+  recipeFunction: cloudConfig.recipeFunction,
+  recipeAudioPrefix: cloudConfig.recipeAudioPrefix,
 };
 const configMismatches = Object.keys(expectedReleaseConfig).filter(
   (key) => actualReleaseConfig[key] !== expectedReleaseConfig[key]
@@ -114,9 +185,13 @@ const requiredIgnoredEntries = [
   '.codex-downloads',
   '.wechat-devtools-data',
   '.wechat-devtools-profile',
+  '.superpowers',
+  '.worktrees',
   'docs',
   'scripts',
   'tests',
+  '.env',
+  '.env.example',
   'README.md',
   'SPEC.md',
   'package.json',
@@ -128,11 +203,41 @@ if (missingIgnoreEntries.length) {
   process.exit(1);
 }
 
+const cloudFunctionRoot = String(projectConfig.cloudfunctionRoot || '')
+  .replace(/\\/g, '/')
+  .replace(/^\.\//, '')
+  .replace(/\/$/, '')
+  .split('/')[0];
+const implicitExcludedRoots = new Set(['node_modules', cloudFunctionRoot].filter(Boolean));
+
+function isPackagePathIgnored(relativePath) {
+  const normalized = String(relativePath || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  const rootName = normalized.split('/')[0];
+  return implicitExcludedRoots.has(rootName)
+    || ignoredEntries.has(rootName)
+    || ignoredEntries.has(normalized);
+}
+
+const protectedPackagePaths = [
+  '.env',
+  '.env.example',
+  '.superpowers/sdd/review.diff',
+  '.worktrees/feature-branch/app.js',
+  'tests/fixtures/private/example.json',
+  'docs/cloudbase-phase-two-setup.md',
+  'scripts/smoke-check.js',
+];
+const leakedProtectedPaths = protectedPackagePaths.filter((file) => !isPackagePathIgnored(file));
+if (leakedProtectedPaths.length) {
+  console.error(`SMOKE FAIL: private or development paths enter the main package\n${leakedProtectedPaths.join('\n')}`);
+  process.exit(1);
+}
+
 function listIncludedFiles(directory, prefix = '') {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
     const rootName = relativePath.split('/')[0];
-    if (ignoredEntries.has(rootName) || ignoredEntries.has(relativePath)) return [];
+    if (isPackagePathIgnored(relativePath)) return [];
     const absolutePath = path.join(directory, entry.name);
     return entry.isDirectory()
       ? listIncludedFiles(absolutePath, relativePath)

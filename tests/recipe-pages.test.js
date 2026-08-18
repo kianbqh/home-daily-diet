@@ -300,7 +300,7 @@ test('recipe byte length counts a non-BMP emoji without Buffer or TextEncoder', 
   }
 });
 
-test('dish recipe entry creates a manual draft when no main exists and opens read only when it does', async () => {
+test('manual recipe entry creates a manual draft when no main exists and opens read only when it does', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   const calls = [];
@@ -325,16 +325,51 @@ test('dish recipe entry creates a manual draft when no main exists and opens rea
       recipeSummary: { hasRecipe: false },
     });
 
-    await page.openFamilyRecipe();
+    await page.openManualFamilyRecipe();
     assert.deepEqual(calls, [{ familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'manual' }]);
     assert.equal(navigations[0], '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=draft-1');
 
     page.setData({ recipeSummary: { hasRecipe: true } });
-    await page.openFamilyRecipe();
+    await page.openManualFamilyRecipe();
     assert.equal(calls.length, 1);
     assert.equal(navigations[1], '/pages/recipe/recipe?familyId=family-internal-1&dishId=dish-1');
   } finally {
     global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('voice-first recipe entry opens the recorder, collapses extras, and keeps manual entry visible', () => {
+  const originalWx = global.wx;
+  const scrollCalls = [];
+  global.wx = { pageScrollTo(options) { scrollCalls.push(options); } };
+  try {
+    const definition = loadPage('pages/dish-edit/dish-edit.js');
+    const page = createPageInstance(definition, {
+      isExisting: true,
+      recordExtrasExpanded: true,
+    });
+    let startCalls = 0;
+    page.startRecordEntry = () => {
+      startCalls += 1;
+      page.setData({ recordFormVisible: true });
+    };
+
+    page.startVoiceRecipeEntry();
+
+    assert.equal(definition.data.recordExtrasExpanded, false);
+    assert.equal(startCalls, 1);
+    assert.equal(page.data.recordExtrasExpanded, false);
+    assert.deepEqual(scrollCalls, [{ selector: '#recordingWorkspaceAnchor', duration: 240 }]);
+
+    const template = read('pages/dish-edit/dish-edit.wxml');
+    assert.match(template, /语音记录做法/);
+    assert.match(template, /直接手动填写/);
+    assert.match(template, /说着做，就能生成可编辑的菜谱草稿/);
+    assert.match(template, /bindtap="openManualFamilyRecipe"/);
+    assert.match(template, /补充这次信息/);
+    assert.ok(template.indexOf('id="recordingWorkspaceAnchor"') < template.indexOf('这次的照片'));
+  } finally {
     global.wx = originalWx;
   }
 });
@@ -403,7 +438,7 @@ test('manual recipe path reports unavailable CloudBase without breaking the dish
       recipeSummary: { hasRecipe: false },
     });
     await page.refreshRecipeSummary();
-    await page.openFamilyRecipe();
+    await page.openManualFamilyRecipe();
 
     assert.equal(page.data.recipeUnavailable, true);
     assert.equal(page.data.recipeError, '家庭菜谱需要启用 CloudBase');

@@ -33,6 +33,7 @@ Page({
     isEditingProfile: false,
     editProfileVisible: false,
     recordFormVisible: false,
+    recordExtrasExpanded: false,
     recordIdDraft: '',
     recordingFamilyKey: '',
     recordWorkspaceHasContent: false,
@@ -137,6 +138,7 @@ Page({
       isEditingProfile,
       editProfileVisible: isEditingProfile,
       recordFormVisible: false,
+      recordExtrasExpanded: false,
       recordingFamilyKey: String(state && state.family && state.family.id || ''),
       recordWorkspaceHasContent: false,
       recordWorkspaceReady: false,
@@ -220,7 +222,7 @@ Page({
     }
   },
 
-  async openFamilyRecipe() {
+  async openManualFamilyRecipe() {
     if (!this.data.dishId) return;
     const { store, recipeAssistant } = this.getRecipeContext();
     if (!recipeAssistant) {
@@ -254,6 +256,10 @@ Page({
     } catch (error) {
       showToast('暂时无法打开家庭菜谱');
     }
+  },
+
+  openFamilyRecipe() {
+    return this.openManualFamilyRecipe();
   },
 
   async refreshRecordRecipeStates(options = {}) {
@@ -474,9 +480,22 @@ Page({
     }
     this.setData({
       recordFormVisible: true,
+      recordExtrasExpanded: false,
       recordIdDraft: recordId,
       recordDate: todayString(),
     });
+  },
+
+  startVoiceRecipeEntry() {
+    this.startRecordEntry();
+    this.setData({ recordExtrasExpanded: false });
+    if (typeof wx !== 'undefined' && typeof wx.pageScrollTo === 'function') {
+      wx.pageScrollTo({ selector: '#recordingWorkspaceAnchor', duration: 240 });
+    }
+  },
+
+  toggleRecordExtras() {
+    this.setData({ recordExtrasExpanded: !this.data.recordExtrasExpanded });
   },
 
   getRecordingWorkspace() {
@@ -508,6 +527,7 @@ Page({
   resetRecordEntry() {
     this.setData({
       recordFormVisible: false,
+      recordExtrasExpanded: false,
       recordIdDraft: '',
       image: '',
       displayImage: '',

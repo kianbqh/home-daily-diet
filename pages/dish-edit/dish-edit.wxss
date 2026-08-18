@@ -80,6 +80,10 @@
   margin-top: 22rpx;
 }
 
+.recipe-card-secondary-button {
+  margin-top: 14rpx;
+}
+
 .dish-hero-image,
 .dish-hero-placeholder {
   display: block;
@@ -539,6 +543,18 @@
 
 .record-entry-card button {
   width: 100%;
+}
+
+.record-extras-toggle {
+  margin-top: 18rpx;
+}
+
+.record-extras-toggle button {
+  width: 100%;
+}
+
+.record-extras-card {
+  margin-top: 18rpx;
 }
 
 .edit-profile-mask {

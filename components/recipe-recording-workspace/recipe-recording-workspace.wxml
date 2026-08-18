@@ -1,8 +1,8 @@
 <view class="recording-workspace">
   <view class="workspace-heading">
     <view>
-      <text class="workspace-title">制作过程</text>
-      <text class="workspace-copy">可以分段录音，上一段转写时仍可继续录下一段。</text>
+      <text class="workspace-title">说说这次怎么做</text>
+      <text class="workspace-copy">可以分几段说，停下来后会自动上传并转成文字。</text>
     </view>
     <text wx:if="{{clips.length}}" class="workspace-count">{{clips.length}} / 10 段</text>
   </view>
@@ -12,8 +12,20 @@
       <text class="elapsed-time">{{elapsedLabel}}</text>
       <text class="remaining-time">倒计时 {{remainingLabel}}</text>
     </view>
-    <button wx:if="{{!recording}}" class="record-button" disabled="{{disabled}}" bindtap="startRecording">开始录音</button>
-    <button wx:else class="record-button stop" disabled="{{disabled}}" bindtap="stopRecording">结束录音</button>
+    <button wx:if="{{!recording}}" class="record-button primary-record-action" disabled="{{disabled}}" bindtap="startRecording">
+      <text class="record-icon">🎙</text>
+      <view class="record-button-copy">
+        <text class="record-button-label">开始录音</text>
+        <text class="record-button-helper">说完自动转文字</text>
+      </view>
+    </button>
+    <button wx:else class="record-button stop primary-record-action" disabled="{{disabled}}" bindtap="stopRecording">
+      <text class="record-icon">■</text>
+      <view class="record-button-copy">
+        <text class="record-button-label">结束录音</text>
+        <text class="record-button-helper">录音中，点此结束</text>
+      </view>
+    </button>
   </view>
 
   <text wx:if="{{workspaceError}}" class="workspace-message">{{workspaceError}}</text>

@@ -1,6 +1,7 @@
 const { createRecordingController } = require('../../services/recording-controller');
 
 const LOCAL_STORAGE_KEY = 'recipe-recording-workspaces-v1';
+const RECORDING_PURPOSE_CONSENT_KEY = 'recipe-recording-purpose-consent-v1';
 const LOCAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const STATUS_LABELS = Object.freeze({
   pending: '等待上传',
@@ -334,6 +335,47 @@ Component({
       this.setClips([...remote, ...locals]);
     },
 
+    confirmRecordingPurpose() {
+      if (typeof wx !== 'undefined' && typeof wx.getStorageSync === 'function') {
+        try {
+          if (wx.getStorageSync(RECORDING_PURPOSE_CONSENT_KEY) === true) return Promise.resolve(true);
+        } catch (error) {
+          // The confirmation can still proceed when storage is temporarily unavailable.
+        }
+      }
+      if (typeof wx === 'undefined' || typeof wx.showModal !== 'function') return Promise.resolve(true);
+      if (this.recordingPurposePromise) return this.recordingPurposePromise;
+      const purposePromise = new Promise((resolve) => {
+        try {
+          wx.showModal({
+            title: '开始记录做菜过程',
+            content: '录音会上传到家庭私有云空间，并由腾讯云语音识别处理，用于整理家庭菜谱。',
+            confirmText: '继续录音',
+            cancelText: '暂不录音',
+            success: (result) => {
+              const confirmed = Boolean(result && result.confirm);
+              if (confirmed && typeof wx.setStorageSync === 'function') {
+                try {
+                  wx.setStorageSync(RECORDING_PURPOSE_CONSENT_KEY, true);
+                } catch (error) {
+                  // Recording may continue for this session if consent storage is unavailable.
+                }
+              }
+              resolve(confirmed);
+            },
+            fail: () => resolve(false),
+          });
+        } catch (error) {
+          resolve(false);
+        }
+      });
+      this.recordingPurposePromise = purposePromise.then((confirmed) => {
+        this.recordingPurposePromise = null;
+        return confirmed;
+      });
+      return this.recordingPurposePromise;
+    },
+
     startRecording() {
       if (this.data.disabled || this.data.recording) return;
       const key = this.getWorkspaceKey();
@@ -345,7 +387,25 @@ Component({
         showToast('录音暂时不可用，可添加文字说明');
         return;
       }
-      this.recordingController.start(key);
+      const shouldAskPurpose = typeof wx !== 'undefined' && typeof wx.showModal === 'function';
+      let consented = false;
+      if (shouldAskPurpose && typeof wx.getStorageSync === 'function') {
+        try {
+          consented = wx.getStorageSync(RECORDING_PURPOSE_CONSENT_KEY) === true;
+        } catch (error) {
+          consented = false;
+        }
+      }
+      if (!shouldAskPurpose || consented) {
+        this.recordingController.start(key);
+        return true;
+      }
+      return this.confirmRecordingPurpose().then((confirmed) => {
+        const currentKey = this.getWorkspaceKey();
+        if (!confirmed || this.data.disabled || this.data.recording || !this.recordingController || !currentKey) return false;
+        this.recordingController.start(currentKey);
+        return true;
+      });
     },
 
     stopRecording() {

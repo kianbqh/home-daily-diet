@@ -114,10 +114,14 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-function createRecordingWx(initialEntries = []) {
+function createRecordingWx(initialEntries = [], options = {}) {
   const handlers = {};
-  let storedEntries = clone(initialEntries);
+  const storageValues = {
+    'recipe-recording-workspaces-v1': clone(initialEntries),
+    ...(options.storage || {}),
+  };
   const removedFiles = [];
+  const modalCalls = [];
   const recorder = {
     startCalls: [],
     stopCalls: 0,
@@ -143,15 +147,23 @@ function createRecordingWx(initialEntries = []) {
         removeSavedFile({ filePath, success }) { removedFiles.push(filePath); success({}); },
       };
     },
-    getStorageSync() { return clone(storedEntries); },
-    setStorageSync(key, value) { storedEntries = clone(value); },
+    getStorageSync(key) { return clone(storageValues[key]); },
+    setStorageSync(key, value) { storageValues[key] = clone(value); },
     showToast() {},
   };
+  if (Object.hasOwn(options, 'modalResult')) {
+    api.showModal = (modalOptions) => {
+      modalCalls.push(clone(modalOptions));
+      modalOptions.success({ confirm: options.modalResult, cancel: !options.modalResult });
+    };
+  }
   return {
     api,
     recorder,
     removedFiles,
-    storageEntries: () => clone(storedEntries),
+    modalCalls,
+    storageEntries: () => clone(storageValues['recipe-recording-workspaces-v1']),
+    storageValue: (key) => clone(storageValues[key]),
   };
 }
 
@@ -1327,6 +1339,94 @@ test('recipe page loads an immutable selected version and edits main by cloning 
     assert.equal(navigation, '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=edit-draft');
   } finally {
     global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('recording purpose confirmation explains cloud processing, starts recording, and persists consent', async () => {
+  const originalWx = global.wx;
+  const harness = createRecordingWx([], { modalResult: true });
+  let definition;
+  let component;
+  global.wx = harness.api;
+  try {
+    definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    const start = component.startRecording();
+    assert.equal(harness.recorder.startCalls.length, 0, 'recording waits for the purpose decision');
+    await start;
+
+    assert.equal(harness.recorder.startCalls.length, 1);
+    assert.equal(harness.storageValue('recipe-recording-purpose-consent-v1'), true);
+    assert.equal(harness.modalCalls.length, 1);
+    assert.equal(harness.modalCalls[0].title, '开始记录做菜过程');
+    assert.match(harness.modalCalls[0].content, /家庭私有云空间/);
+    assert.match(harness.modalCalls[0].content, /腾讯云语音识别/);
+    assert.equal(harness.modalCalls[0].confirmText, '继续录音');
+    assert.equal(harness.modalCalls[0].cancelText, '暂不录音');
+
+    const template = read('components/recipe-recording-workspace/recipe-recording-workspace.wxml');
+    assert.match(template, /说说这次怎么做/);
+    assert.match(template, /可以分几段说，停下来后会自动上传并转成文字。/);
+    assert.match(template, /class="record-icon">🎙<\/text>/);
+    assert.match(template, /class="record-button stop primary-record-action"/);
+    assert.match(template, /倒计时 \{\{remainingLabel\}\}/);
+  } finally {
+    if (component) definition.lifetimes.detached.call(component);
+    global.wx = originalWx;
+  }
+});
+
+test('recording purpose repeat uses stored consent without another modal', async () => {
+  const originalWx = global.wx;
+  const harness = createRecordingWx([], {
+    modalResult: true,
+    storage: { 'recipe-recording-purpose-consent-v1': true },
+  });
+  let definition;
+  let component;
+  global.wx = harness.api;
+  try {
+    definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    assert.equal(await component.confirmRecordingPurpose(), true);
+    component.startRecording();
+
+    assert.equal(harness.recorder.startCalls.length, 1);
+    assert.equal(harness.modalCalls.length, 0);
+  } finally {
+    if (component) definition.lifetimes.detached.call(component);
+    global.wx = originalWx;
+  }
+});
+
+test('recording purpose cancellation leaves the recorder stopped and consent unset', async () => {
+  const originalWx = global.wx;
+  const harness = createRecordingWx([], { modalResult: false });
+  let definition;
+  let component;
+  global.wx = harness.api;
+  try {
+    definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    await component.startRecording();
+
+    assert.equal(harness.recorder.startCalls.length, 0);
+    assert.equal(harness.storageValue('recipe-recording-purpose-consent-v1'), undefined);
+  } finally {
+    if (component) definition.lifetimes.detached.call(component);
     global.wx = originalWx;
   }
 });

@@ -340,12 +340,23 @@ Page({
     this.setData({ manualEditing: true });
   },
 
-  switchToVoiceRecording() {
+  async switchToVoiceRecording() {
     if (!this.data.manualDraft
       || this.data.confirming
       || this.data.draftStatus === 'organizing'
       || this.data.draftStatus === 'confirmed'
-      || (this.data.draftStatus === 'failed' && !this.data.manualEditing)) return;
+      || (this.data.draftStatus === 'failed' && !this.data.manualEditing)) return false;
+    if (this.autosaveTimer != null || this.recipeDirty || this.saveDrainPromise) {
+      const saved = await this.saveDraftNow();
+      if (!saved) return false;
+    }
+    const redirectToVoiceRecording = () => {
+      if (typeof wx === 'undefined' || typeof wx.redirectTo !== 'function') return false;
+      wx.redirectTo({
+        url: `/pages/dish-edit/dish-edit?dishId=${encodeURIComponent(this.data.dishId)}&openVoice=1`,
+      });
+      return true;
+    };
     const pages = typeof getCurrentPages === 'function' ? getCurrentPages() : [];
     const previousPage = pages.length > 1 ? pages[pages.length - 2] : null;
     if (previousPage
@@ -353,14 +364,10 @@ Page({
       && typeof wx !== 'undefined'
       && typeof wx.navigateBack === 'function') {
       previousPage.startVoiceRecipeEntry();
-      wx.navigateBack({ delta: 1 });
-      return;
+      wx.navigateBack({ delta: 1, fail: redirectToVoiceRecording });
+      return true;
     }
-    if (typeof wx !== 'undefined' && typeof wx.redirectTo === 'function') {
-      wx.redirectTo({
-        url: `/pages/dish-edit/dish-edit?dishId=${encodeURIComponent(this.data.dishId)}&openVoice=1`,
-      });
-    }
+    return redirectToVoiceRecording();
   },
 
   openConfirmedRecipe() {

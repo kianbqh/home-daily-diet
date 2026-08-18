@@ -276,8 +276,18 @@ test('switches a manual draft to voice without deleting it and supports the rout
       navigateBack() { transitions.push('back'); },
       redirectTo() { throw new Error('previous dish page should be reused'); },
     };
-    page.switchToVoiceRecording();
+    await page.switchToVoiceRecording();
     assert.deepEqual(transitions, ['voice', 'back']);
+
+    let failedBackRedirectUrl = '';
+    global.wx = {
+      navigateBack(options) {
+        if (typeof options.fail === 'function') options.fail({ errMsg: 'navigateBack:fail' });
+      },
+      redirectTo(options) { failedBackRedirectUrl = options.url; },
+    };
+    await page.switchToVoiceRecording();
+    assert.equal(failedBackRedirectUrl, '/pages/dish-edit/dish-edit?dishId=dish%201%2F%E6%B5%B7&openVoice=1');
 
     let redirectUrl = '';
     global.getCurrentPages = () => [page];
@@ -285,7 +295,7 @@ test('switches a manual draft to voice without deleting it and supports the rout
       navigateBack() { throw new Error('fallback should not navigate back'); },
       redirectTo(options) { redirectUrl = options.url; },
     };
-    page.switchToVoiceRecording();
+    await page.switchToVoiceRecording();
     assert.equal(redirectUrl, '/pages/dish-edit/dish-edit?dishId=dish%201%2F%E6%B5%B7&openVoice=1');
     assert.deepEqual(assistantCalls.map((call) => call.action), ['getDraft']);
 
@@ -310,6 +320,67 @@ test('switches a manual draft to voice without deleting it and supports the rout
     };
     dishPage.onLoad({ dishId: 'dish-1', openVoice: '1' });
     assert.deepEqual(opened, [{ dishId: 'dish-1', isExisting: true }]);
+  } finally {
+    global.getApp = originalGetApp;
+    global.getCurrentPages = originalGetCurrentPages;
+    global.wx = originalWx;
+  }
+});
+
+test('switches a dirty manual draft only after its pending autosave finishes', async () => {
+  const originalGetApp = global.getApp;
+  const originalGetCurrentPages = global.getCurrentPages;
+  const originalWx = global.wx;
+  const pendingSave = deferred();
+  const operations = [];
+  const updateCalls = [];
+  const recipe = completeRecipe({ familyNotes: ['刚补充的经验'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        updateDraft(payload) {
+          operations.push('save');
+          updateCalls.push(payload);
+          return pendingSave.promise;
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draftId: 'draft-1',
+      draft: draftFixture(),
+      recipe,
+      manualDraft: true,
+      manualEditing: true,
+      draftStatus: 'editing',
+    });
+    page.recipeDirty = true;
+    page.editGeneration = 1;
+    page.lastSavedRecipeJson = JSON.stringify(completeRecipe());
+    page.autosaveTimer = 23;
+    global.getCurrentPages = () => [{
+      startVoiceRecipeEntry() { operations.push('voice'); },
+    }, page];
+    global.wx = {
+      navigateBack() { operations.push('back'); },
+      redirectTo() { throw new Error('the previous page should remain usable'); },
+    };
+
+    const switching = page.switchToVoiceRecording();
+    await flushPromises();
+
+    assert.deepEqual(operations, ['save']);
+    assert.equal(page.autosaveTimer, null);
+    assert.deepEqual(updateCalls[0].recipe, recipe);
+
+    pendingSave.resolve({ draft: draftFixture({ revision: 1, recipe }) });
+    await switching;
+
+    assert.deepEqual(operations, ['save', 'voice', 'back']);
+    assert.equal(page.recipeDirty, false);
   } finally {
     global.getApp = originalGetApp;
     global.getCurrentPages = originalGetCurrentPages;

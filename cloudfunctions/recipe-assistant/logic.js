@@ -147,6 +147,7 @@ function sensitiveKey(key) {
     || normalized === 'organizeleaseid'
     || normalized === 'organizeleaseexpiresat'
     || normalized === 'organizeusagereservedat'
+    || normalized === 'organizerequestissuedat'
     || /urls?$/.test(normalized);
 }
 

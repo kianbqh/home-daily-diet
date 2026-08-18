@@ -791,9 +791,7 @@ async function tombstoneRecording(repository, member, recording, fileApi, now) {
         updatedAt: now,
       });
     }
-    if (current.status !== 'uploading' || !hasActiveSubmitLease(current, now)) {
-      await settleAsrReservationIfPresent(transaction, current, now);
-    }
+    await settleAsrReservationIfPresent(transaction, current, now);
     const tombstone = await transaction.setRecording(current._id, {
       ...current, status: 'deleted', deletedAt: now, audioDeletePending: Boolean(cleanupFileId),
       asrSubmitToken: '', asrSubmitLeaseExpiresAt: null,
@@ -927,6 +925,8 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
   const promptVersion = configuredPromptVersion(dependencies);
   const leaseId = createOrganizeLeaseId(dependencies);
 
+  await closeExpiredOrganizeReservation(repository, familyId, dishId, draftId, now);
+
   const acquired = await repository.runTransaction(async (transaction) => {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
@@ -991,6 +991,7 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
       organizeLeaseExpiresAt: now + ORGANIZE_LEASE_MS,
       organizeUsageOperationId: usageOperationId,
       organizeUsageReservedAt: now,
+      organizeRequestIssuedAt: null,
       modelProvider: 'tokenhub',
       modelName,
       promptVersion,
@@ -1008,9 +1009,13 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
 
   if (acquired.reused) return { draft: acquired.draft, reused: true };
 
-  const provider = recipeProviderFor(dependencies, modelName, promptVersion);
   let requestIssued = false;
   try {
+    const provider = recipeProviderFor(dependencies, modelName, promptVersion);
+    const issued = await markOrganizeRequestIssued(
+      repository, familyId, dishId, draftId, acquired, nowMs(dependencies)
+    );
+    if (issued.stale) return { draft: issued.draft, stale: true };
     requestIssued = true;
     const result = await provider.organize({
       sourceText: acquired.sourceText,
@@ -1072,6 +1077,48 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
   }
 }
 
+async function closeExpiredOrganizeReservation(repository, familyId, dishId, draftId, now) {
+  return repository.runTransaction(async (transaction) => {
+    const draft = await transaction.getDraft({ familyId, dishId, draftId });
+    if (!draft || draft.status !== 'organizing' || organizeLeaseIsActive(draft, now)) return draft;
+    const operationId = String(draft.organizeUsageOperationId || '').trim();
+    if (!operationId) return draft;
+    const usageInput = {
+      familyId,
+      operationId,
+      billingTimestamp: timestampMs(draft.organizeUsageReservedAt) || now,
+      now,
+    };
+    if (draft.organizeRequestIssuedAt == null) {
+      await transaction.releaseOrganizeUsage(usageInput);
+    } else {
+      await transaction.settleOrganizeUsage(usageInput);
+    }
+    return draft;
+  });
+}
+
+async function markOrganizeRequestIssued(repository, familyId, dishId, draftId, acquired, now) {
+  return repository.runTransaction(async (transaction) => {
+    const current = await transaction.getDraft({ familyId, dishId, draftId });
+    if (!current) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
+    if (!organizeLeaseMatches(current, acquired.leaseId, acquired.inputHash)) {
+      await transaction.releaseOrganizeUsage({
+        familyId,
+        operationId: acquired.usageOperationId,
+        billingTimestamp: acquired.usageReservedAt,
+        now,
+      });
+      return { draft: current, stale: true };
+    }
+    const draft = await transaction.setDraft(draftId, {
+      ...current,
+      organizeRequestIssuedAt: now,
+    });
+    return { draft, stale: false };
+  });
+}
+
 function uniqueRecordingIds(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))];
@@ -1130,6 +1177,7 @@ function clearOrganizeLease(draft) {
   const cleaned = { ...draft };
   delete cleaned.organizeLeaseId;
   delete cleaned.organizeLeaseExpiresAt;
+  delete cleaned.organizeRequestIssuedAt;
   return cleaned;
 }
 

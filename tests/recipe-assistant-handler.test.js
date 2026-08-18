@@ -1923,6 +1923,46 @@ test('deletion while ASR submission is pending prevents a late result from resur
   assert.equal(operation.settled, 180);
 });
 
+test('deleting an active ASR submit lease closes its reservation without waiting for the submit callback', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  let releaseSubmit;
+  let announceSubmit;
+  const submitStarted = new Promise((resolve) => { announceSubmit = resolve; });
+  const services = recordingServices({
+    idGenerator: () => 'recording-lost-callback',
+    asrProvider: {
+      submit() {
+        announceSubmit();
+        return new Promise((resolve) => { releaseSubmit = resolve; });
+      },
+    },
+  });
+  await reserveOwnedRecording(db, services);
+  const submitting = invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordingId: 'recording-lost-callback',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-lost-callback.mp3',
+  }, 'openid-a', services);
+  await submitStarted;
+
+  const deleted = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1',
+    recordingId: 'recording-lost-callback',
+  }, 'openid-a', services);
+  const usageBeforeCallback = clone(db.records('recipe_usage_daily').get('family-a|1970-01-01'));
+  const operationBeforeCallback = clone([...db.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation'));
+
+  releaseSubmit({ taskId: 3002, requestId: 'lost-callback-cleanup', submittedAt: 100, expiresAt: 200 });
+  await submitting;
+
+  assert.equal(deleted.ok, true);
+  assert.equal(usageBeforeCallback.asrSeconds, 180);
+  assert.equal(Object.keys(usageBeforeCallback.reservations).length, 0);
+  assert.equal(operationBeforeCallback.status, 'settled');
+  assert.equal(operationBeforeCallback.settled, 180);
+});
+
 test('production file adapter downloads and parses trusted MP3 bytes without retaining client metadata', async () => {
   const content = createMpeg2Layer3Frames(4);
   const downloads = [];
@@ -2659,6 +2699,38 @@ function organizeSeed(options = {}) {
   return seed;
 }
 
+function expiredOrganizeUsageSeed(options = {}) {
+  const operationId = options.operationId || 'organize-expired-operation';
+  const reservedAt = options.reservedAt == null ? 100 : options.reservedAt;
+  const requestIssuedAt = options.requestIssuedAt;
+  const seed = organizeSeed({ draft: {
+    status: 'organizing',
+    organizeLeaseId: 'organize-expired',
+    organizeLeaseExpiresAt: 999,
+    organizeUsageOperationId: operationId,
+    organizeUsageReservedAt: reservedAt,
+    ...(requestIssuedAt == null ? {} : { organizeRequestIssuedAt: requestIssuedAt }),
+  } });
+  seed.recipe_usage_daily = {
+    'family-a|1970-01-01': {
+      _id: 'family-a|1970-01-01', familyId: 'family-a', billingDate: '1970-01-01',
+      billingTimezone: 'Asia/Shanghai', asrSeconds: 0, organizeCalls: 1,
+      reservations: {
+        [operationId]: {
+          kind: 'organize', reserved: 1, status: 'reserved', settled: 0,
+          createdAt: reservedAt, updatedAt: reservedAt,
+        },
+      },
+    },
+    [`usage-operation-${operationId}`]: {
+      _id: `usage-operation-${operationId}`, sourceType: 'usage_operation', operationId,
+      familyId: 'family-a', usageDocumentId: 'family-a|1970-01-01', kind: 'organize',
+      reserved: 1, status: 'reserved', settled: 0, createdAt: reservedAt, updatedAt: reservedAt,
+    },
+  };
+  return seed;
+}
+
 function organizeEvent(sourceRecordingIds = ['recording-second', 'recording-first']) {
   return {
     action: 'organizeDraft', familyId: 'family-a', dishId: 'dish-1',
@@ -2785,6 +2857,11 @@ test('organizeDraft enforces an active lease and recovers an expired lease', asy
   });
   assert.equal(active.error.code, 'ORGANIZE_IN_PROGRESS');
   assert.equal(activeCalls, 0);
+  activeDb.records('recipe_drafts').get('draft-recording').organizeRequestIssuedAt = 900;
+  const activeDraft = await invoke(activeDb, {
+    action: 'getDraft', familyId: 'family-a', dishId: 'dish-1', draftId: 'draft-recording',
+  });
+  assert.equal(Object.hasOwn(activeDraft.data.draft, 'organizeRequestIssuedAt'), false);
 
   const expiredDb = createMemoryDatabase(organizeSeed({ draft: {
     status: 'organizing', organizeLeaseId: 'lease-expired', organizeLeaseExpiresAt: 1_000,
@@ -2801,6 +2878,47 @@ test('organizeDraft enforces an active lease and recovers an expired lease', asy
   assert.equal(recovered.ok, true);
   assert.equal(expiredCalls, 1);
   assert.equal(recovered.data.draft.recipe.ingredients[0].name, '恢复菜谱');
+});
+
+test('organizeDraft recovery releases an expired reservation that never issued a model request', async () => {
+  const oldOperationId = 'organize-expired-unissued';
+  const db = createMemoryDatabase(expiredOrganizeUsageSeed({ operationId: oldOperationId }));
+  const recovered = await invoke(db, organizeEvent(), 'openid-a', {
+    now: () => 1_000,
+    recipeProvider: { async organize() { return { recipe: organizedRecipe('恢复菜谱') }; } },
+    recipeModel: 'hy3', recipePromptVersion: 'v1',
+    organizeLeaseIdGenerator: () => 'lease-recovered-unissued',
+  });
+
+  assert.equal(recovered.ok, true);
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const oldOperation = db.records('recipe_usage_daily').get(`usage-operation-${oldOperationId}`);
+  assert.equal(usage.organizeCalls, 1);
+  assert.equal(Object.keys(usage.reservations).length, 0);
+  assert.equal(oldOperation.status, 'released');
+  assert.equal(oldOperation.settled, 0);
+});
+
+test('organizeDraft recovery settles an expired reservation after request issuance was recorded', async () => {
+  const oldOperationId = 'organize-expired-issued';
+  const db = createMemoryDatabase(expiredOrganizeUsageSeed({
+    operationId: oldOperationId,
+    requestIssuedAt: 500,
+  }));
+  const recovered = await invoke(db, organizeEvent(), 'openid-a', {
+    now: () => 1_000,
+    recipeProvider: { async organize() { return { recipe: organizedRecipe('再次恢复') }; } },
+    recipeModel: 'hy3', recipePromptVersion: 'v1',
+    organizeLeaseIdGenerator: () => 'lease-recovered-issued',
+  });
+
+  assert.equal(recovered.ok, true);
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const oldOperation = db.records('recipe_usage_daily').get(`usage-operation-${oldOperationId}`);
+  assert.equal(usage.organizeCalls, 2);
+  assert.equal(Object.keys(usage.reservations).length, 0);
+  assert.equal(oldOperation.status, 'settled');
+  assert.equal(oldOperation.settled, 1);
 });
 
 test('organizeDraft failure preserves the previous recipe and transcript and stores only a public error code', async () => {

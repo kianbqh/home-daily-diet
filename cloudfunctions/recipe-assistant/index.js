@@ -55,12 +55,41 @@ const ASR_SUBMIT_LEASE_MS = 2 * 60 * 1000;
 const ASR_RESERVATION_SECONDS = 180;
 const ORGANIZE_LEASE_MS = 10 * 60 * 1000;
 const MAX_SOURCE_CHARACTERS = 30_000;
+const CONFLICT_CODES = Object.freeze([
+  'DRAFT_CONFLICT', 'MAIN_RECIPE_CONFLICT', 'TRANSCRIPT_CONFLICT',
+]);
 let productionAsrProvider = null;
 let productionRecipeProvider = null;
 let productionRecipeProviderKey = '';
 
 function configFor(dependencies = {}) {
   return { ...DEFAULT_CONFIG, ...(dependencies.config || {}) };
+}
+
+function createConflictError(code, message, current, revision) {
+  const error = createRecipeError(code, message);
+  const normalizedRevision = Number(revision);
+  const rawUpdatedAt = current && current.updatedAt;
+  const normalizedUpdatedAt = rawUpdatedAt == null ? Number.NaN : Number(rawUpdatedAt);
+  error.currentRevision = Number.isInteger(normalizedRevision) && normalizedRevision >= 0
+    ? normalizedRevision : 0;
+  error.currentUpdatedBy = String(current && (current.updatedBy || current.createdBy) || '').slice(0, 200);
+  error.currentUpdatedAt = Number.isFinite(normalizedUpdatedAt) ? normalizedUpdatedAt : null;
+  return error;
+}
+
+function publicErrorPayload(error) {
+  const code = runtimeErrorCode(error);
+  if (error && error.name === 'RecipeAssistantError' && CONFLICT_CODES.includes(code)) {
+    return {
+      code,
+      currentRevision: Number.isInteger(error.currentRevision) && error.currentRevision >= 0
+        ? error.currentRevision : 0,
+      currentUpdatedBy: String(error.currentUpdatedBy || '').slice(0, 200),
+      currentUpdatedAt: Number.isFinite(error.currentUpdatedAt) ? error.currentUpdatedAt : null,
+    };
+  }
+  return { code, message: publicMessage(error) };
 }
 
 async function query(db, name, filter, limit = 100) {
@@ -236,7 +265,7 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
     };
     const logger = dependencies.logger || console;
     if (logger && typeof logger.error === 'function') logger.error(log);
-    return { ok: false, error: { code, message: publicMessage(error) } };
+    return { ok: false, error: publicErrorPayload(error) };
   }
 }
 
@@ -664,7 +693,12 @@ async function updateTranscript(repository, member, familyId, dishId, event, now
     const recording = await transaction.getRecording(familyId, dishId, recordingId);
     if (!recording) throw createRecipeError('RECORDING_NOT_FOUND', '找不到这个录音片段', 'authorize');
     if (recording.status === 'deleted') throw createRecipeError('RECORDING_DELETED', '这个录音片段已删除');
-    if (recording.transcriptRevision !== revision) throw createRecipeError('TRANSCRIPT_CONFLICT', '转写内容已被更新，请刷新后重试');
+    if (recording.transcriptRevision !== revision) {
+      throw createConflictError(
+        'TRANSCRIPT_CONFLICT', '转写内容已被更新，请刷新后重试',
+        recording, recording.transcriptRevision
+      );
+    }
     const updated = await transaction.setRecording(recordingId, {
       ...recording, editedTranscript: text, transcriptRevision: revision + 1,
       updatedBy: member.memberId, updatedAt: now,
@@ -934,7 +968,9 @@ async function organizeDraft(repository, member, familyId, dishId, event, depend
       throw createRecipeError('ACTION_INVALID', '这个草稿没有可整理的制作记录', 'validate');
     }
     if (draft.status === 'confirmed') {
-      throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已经确认，不能重新整理');
+      throw createConflictError(
+        'DRAFT_CONFLICT', '菜谱草稿已经确认，不能重新整理', draft, draft.revision
+      );
     }
     if (draft.status === 'cancelled') {
       throw createRecipeError('ACTION_INVALID', '这个菜谱草稿已经取消');
@@ -1241,7 +1277,9 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
     if (draft.revision !== revision || draft.status === 'confirmed' || draft.status === 'organizing') {
-      throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试');
+      throw createConflictError(
+        'DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试', draft, draft.revision
+      );
     }
     const updated = await transaction.setDraft(draftId, {
       ...draft,
@@ -1264,10 +1302,14 @@ async function confirmDraft(repository, member, familyId, dishId, event, now) {
     const pointer = await transaction.getRecipePointer(familyId, dishId);
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
     if (draft.status === 'organizing') {
-      throw createRecipeError('DRAFT_CONFLICT', '菜谱正在整理，请稍后再确认');
+      throw createConflictError(
+        'DRAFT_CONFLICT', '菜谱正在整理，请稍后再确认', draft, draft.revision
+      );
     }
     if (draft.revision !== revision) {
-      throw createRecipeError('DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试');
+      throw createConflictError(
+        'DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试', draft, draft.revision
+      );
     }
     if (draft.status === 'confirmed' && draft.confirmedVersionId) {
       const version = await transaction.getVersion(familyId, dishId, draft.confirmedVersionId);
@@ -1279,7 +1321,10 @@ async function confirmDraft(repository, member, familyId, dishId, event, now) {
     const previousMainVersionId = String(pointer && pointer.currentVersionId || '');
     const updatesExistingMain = Boolean(pointer && previousMainVersionId && publishAsMain);
     if (updatesExistingMain && baseMainVersionId !== previousMainVersionId) {
-      throw createRecipeError('MAIN_RECIPE_CONFLICT', '主菜谱已被更新，请刷新后重试');
+      throw createConflictError(
+        'MAIN_RECIPE_CONFLICT', '主菜谱已被更新，请刷新后重试',
+        pointer, pointer && pointer.currentVersionNumber
+      );
     }
 
     const pointerVersionNumber = pointer ? Number(pointer.currentVersionNumber) || 0 : 0;
@@ -1631,7 +1676,7 @@ async function main(event = {}, context = {}) {
       durationMs: Math.max(0, Date.now() - startedAt),
     };
     if (typeof console !== 'undefined' && typeof console.error === 'function') console.error(log);
-    return { ok: false, error: { code, message: publicMessage(error) } };
+    return { ok: false, error: publicErrorPayload(error) };
   }
 }
 

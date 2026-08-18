@@ -62,9 +62,14 @@ test('recipe client exposes every contract action as a thin wrapper', async () =
   })));
 });
 
-test('recipe client normalizes cloud result errors with code and action', async () => {
+test('recipe client preserves only safe conflict metadata with code and action', async () => {
   const fake = createFakeApi({
-    result: { ok: false, error: { code: 'DRAFT_CONFLICT', message: 'draft changed elsewhere' } },
+    result: { ok: false, error: {
+      code: 'DRAFT_CONFLICT',
+      currentRevision: 4,
+      currentUpdatedBy: 'member-b',
+      currentUpdatedAt: 200,
+    } },
   });
   const service = createRecipeAssistant(fake.api, { envId: 'env-test' });
 
@@ -72,7 +77,10 @@ test('recipe client normalizes cloud result errors with code and action', async 
     service.getDraft({ familyId: 'family-1', draftId: 'draft-1' }),
     (error) => error && error.code === 'DRAFT_CONFLICT'
       && error.action === 'getDraft'
-      && error.message === 'draft changed elsewhere'
+      && error.currentRevision === 4
+      && error.currentUpdatedBy === 'member-b'
+      && error.currentUpdatedAt === 200
+      && !Object.hasOwn(error, 'recipe')
   );
 });
 

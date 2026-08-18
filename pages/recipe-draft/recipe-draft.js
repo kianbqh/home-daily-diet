@@ -25,6 +25,7 @@ const DRAFT_STATE_MESSAGES = Object.freeze({
   failed: '智能整理没有完成，转写和当前草稿都已保留。',
   confirmed: '本次做法已经保存',
 });
+const CONFLICT_MESSAGE = '云端已被家人更新';
 
 function uncertaintyFieldLabel(fieldPath) {
   const value = String(fieldPath || '');
@@ -479,11 +480,7 @@ Page({
       } catch (error) {
         if (error && error.code === 'DRAFT_CONFLICT') {
           const localConflictRecipe = cloneRecipe(this.data.recipe);
-          this.setData({
-            localConflictRecipe,
-            saveState: 'conflict',
-            saveMessage: '保存冲突，刷新后可重新应用本地内容',
-          });
+          await this.resolveDraftConflict(localConflictRecipe);
           return false;
         }
         this.setData({ saveState: 'error', saveMessage: '暂时无法保存，请稍后重试' });
@@ -493,16 +490,51 @@ Page({
     return true;
   },
 
-  async refreshAfterConflict() {
-    const localConflictRecipe = this.data.localConflictRecipe
+  async reloadAfterConflict() {
+    const localRecipe = this.data.localConflictRecipe
       ? cloneRecipe(this.data.localConflictRecipe)
       : cloneRecipe(this.data.recipe);
-    this.setData({ localConflictRecipe });
-    await this.loadDraft({ allowLocalOverwrite: true });
+    return this.resolveDraftConflict(localRecipe);
   },
 
-  reapplyLocalConflict() {
-    if (!this.data.localConflictRecipe) return;
+  async resolveDraftConflict(localRecipe) {
+    this.clearAutosaveTimer();
+    const localConflictRecipe = cloneRecipe(localRecipe);
+    this.recipeDirty = false;
+    this.setData({
+      localConflictRecipe,
+      saveState: 'conflict',
+      saveMessage: CONFLICT_MESSAGE,
+    });
+    const loaded = await this.loadDraft({ allowLocalOverwrite: true });
+    const recipeAssistant = this.getRecipeAssistant();
+    if (loaded && recipeAssistant && typeof recipeAssistant.getRecipe === 'function') {
+      try {
+        const latest = await recipeAssistant.getRecipe({
+          familyId: this.data.familyId,
+          dishId: this.data.dishId,
+        });
+        const currentVersionId = String(latest && latest.pointer && latest.pointer.currentVersionId || '');
+        if (currentVersionId && this.data.draft) {
+          this.setData({
+            draft: { ...this.data.draft, baseMainVersionId: currentVersionId },
+          });
+        }
+      } catch (_) {
+        // The latest draft is still usable; publishing can retry pointer refresh later.
+      }
+    }
+    this.setData({
+      localConflictRecipe,
+      saveState: 'conflict',
+      saveMessage: CONFLICT_MESSAGE,
+    });
+    return loaded;
+  },
+
+  async reapplyLocalConflict() {
+    if (!this.data.localConflictRecipe) return false;
+    this.clearAutosaveTimer();
     const recipe = cloneRecipe(this.data.localConflictRecipe);
     this.recipeDirty = true;
     this.editGeneration = (this.editGeneration || 0) + 1;
@@ -512,7 +544,7 @@ Page({
       validation: validateRecipe(recipe),
       localConflictRecipe: null,
     });
-    this.scheduleAutosave();
+    return this.saveDraftNow();
   },
 
   chooseRecordOnly() {
@@ -572,11 +604,7 @@ Page({
       }
     } catch (error) {
       if (error && (error.code === 'DRAFT_CONFLICT' || error.code === 'MAIN_RECIPE_CONFLICT')) {
-        this.setData({
-          localConflictRecipe: cloneRecipe(this.data.recipe),
-          saveState: 'conflict',
-          saveMessage: '保存冲突，刷新后可重新应用本地内容',
-        });
+        await this.resolveDraftConflict(cloneRecipe(this.data.recipe));
       } else {
         showToast('暂时无法确认菜谱');
       }

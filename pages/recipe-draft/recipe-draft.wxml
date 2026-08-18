@@ -51,10 +51,10 @@
     </view>
 
     <view wx:if="{{localConflictRecipe}}" class="conflict-card">
-      <text>保存冲突，刷新后可重新应用本地内容</text>
+      <text>云端已被家人更新</text>
       <view class="conflict-actions">
-        <button class="secondary-button" bindtap="refreshAfterConflict">刷新草稿</button>
-        <button class="secondary-button" bindtap="reapplyLocalConflict">重新应用本地内容</button>
+        <button class="secondary-button" bindtap="reloadAfterConflict">查看云端版本</button>
+        <button class="secondary-button" bindtap="reapplyLocalConflict">用本地内容重新应用</button>
       </view>
     </view>
 

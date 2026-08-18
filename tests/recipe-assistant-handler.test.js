@@ -528,7 +528,13 @@ test('updateDraft normalizes valid recipes, increments revision, and rejects a s
   assert.equal(saved.data.draft.updatedBy, 'member-a');
   assert.equal(saved.data.draft.recipe.ingredients[0].name, '鸡蛋');
   assert.equal(Object.hasOwn(saved.data.draft.recipe.ingredients[0], 'ignored'), false);
-  assert.equal(stale.error.code, 'DRAFT_CONFLICT');
+  assert.deepEqual(stale.error, {
+    code: 'DRAFT_CONFLICT',
+    currentRevision: saved.data.draft.revision,
+    currentUpdatedBy: saved.data.draft.updatedBy,
+    currentUpdatedAt: saved.data.draft.updatedAt,
+  });
+  assert.equal(JSON.stringify(stale.error).includes('ingredients'), false);
 });
 
 test('updateDraft re-reads and compares revision inside runTransaction', async () => {
@@ -820,7 +826,7 @@ test('confirmDraft rejects a stale main base without creating a version or chang
   const oldMainId = initialConfirmation.data.version._id;
   const stale = await createSavedDraft();
   const winner = await createSavedDraft();
-  await invoke(db, {
+  const winningConfirmation = await invoke(db, {
     action: 'confirmDraft', familyId: 'family-a', dishId: 'dish-1', draftId: winner.data.draft._id,
     revision: 1, publishAsMain: true, baseMainVersionId: oldMainId,
   });
@@ -831,7 +837,13 @@ test('confirmDraft rejects a stale main base without creating a version or chang
     revision: 1, publishAsMain: true, baseMainVersionId: oldMainId,
   });
 
-  assert.equal(conflict.error.code, 'MAIN_RECIPE_CONFLICT');
+  assert.deepEqual(conflict.error, {
+    code: 'MAIN_RECIPE_CONFLICT',
+    currentRevision: winningConfirmation.data.pointer.currentVersionNumber,
+    currentUpdatedBy: winningConfirmation.data.pointer.updatedBy,
+    currentUpdatedAt: winningConfirmation.data.pointer.updatedAt,
+  });
+  assert.equal(JSON.stringify(conflict.error).includes('ingredients'), false);
   assert.equal(db.records('recipe_versions').size, versionCount);
   assert.equal(db.records('recipe_drafts').get(stale.data.draft._id).status, 'editing');
   assert.equal(db.records('recipe_drafts').get(stale.data.draft._id).confirmedVersionId, '');
@@ -1782,7 +1794,13 @@ test('manual text, transcript revisions, attachment, and workspace audio URLs fo
     action: 'updateTranscript', familyId: 'family-a', dishId: 'dish-1', recordingId: 'manual-fixed',
     transcriptRevision: 0, text: '覆盖别人修改',
   }, 'openid-a', services);
-  assert.equal(stale.error.code, 'TRANSCRIPT_CONFLICT');
+  assert.deepEqual(stale.error, {
+    code: 'TRANSCRIPT_CONFLICT',
+    currentRevision: updated.data.recording.transcriptRevision,
+    currentUpdatedBy: updated.data.recording.updatedBy,
+    currentUpdatedAt: updated.data.recording.updatedAt,
+  });
+  assert.equal(JSON.stringify(stale.error).includes('少放一点盐'), false);
 
   const reserved = recordingServices({ idGenerator: () => 'recording-audio-fixed' });
   await reserveOwnedRecording(db, reserved);

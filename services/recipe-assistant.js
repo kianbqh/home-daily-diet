@@ -1,3 +1,16 @@
+const CONFLICT_CODES = Object.freeze([
+  'DRAFT_CONFLICT', 'MAIN_RECIPE_CONFLICT', 'TRANSCRIPT_CONFLICT',
+]);
+
+function copyConflictMetadata(target, source) {
+  if (!target || !source || !CONFLICT_CODES.includes(String(source.code || ''))) return target;
+  target.currentRevision = Number.isInteger(source.currentRevision) && source.currentRevision >= 0
+    ? source.currentRevision : 0;
+  target.currentUpdatedBy = String(source.currentUpdatedBy || '').slice(0, 200);
+  target.currentUpdatedAt = Number.isFinite(source.currentUpdatedAt) ? source.currentUpdatedAt : null;
+  return target;
+}
+
 function normalizeRecipeError(error, action) {
   const normalized = new Error(
     error && (error.errMsg || error.message)
@@ -6,7 +19,7 @@ function normalizeRecipeError(error, action) {
   );
   normalized.code = error && error.code ? error.code : 'RECIPE_ASSISTANT_ERROR';
   normalized.action = action;
-  return normalized;
+  return copyConflictMetadata(normalized, error);
 }
 
 function unwrapRecipeResult(result, action) {
@@ -21,7 +34,7 @@ function unwrapRecipeResult(result, action) {
     ? body.error.code
     : 'RECIPE_ASSISTANT_ERROR';
   error.action = action;
-  throw error;
+  throw copyConflictMetadata(error, body && body.error);
 }
 
 function createUploadError(code) {

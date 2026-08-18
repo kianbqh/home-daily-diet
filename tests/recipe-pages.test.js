@@ -422,9 +422,13 @@ test('draft autosave waits 800 ms and preserves a complete local copy on conflic
   const callbacks = [];
   const cleared = [];
   const calls = [];
+  const conflict = deferred();
+  let reloads = 0;
   const localRecipe = completeRecipe({
     ingredients: [{ name: '番茄', amountText: '2个', note: '', uncertain: false }],
   });
+  const latestLocalRecipe = completeRecipe({ familyNotes: ['保存冲突前刚补充的内容'] });
+  const remoteRecipe = completeRecipe({ familyNotes: ['家人已经保存的云端内容'] });
   global.setTimeout = (callback, delay) => {
     callbacks.push({ callback, delay });
     return callbacks.length;
@@ -433,11 +437,13 @@ test('draft autosave waits 800 ms and preserves a complete local copy on conflic
   global.getApp = () => ({
     globalData: {
       recipeAssistant: {
-        async updateDraft(payload) {
+        updateDraft(payload) {
           calls.push(payload);
-          const error = new Error('conflict');
-          error.code = 'DRAFT_CONFLICT';
-          throw error;
+          return conflict.promise;
+        },
+        async getDraft() {
+          reloads += 1;
+          return { draft: draftFixture({ revision: 4, recipe: remoteRecipe }) };
         },
       },
     },
@@ -456,7 +462,12 @@ test('draft autosave waits 800 ms and preserves a complete local copy on conflic
     page.scheduleAutosave();
     assert.equal(callbacks.at(-1).delay, 800);
     assert.deepEqual(cleared, [1]);
-    await callbacks.at(-1).callback();
+    const autosave = callbacks.at(-1).callback();
+    page.onRecipeChange({ detail: { recipe: latestLocalRecipe } });
+    const error = new Error('conflict');
+    error.code = 'DRAFT_CONFLICT';
+    conflict.reject(error);
+    await autosave;
 
     assert.deepEqual(calls, [{
       familyId: 'family-internal-1',
@@ -465,11 +476,14 @@ test('draft autosave waits 800 ms and preserves a complete local copy on conflic
       revision: 3,
       recipe: localRecipe,
     }]);
-    assert.deepEqual(page.data.recipe, localRecipe);
+    assert.deepEqual(page.data.recipe, remoteRecipe);
     assert.notEqual(page.data.localConflictRecipe, page.data.recipe);
-    assert.deepEqual(page.data.localConflictRecipe, localRecipe);
+    assert.deepEqual(page.data.localConflictRecipe, latestLocalRecipe);
     assert.equal(page.data.saveState, 'conflict');
-    assert.equal(page.data.saveMessage, '保存冲突，刷新后可重新应用本地内容');
+    assert.equal(page.data.saveMessage, '云端已被家人更新');
+    assert.equal(reloads, 1);
+    assert.equal(page.autosaveTimer, null);
+    assert.deepEqual(cleared, [1, 3]);
   } finally {
     global.getApp = originalGetApp;
     global.setTimeout = originalSetTimeout;
@@ -627,16 +641,25 @@ test('confirmation unlocks when the queued save fails', async () => {
   }
 });
 
-test('refreshing a conflicted draft keeps the local copy available to reapply', async () => {
+test('reloading a conflicted draft keeps the local copy and reapplies it against the latest revision', async () => {
   const originalGetApp = global.getApp;
+  const updates = [];
   const localRecipe = completeRecipe({
     familyNotes: ['本地保留：少放盐'],
   });
+  const remoteRecipe = completeRecipe({ familyNotes: ['云端版本：正常盐量'] });
   global.getApp = () => ({
     globalData: {
       recipeAssistant: {
         async getDraft() {
-          return { draft: draftFixture({ revision: 4, recipe: completeRecipe() }) };
+          return { draft: draftFixture({ revision: 4, recipe: remoteRecipe }) };
+        },
+        async getRecipe() {
+          return { pointer: { currentVersionId: 'version-current' } };
+        },
+        async updateDraft(payload) {
+          updates.push(payload);
+          return { draft: draftFixture({ revision: 5, recipe: payload.recipe }) };
         },
       },
     },
@@ -652,13 +675,123 @@ test('refreshing a conflicted draft keeps the local copy available to reapply', 
       saveState: 'conflict',
     });
 
-    await page.refreshAfterConflict();
+    await page.reloadAfterConflict({ type: 'tap' });
 
-    assert.deepEqual(page.data.recipe, completeRecipe());
+    assert.deepEqual(page.data.recipe, remoteRecipe);
     assert.deepEqual(page.data.localConflictRecipe, localRecipe);
+    assert.equal(page.data.draft.baseMainVersionId, 'version-current');
+    assert.equal(page.data.saveMessage, '云端已被家人更新');
+    const reapplied = page.reapplyLocalConflict();
+    if (reapplied && typeof reapplied.then === 'function') await reapplied;
+    else page.clearAutosaveTimer();
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].revision, 4);
+    assert.deepEqual(updates[0].recipe, localRecipe);
+    assert.equal(page.data.draft.revision, 5);
+    assert.equal(page.data.localConflictRecipe, null);
     assert.match(read('pages/recipe-draft/recipe-draft.wxml'), /wx:if="\{\{localConflictRecipe\}\}"/);
+    assert.match(read('pages/recipe-draft/recipe-draft.wxml'), />查看云端版本<\/button>/);
+    assert.match(read('pages/recipe-draft/recipe-draft.wxml'), />用本地内容重新应用<\/button>/);
   } finally {
     global.getApp = originalGetApp;
+  }
+});
+
+test('a repeated draft conflict preserves the reapplied local copy and remains recoverable', async () => {
+  const originalGetApp = global.getApp;
+  const localRecipe = completeRecipe({ familyNotes: ['这份本地内容不能丢'] });
+  const newestRemote = completeRecipe({ familyNotes: ['家人又保存了一版'] });
+  const updates = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getDraft() {
+          return { draft: draftFixture({ revision: 5, recipe: newestRemote }) };
+        },
+        async updateDraft(payload) {
+          updates.push(payload);
+          const error = new Error('conflict again');
+          error.code = 'DRAFT_CONFLICT';
+          error.currentRevision = 5;
+          throw error;
+        },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 4, recipe: newestRemote }), recipe: newestRemote,
+      localConflictRecipe: localRecipe, saveState: 'conflict',
+    });
+
+    const reapplied = page.reapplyLocalConflict();
+    if (reapplied && typeof reapplied.then === 'function') await reapplied;
+    else page.clearAutosaveTimer();
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].revision, 4);
+    assert.deepEqual(page.data.recipe, newestRemote);
+    assert.deepEqual(page.data.localConflictRecipe, localRecipe);
+    assert.equal(page.data.saveState, 'conflict');
+    assert.equal(page.data.saveMessage, '云端已被家人更新');
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('a stale main confirmation reloads the draft and latest main pointer without losing local content', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const localRecipe = completeRecipe({ familyNotes: ['准备发布的本地做法'] });
+  const confirmations = [];
+  let redirected = false;
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async confirmDraft(payload) {
+          confirmations.push(payload);
+          const error = new Error('main changed');
+          error.code = 'MAIN_RECIPE_CONFLICT';
+          error.currentRevision = 8;
+          throw error;
+        },
+        async getDraft() {
+          return { draft: draftFixture({
+            revision: 3, recipe: localRecipe, baseMainVersionId: 'version-old',
+          }) };
+        },
+        async getRecipe() {
+          return { pointer: { currentVersionId: 'version-new', currentVersionNumber: 8 } };
+        },
+      },
+    },
+  });
+  global.wx = {
+    showToast() {},
+    redirectTo() { redirected = true; },
+  };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: localRecipe, baseMainVersionId: 'version-old' }),
+      recipe: localRecipe, validation: { ok: true, errors: [] },
+      confirmMode: 'main', draftStatus: 'editing',
+    });
+
+    await page.confirmRecipe();
+
+    assert.equal(confirmations.length, 1);
+    assert.equal(confirmations[0].baseMainVersionId, 'version-old');
+    assert.equal(page.data.draft.baseMainVersionId, 'version-new');
+    assert.deepEqual(page.data.localConflictRecipe, localRecipe);
+    assert.equal(page.data.saveState, 'conflict');
+    assert.equal(page.data.saveMessage, '云端已被家人更新');
+    assert.equal(page.data.confirming, false);
+    assert.equal(redirected, false);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
   }
 });
 

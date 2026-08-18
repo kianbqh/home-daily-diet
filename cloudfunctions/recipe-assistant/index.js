@@ -405,22 +405,17 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     });
   });
   let task = {};
-  let requestIssued = false;
   try {
     if (asrProvider && typeof asrProvider.submit === 'function') {
       const url = await temporaryFileUrl(fileApi, fileId);
-      requestIssued = true;
       task = await asrProvider.submit({ url, fileId, recordingId });
     }
     requireAsrTaskId(task.taskId, 'ASR_SUBMIT_RESPONSE_INVALID');
   } catch (error) {
-    if (error && error.requestIssued === false) requestIssued = false;
     const disposition = await repository.runTransaction(async (transaction) => {
-      if (!requestIssued) {
-        await transaction.releaseAsrUsage({
-          familyId, operationId: usageOperationId, billingTimestamp: now, now: nowMs(dependencies),
-        });
-      }
+      await transaction.releaseAsrUsage({
+        familyId, operationId: usageOperationId, billingTimestamp: now, now: nowMs(dependencies),
+      });
       const current = await transaction.getRecording(familyId, dishId, recordingId);
       if (!current || current.status === 'deleted') return 'deleted';
       if (current.status !== 'uploading' || current.asrSubmitToken !== submitToken) return 'lost';

@@ -2935,7 +2935,7 @@ test('organizeDraft rejects a selected recording outside the draft record withou
   assert.equal(JSON.stringify(result).includes('不应读取'), false);
 });
 
-test('submitRecording reserves 180 seconds, releases only a definite no-request failure, and settles ready duration once', async () => {
+test('submitRecording reserves 180 seconds, releases submit API failures, and settles ready duration once', async () => {
   const failedDb = createMemoryDatabase(baseSeed());
   const failedServices = recordingServices({
     asrProvider: { async submit() {
@@ -2956,6 +2956,21 @@ test('submitRecording reserves 180 seconds, releases only a definite no-request 
   assert.equal(failedUsage.asrSeconds, 0);
   assert.equal(Object.values(failedUsage.reservations)[0].status, 'released');
   assert.equal(Object.hasOwn(failedUsage.reservations, 'forged-client-operation'), false);
+
+  const rejectedDb = createMemoryDatabase(baseSeed());
+  const rejectedServices = recordingServices({
+    asrProvider: { async submit() { throw new Error('submit API rejected'); } },
+  });
+  await reserveOwnedRecording(rejectedDb, rejectedServices);
+  const rejected = await invoke(rejectedDb, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  }, 'openid-a', rejectedServices);
+
+  assert.equal(rejected.ok, false);
+  const rejectedUsage = rejectedDb.records('recipe_usage_daily').get('family-a|1970-01-01');
+  assert.equal(rejectedUsage.asrSeconds, 0);
+  assert.equal(Object.values(rejectedUsage.reservations)[0].status, 'released');
 
   const readyDb = createMemoryDatabase(baseSeed());
   const readyServices = recordingServices({

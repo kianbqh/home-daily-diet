@@ -152,6 +152,27 @@ test('counts unlisted precise inventions and facts placed in the wrong field', (
   });
 });
 
+test('ingredient tuple encoding cannot hide an amount inside the ingredient name', () => {
+  const score = scoreRecipe({
+    recipe: validRecipe({
+      ingredients: [{ name: '鸡蛋|3个', amountText: '', note: '', uncertain: false }],
+    }),
+    expectedFacts: ['ingredient=鸡蛋|3个'],
+    forbiddenFacts: [],
+  });
+
+  assert.deepEqual(score, {
+    schemaPass: true,
+    unsupportedFacts: 1,
+    factRecall: 0,
+    fieldAccuracy: 0,
+    expectedHits: 0,
+    expectedCount: 1,
+    fieldCorrectCount: 0,
+    fieldUnionCount: 2,
+  });
+});
+
 test('does not count explicitly uncertain candidate facts as precise inventions', () => {
   const score = scoreRecipe({
     recipe: validRecipe({

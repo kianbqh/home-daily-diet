@@ -24,7 +24,7 @@
     "id": "fictional-seaweed-soup",
     "transcript": "水烧开后放一小把紫菜，再把一个鸡蛋打散淋进去。小火煮一分钟，关火前放一点香油。",
     "expectedFacts": [
-      "ingredient=水",
+      "ingredient=水|",
       "ingredient=紫菜|一小把",
       "ingredient=鸡蛋|1个",
       "ingredient=香油|一点",

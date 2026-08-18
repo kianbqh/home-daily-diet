@@ -87,7 +87,7 @@ function collectRecipeFactEntries(value) {
     const basePath = `ingredients[${index}]`;
     add(
       'ingredient',
-      ingredient.amountText ? `${ingredient.name}|${ingredient.amountText}` : ingredient.name,
+      encodeIngredientTuple(ingredient.name, ingredient.amountText),
       [`${basePath}.name`, `${basePath}.amountText`],
       ingredient.uncertain,
     );
@@ -109,6 +109,16 @@ function collectRecipeFactEntries(value) {
   });
   recipe.familyNotes.forEach((note, index) => add('familynote', note, `familyNotes[${index}]`));
   return [...entries.values()];
+}
+
+function encodeIngredientTuple(name, amountText) {
+  return `${escapeIngredientTuplePart(name)}|${escapeIngredientTuplePart(amountText)}`;
+}
+
+function escapeIngredientTuplePart(value) {
+  return String(value == null ? '' : value)
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|');
 }
 
 function isPathUncertain(path, uncertainPaths) {

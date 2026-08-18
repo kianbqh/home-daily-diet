@@ -42,6 +42,7 @@ test('scores canonical recipe facts deterministically without fuzzy invention ma
   assert.equal(canonicalizeFact('  DeepSeek   V4  '), 'deepseek v4');
   assert.deepEqual([...collectRecipeFacts(recipe)].sort(), [
     'ingredient=鸡蛋|3个',
+    'ingredient.name=鸡蛋',
     'step.heat=中大火',
     'step.instruction=炒到凝固',
   ].sort());
@@ -49,6 +50,7 @@ test('scores canonical recipe facts deterministically without fuzzy invention ma
     recipe,
     expectedFacts: [
       'ingredient=鸡蛋|3个',
+      'ingredient.name=鸡蛋',
       'step.instruction=炒到凝固',
       'step.heat=中大火',
     ],
@@ -58,10 +60,10 @@ test('scores canonical recipe facts deterministically without fuzzy invention ma
     unsupportedFacts: 0,
     factRecall: 1,
     fieldAccuracy: 1,
-    expectedHits: 3,
-    expectedCount: 3,
-    fieldCorrectCount: 3,
-    fieldUnionCount: 3,
+    expectedHits: 4,
+    expectedCount: 4,
+    fieldCorrectCount: 4,
+    fieldUnionCount: 4,
   });
 });
 
@@ -80,6 +82,7 @@ test('counts explicit forbidden precise facts and reports recall and field accur
     }),
     expectedFacts: [
       'ingredient=鸡蛋|3个',
+      'ingredient.name=鸡蛋',
       'step.instruction=炒到凝固',
       'step.heat=中大火',
     ],
@@ -89,12 +92,12 @@ test('counts explicit forbidden precise facts and reports recall and field accur
   assert.deepEqual(score, {
     schemaPass: true,
     unsupportedFacts: 1,
-    factRecall: 0.6667,
-    fieldAccuracy: 0.5,
-    expectedHits: 2,
-    expectedCount: 3,
-    fieldCorrectCount: 2,
-    fieldUnionCount: 4,
+    factRecall: 0.75,
+    fieldAccuracy: 0.6,
+    expectedHits: 3,
+    expectedCount: 4,
+    fieldCorrectCount: 3,
+    fieldUnionCount: 5,
   });
 });
 
@@ -111,12 +114,12 @@ test('counts unlisted precise inventions and facts placed in the wrong field', (
         uncertain: false,
       }],
     }),
-    expectedFacts: ['ingredient=鸡蛋|3个', 'step.instruction=炒熟'],
+    expectedFacts: ['ingredient.name=鸡蛋', 'ingredient=鸡蛋|3个', 'step.instruction=炒熟'],
     forbiddenFacts: ['*=180度'],
   });
   assert.equal(invented.unsupportedFacts, 1);
-  assert.equal(invented.expectedHits, 2);
-  assert.equal(invented.expectedCount, 2);
+  assert.equal(invented.expectedHits, 3);
+  assert.equal(invented.expectedCount, 3);
   const inventedReport = buildEvaluationReport({
     mode: 'live',
     models: ['hy3'],
@@ -157,7 +160,7 @@ test('ingredient tuple encoding cannot hide an amount inside the ingredient name
     recipe: validRecipe({
       ingredients: [{ name: '鸡蛋|3个', amountText: '', note: '', uncertain: false }],
     }),
-    expectedFacts: ['ingredient=鸡蛋|3个'],
+    expectedFacts: ['ingredient.name=鸡蛋', 'ingredient=鸡蛋|3个'],
     forbiddenFacts: [],
   });
 
@@ -167,9 +170,9 @@ test('ingredient tuple encoding cannot hide an amount inside the ingredient name
     factRecall: 0,
     fieldAccuracy: 0,
     expectedHits: 0,
-    expectedCount: 1,
+    expectedCount: 2,
     fieldCorrectCount: 0,
-    fieldUnionCount: 2,
+    fieldUnionCount: 3,
   });
 });
 
@@ -192,6 +195,24 @@ test('does not count explicitly uncertain candidate facts as precise inventions'
 
   assert.equal(score.unsupportedFacts, 0);
   assert.equal(score.fieldAccuracy, 1);
+});
+
+test('an uncertain amount never exempts an unmarked invented ingredient name', () => {
+  const score = scoreRecipe({
+    recipe: validRecipe({
+      ingredients: [
+        { name: '鸡蛋', amountText: '3个', note: '', uncertain: false },
+        { name: '鱼翅', amountText: '少许', note: '', uncertain: false },
+      ],
+      uncertainties: [{ fieldPath: 'ingredients[1].amountText', message: '用量没听清' }],
+    }),
+    expectedFacts: ['ingredient.name=鸡蛋', 'ingredient=鸡蛋|3个'],
+    forbiddenFacts: [],
+  });
+
+  assert.equal(score.factRecall, 1);
+  assert.equal(score.unsupportedFacts, 1);
+  assert.equal(score.fieldAccuracy, 0.6667);
 });
 
 test('builds per-model release gates and fails any live model below a required threshold', () => {
@@ -263,7 +284,7 @@ test('dry-run validates the matrix without creating providers, making requests, 
   const report = await evaluateFixture({
     fixture: [{
       id: 'dry-case', transcript,
-      expectedFacts: ['ingredient=土豆|2个'], forbiddenFacts: ['*=180度'],
+      expectedFacts: ['ingredient.name=土豆', 'ingredient=土豆|2个'], forbiddenFacts: ['*=180度'],
     }],
     models: ['hy3', 'deepseek-v4-flash'],
     live: false,
@@ -295,6 +316,7 @@ test('live evaluation uses only injected approved providers and maps usage witho
     fixture: [{
       id: 'live-case', transcript: '鸡蛋三个，中大火炒熟。',
       expectedFacts: [
+        'ingredient.name=鸡蛋',
         'ingredient=鸡蛋|3个',
         'step.instruction=炒熟',
         'step.heat=中大火',
@@ -354,6 +376,7 @@ test('live CLI writes a transcript-free report and exits one when a release gate
   fs.writeFileSync(fixturePath, JSON.stringify([{
     id: 'gate-case', transcript,
     expectedFacts: [
+      'ingredient.name=鸡蛋',
       'ingredient=鸡蛋|3个',
       'step.instruction=炒熟',
       'step.heat=中大火',

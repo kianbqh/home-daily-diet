@@ -13,6 +13,7 @@ const {
 const FACT_RECALL_GATE = 0.9;
 const FACT_TYPES = Object.freeze(new Set([
   'ingredient',
+  'ingredient.name',
   'ingredient.note',
   'step.instruction',
   'step.heat',
@@ -85,13 +86,23 @@ function collectRecipeFactEntries(value) {
 
   recipe.ingredients.forEach((ingredient, index) => {
     const basePath = `ingredients[${index}]`;
-    add(
-      'ingredient',
-      encodeIngredientTuple(ingredient.name, ingredient.amountText),
-      [`${basePath}.name`, `${basePath}.amountText`],
-      ingredient.uncertain,
-    );
-    add('ingredient.note', ingredient.note, `${basePath}.note`, ingredient.uncertain);
+    add('ingredient.name', ingredient.name, `${basePath}.name`, ingredient.uncertain);
+    if (ingredient.amountText) {
+      add(
+        'ingredient',
+        encodeIngredientTuple(ingredient.name, ingredient.amountText),
+        [`${basePath}.name`, `${basePath}.amountText`],
+        ingredient.uncertain,
+      );
+    }
+    if (ingredient.note) {
+      add(
+        'ingredient.note',
+        encodeIngredientTuple(ingredient.name, ingredient.note),
+        [`${basePath}.name`, `${basePath}.note`],
+        ingredient.uncertain,
+      );
+    }
   });
   recipe.steps.forEach((step, index) => {
     const basePath = `steps[${index}]`;

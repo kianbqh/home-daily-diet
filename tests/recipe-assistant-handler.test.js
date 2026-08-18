@@ -578,6 +578,11 @@ test('a conflict reapply reopens the same confirmed draft and remains reachable 
   const db = createMemoryDatabase(seed);
   const localRecipe = { ...clone(validRecipe), familyNotes: ['重新应用后仍可找回'] };
 
+  const forgedReopen = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
+    draftId: 'draft-confirmed-record', revision: 4, recipe: localRecipe,
+    baseMainVersionId: 'version-current', reopenAfterConflict: true,
+  });
   const ordinary = await invoke(db, {
     action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
     draftId: 'draft-confirmed-record', revision: 4, recipe: localRecipe,
@@ -591,6 +596,7 @@ test('a conflict reapply reopens the same confirmed draft and remains reachable 
     action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
   });
 
+  assert.equal(forgedReopen.error.code, 'DRAFT_CONFLICT');
   assert.equal(ordinary.error.code, 'DRAFT_CONFLICT');
   assert.equal(reopened.ok, true);
   assert.equal(reopened.data.draft._id, 'draft-confirmed-record');
@@ -600,6 +606,7 @@ test('a conflict reapply reopens the same confirmed draft and remains reachable 
   assert.deepEqual(reopened.data.draft.recipe.familyNotes, ['重新应用后仍可找回']);
   assert.equal(workspace.data.draft._id, 'draft-confirmed-record');
   assert.deepEqual(workspace.data.draft.recipe.familyNotes, ['重新应用后仍可找回']);
+  assert.equal(JSON.stringify(workspace).includes('conflictReopenGrants'), false);
 });
 
 test('recipe validation errors do not echo raw recipe content in responses or logs', async () => {
@@ -3049,6 +3056,11 @@ test('reapplying an organizing draft settles its lease and a late model result c
   const current = db.records('recipe_drafts').get('draft-recording');
   const localRecipe = organizedRecipe('本地重新应用');
 
+  const conflict = await invoke(db, {
+    action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
+    draftId: 'draft-recording', revision: current.revision, recipe: localRecipe,
+    baseMainVersionId: current.baseMainVersionId,
+  });
   const reopened = await invoke(db, {
     action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1',
     draftId: 'draft-recording', revision: current.revision, recipe: localRecipe,
@@ -3063,6 +3075,7 @@ test('reapplying an organizing draft settles its lease and a late model result c
   const stored = db.records('recipe_drafts').get('draft-recording');
   const operations = [...db.records('recipe_usage_daily').values()]
     .filter((item) => item.sourceType === 'usage_operation');
+  assert.equal(conflict.error.code, 'DRAFT_CONFLICT');
   assert.equal(reopened.ok, true);
   assert.equal(stored.status, 'editing');
   assert.equal(stored.recipe.ingredients[0].name, '本地重新应用');

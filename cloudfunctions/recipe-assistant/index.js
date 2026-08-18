@@ -58,6 +58,7 @@ const MAX_SOURCE_CHARACTERS = 30_000;
 const CONFLICT_CODES = Object.freeze([
   'DRAFT_CONFLICT', 'MAIN_RECIPE_CONFLICT', 'TRANSCRIPT_CONFLICT',
 ]);
+const CONFLICT_REOPEN_GRANT_MS = 10 * 60 * 1000;
 let productionAsrProvider = null;
 let productionRecipeProvider = null;
 let productionRecipeProviderKey = '';
@@ -1278,14 +1279,24 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
     ? String(event.baseMainVersionId || '').trim()
     : undefined;
   const reopenAfterConflict = event.reopenAfterConflict === true;
-  return repository.runTransaction(async (transaction) => {
+  const outcome = await repository.runTransaction(async (transaction) => {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
     const terminalStatus = draft.status === 'confirmed' || draft.status === 'organizing';
-    if (draft.revision !== revision || (terminalStatus && !reopenAfterConflict)) {
-      throw createConflictError(
-        'DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试', draft, draft.revision
-      );
+    if (terminalStatus && !reopenAfterConflict) {
+      const granted = await transaction.setDraft(draftId, {
+        ...draft,
+        conflictReopenGrants: grantConflictReopen(
+          draft.conflictReopenGrants, member.memberId, draft.revision, now
+        ),
+      });
+      return { conflict: granted };
+    }
+    if (draft.revision !== revision
+      || (terminalStatus && !hasConflictReopenGrant(
+        draft.conflictReopenGrants, member.memberId, draft.revision, now
+      ))) {
+      return { conflict: draft };
     }
     if (reopenAfterConflict && draft.status === 'organizing') {
       const operationId = String(draft.organizeUsageOperationId || '').trim();
@@ -1317,12 +1328,49 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
       ...editableDraft,
       recipe,
       ...(hasBaseMainVersionId ? { baseMainVersionId } : {}),
+      conflictReopenGrants: [],
       revision: revision + 1,
       updatedBy: member.memberId,
       updatedAt: now,
     });
     return { draft: updated };
   });
+  if (outcome && outcome.conflict) {
+    throw createConflictError(
+      'DRAFT_CONFLICT', '菜谱草稿已被更新，请刷新后重试',
+      outcome.conflict, outcome.conflict.revision
+    );
+  }
+  return outcome;
+}
+
+function grantConflictReopen(value, memberId, revision, now) {
+  const active = normalizeConflictReopenGrants(value, revision, now)
+    .filter((grant) => grant.memberId !== memberId);
+  active.push({
+    memberId: String(memberId || ''),
+    revision: Number(revision) || 0,
+    expiresAt: now + CONFLICT_REOPEN_GRANT_MS,
+  });
+  return active.slice(-20);
+}
+
+function hasConflictReopenGrant(value, memberId, revision, now) {
+  return normalizeConflictReopenGrants(value, revision, now)
+    .some((grant) => grant.memberId === memberId);
+}
+
+function normalizeConflictReopenGrants(value, revision, now) {
+  return (Array.isArray(value) ? value : []).filter((grant) => (
+    grant && typeof grant === 'object'
+      && String(grant.memberId || '')
+      && Number(grant.revision) === Number(revision)
+      && Number(grant.expiresAt) > now
+  )).map((grant) => ({
+    memberId: String(grant.memberId),
+    revision: Number(grant.revision),
+    expiresAt: Number(grant.expiresAt),
+  }));
 }
 
 async function confirmDraft(repository, member, familyId, dishId, event, now) {

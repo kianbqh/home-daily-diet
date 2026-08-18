@@ -22,6 +22,9 @@ function createLifecycleDatabase(seed = {}) {
     lte(value) {
       return { __operator: 'lte', value };
     },
+    gt(value) {
+      return { __operator: 'gt', value };
+    },
   };
 
   function records(name) {
@@ -33,7 +36,17 @@ function createLifecycleDatabase(seed = {}) {
     if (expected && expected.__operator === 'lte') {
       return actual != null && Number(actual) <= Number(expected.value);
     }
+    if (expected && expected.__operator === 'gt') {
+      return actual != null && String(actual) > String(expected.value);
+    }
     return actual === expected;
+  }
+
+  function compare(left, right) {
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+    return String(left).localeCompare(String(right));
   }
 
   function collection(name) {
@@ -67,7 +80,7 @@ function createLifecycleDatabase(seed = {}) {
         return {
           orderBy(field, direction) {
             const multiplier = direction === 'desc' ? -1 : 1;
-            result.sort((left, right) => multiplier * (Number(left[field]) - Number(right[field])));
+            result.sort((left, right) => multiplier * compare(left[field], right[field]));
             return this;
           },
           limit(limit) {
@@ -245,6 +258,74 @@ test('purge requires a tombstone, blocks reads first, and converges without dele
   assert.equal([...db.records('family_recipes').values()].some((item) => item.dishId === 'dish-1'), false);
   assert.equal([...db.records('recipe_versions').values()].some((item) => item.dishId === 'dish-1'), false);
   assert.equal(db.records('recipe_usage_daily').has('usage'), true);
+});
+
+test('purge advances beyond a full page of persistent file failures', async () => {
+  const seed = baseSeed('deleted', [
+    { familyId: 'family-a', dishId: 'dish-1', purgedAt: '2026-08-18T00:00:00.000Z' },
+  ]);
+  seed.family_states['family-a'].dishes = [];
+  seed.recipe_recordings = {};
+  for (let index = 0; index < 100; index += 1) {
+    const id = `blocked-${String(index).padStart(3, '0')}`;
+    seed.recipe_recordings[id] = {
+      familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sourceType: 'audio', status: 'ready',
+      fileId: `cloud://env/families/family-a/recipe-audio/${id}.mp3`, draftExpiresAt: null,
+    };
+  }
+  seed.recipe_recordings['ready-100'] = {
+    familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1', sourceType: 'manual_text',
+    status: 'ready', fileId: '', draftExpiresAt: null,
+  };
+  const db = createLifecycleDatabase(seed);
+  const fileApi = {
+    async deleteFile({ fileList }) {
+      return {
+        fileList: fileList.map((fileID) => ({
+          fileID, status: -1, errMsg: 'persistent storage failure',
+        })),
+      };
+    },
+  };
+
+  const result = await invoke(db, {
+    action: 'purgeDishArtifacts', familyId: 'family-a', dishId: 'dish-1',
+  }, { fileApi });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.pendingFiles, 100);
+  assert.equal(db.records('recipe_recordings').has('ready-100'), false);
+  assert.equal(db.records('recipe_recordings').has('blocked-000'), true);
+});
+
+test('opportunistic cleanup skips expired artifacts once their workspace claim is attached', async () => {
+  const now = 1_786_000_000_000;
+  const claimId = 'workspace-family-a-dish-1-record-1';
+  const db = createLifecycleDatabase({
+    recipe_recordings: {
+      [claimId]: {
+        familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+        sourceType: 'workspace_state', workspaceClaim: true, status: 'attached', draftExpiresAt: null,
+      },
+      'expired-after-attach': {
+        familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+        sourceType: 'audio', status: 'ready', fileId: '', draftExpiresAt: now - 1,
+      },
+    },
+    recipe_drafts: {
+      'draft-expired-after-attach': {
+        familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+        status: 'editing', draftExpiresAt: now - 1,
+      },
+    },
+  });
+  const repository = createRecipeRepository(db, DEFAULT_CONFIG);
+
+  const result = await cleanupExpiredWorkspaces(repository, null, now, 20);
+
+  assert.equal(result.processed, 0);
+  assert.equal(db.records('recipe_recordings').has('expired-after-attach'), true);
+  assert.equal(db.records('recipe_drafts').has('draft-expired-after-attach'), true);
 });
 
 test('opportunistic cleanup processes at most twenty indexed expired artifacts and retries failed files', async () => {

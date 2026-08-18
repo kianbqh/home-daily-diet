@@ -956,13 +956,12 @@ async function purgeDishArtifacts(repository, db, config, familyId, dishId, file
   }
 
   const result = { deletedDocuments: 0, deletedFiles: 0, pendingFiles: 0 };
-  const seenRecordings = new Set();
+  let recordingCursor = '';
   while (true) {
-    const page = await repository.listRecordingArtifactsByDish(familyId, dishId, 100);
-    const recordings = page.filter((item) => item && item._id && !seenRecordings.has(item._id));
+    const page = await repository.listRecordingArtifactsByDish(familyId, dishId, 100, recordingCursor);
+    const recordings = page.filter((item) => item && item._id);
     if (!recordings.length) break;
     for (const recording of recordings) {
-      seenRecordings.add(recording._id);
       const current = await repository.getRecordingArtifact(recording._id);
       if (!current || current.familyId !== familyId || current.dishId !== dishId) continue;
       const fileId = String(current.fileId || '');
@@ -982,6 +981,12 @@ async function purgeDishArtifacts(repository, db, config, familyId, dishId, file
       }
       result.deletedDocuments += await repository.removeRecording(current._id);
     }
+    const nextCursor = String(recordings[recordings.length - 1]._id || '');
+    if (!nextCursor || nextCursor <= recordingCursor) {
+      throw createRecipeError('CLEANUP_CURSOR_INVALID', '菜谱清理暂时不可用', 'action');
+    }
+    recordingCursor = nextCursor;
+    if (page.length < 100) break;
   }
 
   const seenDrafts = new Set();
@@ -1022,6 +1027,7 @@ async function cleanupExpiredWorkspaces(repository, fileApi, now, limit = OPPORT
     const marked = await repository.runTransaction(async (transaction) => {
       const current = await transaction.getRecordingArtifact(candidate._id);
       if (!isExpiredWorkspaceArtifact(current, now)) return null;
+      if (!await claimExpiredWorkspaceForCleanup(transaction, current, now)) return null;
       if (current.cleanupPending === true) return current;
       return transaction.setRecording(current._id, {
         ...current, cleanupPending: true, updatedAt: now,
@@ -1052,6 +1058,7 @@ async function cleanupExpiredWorkspaces(repository, fileApi, now, limit = OPPORT
       const marked = await repository.runTransaction(async (transaction) => {
         const current = await transaction.getDraftArtifact(candidate._id);
         if (!isExpiredWorkspaceArtifact(current, now)) return null;
+        if (!await claimExpiredWorkspaceForCleanup(transaction, current, now)) return null;
         if (current.cleanupPending === true) return current;
         return transaction.setDraft(current._id, {
           ...current, cleanupPending: true, updatedAt: now,
@@ -1063,6 +1070,22 @@ async function cleanupExpiredWorkspaces(repository, fileApi, now, limit = OPPORT
     }
   }
   return result;
+}
+
+async function claimExpiredWorkspaceForCleanup(transaction, artifact, now) {
+  const familyId = String(artifact && artifact.familyId || '');
+  const dishId = String(artifact && artifact.dishId || '');
+  const recordId = String(artifact && artifact.recordId || '');
+  if (!familyId || !dishId || !recordId || typeof transaction.getWorkspaceState !== 'function') return true;
+  const state = await transaction.getWorkspaceState(familyId, dishId, recordId);
+  if (!state) return true;
+  if (state.status === 'attached') return false;
+  if (state.cleanupPending !== true && typeof transaction.setWorkspaceState === 'function') {
+    await transaction.setWorkspaceState(familyId, dishId, recordId, {
+      ...state, cleanupPending: true, updatedAt: now,
+    });
+  }
+  return true;
 }
 
 function isExpiredWorkspaceArtifact(value, now) {

@@ -176,8 +176,17 @@ function createRecipeRepository(db, config, options = {}) {
       : addDocument(config.recordingCollection, data);
   }
 
-  async function listRecordingArtifactsByDish(familyId, dishId, limit = 100) {
-    return query(config.recordingCollection, { familyId, dishId }, {
+  async function listRecordingArtifactsByDish(familyId, dishId, limit = 100, afterId = '') {
+    const filter = { familyId, dishId };
+    const cursor = String(afterId || '').trim();
+    if (cursor) {
+      if (!db.command || typeof db.command.gt !== 'function') {
+        throw createRecipeError('DATABASE_UNAVAILABLE', '菜谱清理暂时不可用', 'open-database');
+      }
+      filter._id = db.command.gt(cursor);
+    }
+    return query(config.recordingCollection, filter, {
+      orderBy: '_id', order: 'asc',
       limit: Math.min(Math.max(Number(limit) || 100, 1), 100),
     });
   }

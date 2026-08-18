@@ -321,4 +321,40 @@ if (badWxml.length) {
   process.exit(1);
 }
 
+const dishDetailTemplate = fs.readFileSync(path.join(root, 'pages/dish-edit/dish-edit.wxml'), 'utf8');
+const recordingAnchorIndex = dishDetailTemplate.indexOf('id="recordingWorkspaceAnchor"');
+const optionalRecordMetadataIndex = dishDetailTemplate.indexOf('这次的照片');
+const recipeEntryIssues = [
+  /bindtap="startVoiceRecipeEntry"[^>]*>语音记录做法<\/button>/.test(dishDetailTemplate)
+    ? '' : 'missing visible voice-first recipe entry',
+  /bindtap="openManualFamilyRecipe"[^>]*>直接手动填写<\/button>/.test(dishDetailTemplate)
+    ? '' : 'missing manual recipe fallback entry',
+  recordingAnchorIndex >= 0 && optionalRecordMetadataIndex >= 0
+    && recordingAnchorIndex < optionalRecordMetadataIndex
+    ? '' : 'recording workspace must appear before optional record metadata',
+].filter(Boolean);
+if (recipeEntryIssues.length) {
+  console.error(`SMOKE FAIL: unified recipe entry is incomplete\n${recipeEntryIssues.join('\n')}`);
+  process.exit(1);
+}
+
+const recipeDraftTemplate = fs.readFileSync(path.join(root, 'pages/recipe-draft/recipe-draft.wxml'), 'utf8');
+const recipeEditorTemplate = fs.readFileSync(path.join(root, 'components/recipe-editor/recipe-editor.wxml'), 'utf8');
+const compactEmptySectionCount = (recipeEditorTemplate.match(/\? 'is-empty' : ''/g) || []).length;
+const compactDraftIssues = [
+  /RECIPE DRAFT|class="page-title">整理家庭菜谱/.test(recipeDraftTemplate)
+    ? 'recipe draft repeats the page title' : '',
+  /bindtap="switchToVoiceRecording">改用语音记录<\/button>/.test(recipeDraftTemplate)
+    ? '' : 'manual draft is missing the voice escape hatch',
+  compactEmptySectionCount === 5
+    ? '' : `expected 5 compact empty recipe sections, found ${compactEmptySectionCount}`,
+  ['+ 食材', '+ 步骤', '+ 技巧', '+ 问题', '+ 经验'].every(
+    (label) => recipeEditorTemplate.includes(`>${label}</button>`)
+  ) ? '' : 'compact recipe section actions are incomplete',
+].filter(Boolean);
+if (compactDraftIssues.length) {
+  console.error(`SMOKE FAIL: compact recipe draft shell is incomplete\n${compactDraftIssues.join('\n')}`);
+  process.exit(1);
+}
+
 console.log(`SMOKE PASS: ${requiredFiles.length} required files, ${expectedPages.length} routes, ${(packageBytes / 1024).toFixed(1)} KB estimated main package`);

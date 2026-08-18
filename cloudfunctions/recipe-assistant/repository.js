@@ -43,6 +43,27 @@ function createRecipeRepository(db, config, options = {}) {
     return getDocument(name, result._id);
   }
 
+  async function removeDocument(name, id) {
+    try {
+      const result = await db.collection(name).doc(id).remove();
+      const removed = Number(result && result.stats && result.stats.removed);
+      return Number.isFinite(removed) ? removed : 1;
+    } catch (error) {
+      const code = error && (error.errCode || error.code);
+      const message = String(error && (error.errMsg || error.message) || '').toLowerCase();
+      if (code === -1 || code === 'DOCUMENT_NOT_FOUND' || message.includes('not found') || message.includes('不存在')) {
+        return 0;
+      }
+      throw error;
+    }
+  }
+
+  function expirationFilter(now) {
+    return db.command && typeof db.command.lte === 'function'
+      ? db.command.lte(now)
+      : null;
+  }
+
   async function getDraft(familyIdOrInput, dishIdArg, draftIdArg) {
     const { familyId, dishId, draftId, recordId } = normalizeOwnedLookup(familyIdOrInput, dishIdArg, draftIdArg);
     if (draftId) {
@@ -59,6 +80,28 @@ function createRecipeRepository(db, config, options = {}) {
       : addDocument(config.draftCollection, data);
   }
 
+  async function listDraftsByDish(familyId, dishId, limit = 100) {
+    return query(config.draftCollection, { familyId, dishId }, {
+      limit: Math.min(Math.max(Number(limit) || 100, 1), 100),
+    });
+  }
+
+  async function getDraftArtifact(id) {
+    return getDocument(config.draftCollection, id);
+  }
+
+  async function removeDraft(id) {
+    return removeDocument(config.draftCollection, id);
+  }
+
+  async function listExpiredDrafts(now, limit = 20) {
+    const expiresAt = expirationFilter(now);
+    if (!expiresAt) return [];
+    return query(config.draftCollection, { draftExpiresAt: expiresAt }, {
+      orderBy: 'draftExpiresAt', order: 'asc', limit: Math.min(Math.max(Number(limit) || 20, 1), 20),
+    });
+  }
+
   async function getRecipePointer(familyId, dishId) {
     const pointer = await getDocument(config.recipeCollection, `${familyId}|${dishId}`);
     return owned(pointer, familyId, dishId) ? pointer : null;
@@ -66,6 +109,10 @@ function createRecipeRepository(db, config, options = {}) {
 
   async function setRecipePointer(familyId, dishId, data) {
     return setDocument(config.recipeCollection, `${familyId}|${dishId}`, data);
+  }
+
+  async function removeRecipePointer(familyId, dishId) {
+    return removeDocument(config.recipeCollection, `${familyId}|${dishId}`);
   }
 
   async function getVersion(familyId, dishId, versionId) {
@@ -91,6 +138,10 @@ function createRecipeRepository(db, config, options = {}) {
       throw error;
     }
     return setDocument(config.versionCollection, id, data);
+  }
+
+  async function removeVersion(id) {
+    return removeDocument(config.versionCollection, id);
   }
 
   async function getRecording(familyIdOrInput, dishIdArg, recordingIdArg) {
@@ -123,6 +174,28 @@ function createRecipeRepository(db, config, options = {}) {
     return id
       ? setDocument(config.recordingCollection, id, data)
       : addDocument(config.recordingCollection, data);
+  }
+
+  async function listRecordingArtifactsByDish(familyId, dishId, limit = 100) {
+    return query(config.recordingCollection, { familyId, dishId }, {
+      limit: Math.min(Math.max(Number(limit) || 100, 1), 100),
+    });
+  }
+
+  async function getRecordingArtifact(id) {
+    return getDocument(config.recordingCollection, id);
+  }
+
+  async function removeRecording(id) {
+    return removeDocument(config.recordingCollection, id);
+  }
+
+  async function listExpiredRecordingArtifacts(now, limit = 20) {
+    const expiresAt = expirationFilter(now);
+    if (!expiresAt) return [];
+    return query(config.recordingCollection, { draftExpiresAt: expiresAt }, {
+      orderBy: 'draftExpiresAt', order: 'asc', limit: Math.min(Math.max(Number(limit) || 20, 1), 20),
+    });
   }
 
   async function getWorkspaceState(familyId, dishId, recordId) {
@@ -318,15 +391,25 @@ function createRecipeRepository(db, config, options = {}) {
   const api = {
     getDraft,
     setDraft,
+    listDraftsByDish,
+    getDraftArtifact,
+    removeDraft,
+    listExpiredDrafts,
     getRecipePointer,
     setRecipePointer,
+    removeRecipePointer,
     getVersion,
     listVersions,
     createVersion,
+    removeVersion,
     getRecording,
     getRecordingsByIds,
     listRecordings,
     setRecording,
+    listRecordingArtifactsByDish,
+    getRecordingArtifact,
+    removeRecording,
+    listExpiredRecordingArtifacts,
     getWorkspaceState,
     setWorkspaceState,
     reserveAsrUsage,

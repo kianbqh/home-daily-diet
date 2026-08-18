@@ -149,6 +149,7 @@ function sensitiveKey(key) {
     || normalized === 'organizeusagereservedat'
     || normalized === 'organizerequestissuedat'
     || normalized === 'conflictreopengrants'
+    || normalized === 'cleanuppending'
     || /urls?$/.test(normalized);
 }
 

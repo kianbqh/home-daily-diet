@@ -59,6 +59,10 @@ const CONFLICT_CODES = Object.freeze([
   'DRAFT_CONFLICT', 'MAIN_RECIPE_CONFLICT', 'TRANSCRIPT_CONFLICT',
 ]);
 const CONFLICT_REOPEN_GRANT_MS = 10 * 60 * 1000;
+const OPPORTUNISTIC_CLEANUP_LIMIT = 20;
+const READ_ACTIONS = Object.freeze(new Set([
+  'getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace', 'getDraft',
+]));
 let productionAsrProvider = null;
 let productionRecipeProvider = null;
 let productionRecipeProviderKey = '';
@@ -133,7 +137,7 @@ function createGuards(db, config) {
     const dish = (state.dishes || []).find((item) => item && item.id === dishId);
     if (!dish) throw createRecipeError('DISH_NOT_FOUND', '找不到这道菜', 'authorize');
     if (dish.status === 'deleted' && options.allowArchived === true) return dish;
-    if (dish.status !== 'active') throw createRecipeError('DISH_DELETED', '这道菜已进入回收站', 'authorize');
+    if (dish.status !== 'active') throw createRecipeError('DISH_ARCHIVED', '这道菜已进入回收站', 'authorize');
     return dish;
   }
 
@@ -171,9 +175,10 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
     const openid = String(context.OPENID || '').trim();
     if (!openid) throw createRecipeError('AUTH_REQUIRED', '无法确认登录身份', 'authorize');
     const member = await guards.requireMember(familyId, openid);
+    const purgeAction = requiredAction === 'purgeDishArtifacts';
     const allowArchived = ['getRecipe', 'listVersions', 'getVersion', 'getRecordWorkspace'].includes(requiredAction);
-    const dish = await guards.requireActiveDish(familyId, dishId, { allowArchived });
-    const recordAuthorization = await authorizeRecordScope(
+    const dish = purgeAction ? null : await guards.requireActiveDish(familyId, dishId, { allowArchived });
+    const recordAuthorization = purgeAction ? null : await authorizeRecordScope(
       requiredAction, event, member, dish, familyId, dishId, repository, guards, db, config
     );
     if (recordAuthorization && recordAuthorization.kind === 'provisional'
@@ -251,8 +256,22 @@ async function handleAction(event = {}, context = {}, dependencies = {}) {
       case 'confirmDraft':
         data = await confirmDraft(repository, member, familyId, dishId, event, nowMs(dependencies));
         break;
+      case 'purgeDishArtifacts':
+        data = await purgeDishArtifacts(
+          repository, db, config, familyId, dishId, dependencies.fileApi, nowMs(dependencies)
+        );
+        break;
       default:
         throw createRecipeError('ACTION_INVALID', '不支持这个操作', 'action');
+    }
+    if (!READ_ACTIONS.has(requiredAction) && requiredAction !== 'purgeDishArtifacts') {
+      try {
+        await cleanupExpiredWorkspaces(
+          repository, dependencies.fileApi, nowMs(dependencies), OPPORTUNISTIC_CLEANUP_LIMIT
+        );
+      } catch (_) {
+        // Cleanup is best effort; durable markers make a later write a safe retry.
+      }
     }
     return { ok: true, data: sanitize(data) };
   } catch (error) {
@@ -720,6 +739,7 @@ async function attachRecordWorkspace(
   for (const recording of recordings) {
     await repository.runTransaction(async (transaction) => {
       const current = await transaction.getRecording(familyId, dishId, recording._id);
+      if (current && current.cleanupPending === true) throw workspaceExpired();
       if (!current || current.status === 'deleted' || current.draftExpiresAt == null) return current;
       return transaction.setRecording(current._id, {
         ...current, draftExpiresAt: null, updatedBy: member.memberId, updatedAt: now,
@@ -730,6 +750,7 @@ async function attachRecordWorkspace(
   if (draft) {
     await repository.runTransaction(async (transaction) => {
       const current = await transaction.getDraft({ familyId, dishId, draftId: draft._id, recordId });
+      if (current && current.cleanupPending === true) throw workspaceExpired();
       if (!current || current.status === 'cancelled' || current.draftExpiresAt == null) return current;
       return transaction.setDraft(current._id, { ...current, draftExpiresAt: null, updatedAt: now });
     });
@@ -910,7 +931,151 @@ async function temporaryFileUrl(fileApi, fileId) {
 
 async function deleteCloudFile(fileApi, fileId) {
   if (!fileApi || typeof fileApi.deleteFile !== 'function') throw new Error('file deletion unavailable');
-  return fileApi.deleteFile({ fileList: [fileId] });
+  const result = await fileApi.deleteFile({ fileList: [fileId] });
+  if (result && Array.isArray(result.fileList)) {
+    const entry = result.fileList.find((item) => String(item && (item.fileID || item.fileId) || '') === fileId)
+      || result.fileList[0];
+    const hasExplicitStatus = entry && typeof entry === 'object' && entry.status != null;
+    if (!entry || (hasExplicitStatus && Number(entry.status) !== 0)) {
+      const error = new Error(String(entry && (entry.errMsg || entry.message) || 'file deletion failed'));
+      error.code = 'FILE_DELETE_FAILED';
+      throw error;
+    }
+  }
+  return result;
+}
+
+async function purgeDishArtifacts(repository, db, config, familyId, dishId, fileApi, now) {
+  const state = await getDocument(db, config.stateCollection, familyId);
+  const confirmed = state && state.family && state.family.id === familyId
+    && (state.purgedDishes || []).some((item) => item
+      && item.familyId === familyId
+      && item.dishId === dishId);
+  if (!confirmed) {
+    throw createRecipeError('PURGE_NOT_CONFIRMED', '请先从回收站彻底删除这道菜', 'authorize');
+  }
+
+  const result = { deletedDocuments: 0, deletedFiles: 0, pendingFiles: 0 };
+  const seenRecordings = new Set();
+  while (true) {
+    const page = await repository.listRecordingArtifactsByDish(familyId, dishId, 100);
+    const recordings = page.filter((item) => item && item._id && !seenRecordings.has(item._id));
+    if (!recordings.length) break;
+    for (const recording of recordings) {
+      seenRecordings.add(recording._id);
+      const current = await repository.getRecordingArtifact(recording._id);
+      if (!current || current.familyId !== familyId || current.dishId !== dishId) continue;
+      const fileId = String(current.fileId || '');
+      if (fileId && fileIdBelongsToFamily(fileId, familyId)) {
+        await repository.setRecording(current._id, {
+          ...current, cleanupPending: true, updatedAt: now,
+        });
+        try {
+          await deleteCloudFile(fileApi, fileId);
+          result.deletedFiles += 1;
+        } catch (error) {
+          if (!fileAlreadyDeleted(error)) {
+            result.pendingFiles += 1;
+            continue;
+          }
+        }
+      }
+      result.deletedDocuments += await repository.removeRecording(current._id);
+    }
+  }
+
+  const seenDrafts = new Set();
+  while (true) {
+    const page = await repository.listDraftsByDish(familyId, dishId, 100);
+    const drafts = page.filter((item) => item && item._id && !seenDrafts.has(item._id));
+    if (!drafts.length) break;
+    for (const draft of drafts) {
+      seenDrafts.add(draft._id);
+      result.deletedDocuments += await repository.removeDraft(draft._id);
+    }
+  }
+
+  const pointer = await repository.getRecipePointer(familyId, dishId);
+  if (pointer) result.deletedDocuments += await repository.removeRecipePointer(familyId, dishId);
+
+  const seenVersions = new Set();
+  while (true) {
+    const page = await repository.listVersions(familyId, dishId, 100);
+    const versions = page.filter((item) => item && item._id && !seenVersions.has(item._id));
+    if (!versions.length) break;
+    for (const version of versions) {
+      seenVersions.add(version._id);
+      result.deletedDocuments += await repository.removeVersion(version._id);
+    }
+  }
+  return result;
+}
+
+async function cleanupExpiredWorkspaces(repository, fileApi, now, limit = OPPORTUNISTIC_CLEANUP_LIMIT) {
+  const boundedLimit = Math.min(Math.max(Number(limit) || OPPORTUNISTIC_CLEANUP_LIMIT, 1), OPPORTUNISTIC_CLEANUP_LIMIT);
+  const result = {
+    processed: 0, deletedDocuments: 0, deletedFiles: 0, pendingFiles: 0,
+  };
+  const recordings = await repository.listExpiredRecordingArtifacts(now, boundedLimit);
+  for (const candidate of recordings) {
+    if (result.processed >= boundedLimit) break;
+    const marked = await repository.runTransaction(async (transaction) => {
+      const current = await transaction.getRecordingArtifact(candidate._id);
+      if (!isExpiredWorkspaceArtifact(current, now)) return null;
+      if (current.cleanupPending === true) return current;
+      return transaction.setRecording(current._id, {
+        ...current, cleanupPending: true, updatedAt: now,
+      });
+    });
+    if (!marked) continue;
+    result.processed += 1;
+    const fileId = String(marked.fileId || '');
+    if (fileId && fileIdBelongsToFamily(fileId, marked.familyId)) {
+      try {
+        await deleteCloudFile(fileApi, fileId);
+        result.deletedFiles += 1;
+      } catch (error) {
+        if (!fileAlreadyDeleted(error)) {
+          result.pendingFiles += 1;
+          continue;
+        }
+      }
+    }
+    result.deletedDocuments += await repository.removeRecording(marked._id);
+  }
+
+  const remaining = boundedLimit - result.processed;
+  if (remaining > 0) {
+    const drafts = await repository.listExpiredDrafts(now, remaining);
+    for (const candidate of drafts) {
+      if (result.processed >= boundedLimit) break;
+      const marked = await repository.runTransaction(async (transaction) => {
+        const current = await transaction.getDraftArtifact(candidate._id);
+        if (!isExpiredWorkspaceArtifact(current, now)) return null;
+        if (current.cleanupPending === true) return current;
+        return transaction.setDraft(current._id, {
+          ...current, cleanupPending: true, updatedAt: now,
+        });
+      });
+      if (!marked) continue;
+      result.processed += 1;
+      result.deletedDocuments += await repository.removeDraft(marked._id);
+    }
+  }
+  return result;
+}
+
+function isExpiredWorkspaceArtifact(value, now) {
+  return Boolean(value)
+    && value.draftExpiresAt != null
+    && Number(value.draftExpiresAt) <= Number(now);
+}
+
+function fileAlreadyDeleted(error) {
+  const code = String(error && (error.errCode || error.code) || '').toLowerCase();
+  const message = String(error && (error.errMsg || error.message) || '').toLowerCase();
+  return code.includes('not_found') || code.includes('notfound')
+    || message.includes('not found') || message.includes('不存在');
 }
 
 async function createManualDraft(repository, guards, member, familyId, dishId, event, now) {
@@ -1528,7 +1693,7 @@ function requireProvisionalRecordId(recordId) {
 
 function requireActiveProvisionalDish(dish) {
   if (dish && dish.status === 'active') return;
-  throw createRecipeError('DISH_DELETED', '这道菜已进入回收站', 'authorize');
+  throw createRecipeError('DISH_ARCHIVED', '这道菜已进入回收站', 'authorize');
 }
 
 async function inspectWorkspace(repository, db, config, familyId, dishId, recordId) {
@@ -1573,16 +1738,21 @@ function requireWorkspaceOwner(workspace, memberId, options) {
 
 function requireProvisionalArtifactOwner(artifact, memberId, authorization) {
   if (!authorization || authorization.kind !== 'provisional') return;
-  if (!artifact || artifact.draftExpiresAt == null || artifact.createdBy !== memberId) throw workspaceNotFound();
+  if (!artifact || artifact.cleanupPending === true
+    || artifact.draftExpiresAt == null || artifact.createdBy !== memberId) throw workspaceNotFound();
 }
 
 function requireProvisionalStateOwner(state, memberId, authorization) {
   if (!authorization || authorization.kind !== 'provisional' || !state) return;
-  if (state.createdBy !== memberId) throw workspaceNotFound();
+  if (state.cleanupPending === true || state.createdBy !== memberId) throw workspaceNotFound();
 }
 
 function workspaceNotFound() {
   return createRecipeError('RECORD_NOT_FOUND', '找不到这次制作记录', 'authorize');
+}
+
+function workspaceExpired() {
+  return createRecipeError('WORKSPACE_EXPIRED', '这次未保存的记录已经过期，请重新开始', 'authorize');
 }
 
 function workspaceClaimDocumentId(recordId) {
@@ -1677,6 +1847,7 @@ async function finishWorkspaceClaim(
       || current.workspaceFamilyId !== familyId
       || current.workspaceDishId !== dishId
       || current.workspaceRecordId !== recordId) throw workspaceNotFound();
+    if (current.cleanupPending === true) throw workspaceExpired();
     if (current.status === 'temporary' || current.status === 'cancelled') {
       if (current.createdBy !== memberId) throw workspaceNotFound();
     }
@@ -1885,6 +2056,7 @@ module.exports = {
   createInputHash,
   createCloudFileApi,
   createGuards,
+  cleanupExpiredWorkspaces,
   handleAction,
   main,
   publicMessage,

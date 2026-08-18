@@ -83,6 +83,40 @@ test('recipe assistant initialization failure leaves the existing store usable',
   assert.equal(result.cloudInitError, null);
 });
 
+test('application store wires permanent dish cleanup to the recipe assistant', async () => {
+  const purges = [];
+  const api = {
+    getStorageSync() { return ''; },
+    setStorageSync() {},
+    cloud: {
+      init() {},
+      async callFunction({ data }) {
+        return { result: { ok: true, data: { state: data.state || null } } };
+      },
+    },
+  };
+  const result = createApplicationStore({
+    api,
+    config: { envId: 'env-test' },
+    storage: createMemoryStorage(),
+    recipeAssistantFactory() {
+      return {
+        async purgeDishArtifacts(payload) {
+          purges.push(payload);
+          return { deletedDocuments: 0, deletedFiles: 0, pendingFiles: 0 };
+        },
+      };
+    },
+  });
+  const familyId = result.store.getState().family.id;
+  result.store.addDish({ id: 'dish-bootstrap-purge', name: '测试删除' }, '2026-08-17T08:00:00.000Z');
+  result.store.deleteDish({ dishId: 'dish-bootstrap-purge' }, '2026-08-17T09:00:00.000Z');
+
+  await result.store.purgeDish({ dishId: 'dish-bootstrap-purge' }, '2026-08-18T08:00:00.000Z');
+
+  assert.deepEqual(purges, [{ familyId, dishId: 'dish-bootstrap-purge' }]);
+});
+
 test('uses a pack-safe runtime CloudBase config filename', () => {
   const root = path.resolve(__dirname, '..');
   const appSource = fs.readFileSync(path.join(root, 'app.js'), 'utf8');

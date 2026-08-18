@@ -984,7 +984,7 @@ test('allows deleted-dish history reads but denies pending mutations', async () 
   assert.equal(versions.ok, true);
   assert.equal(version.ok, true);
   assert.equal(workspace.ok, true);
-  assert.equal(mutation.error.code, 'DISH_DELETED');
+  assert.equal(mutation.error.code, 'DISH_ARCHIVED');
 });
 
 test('requires a dish owned by the requested family', async () => {
@@ -1727,7 +1727,7 @@ test('pre-save IDs fail closed and archived dishes cannot open a new workspace',
     action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-deleted',
     recordId: 'record-1787000000000-5',
   }, 'openid-a', services);
-  assert.equal(archived.error.code, 'DISH_DELETED');
+  assert.equal(archived.error.code, 'DISH_ARCHIVED');
 
   const historical = await invoke(db, {
     action: 'getRecordWorkspace', familyId: 'family-a', dishId: 'dish-deleted', recordId: 'record-deleted',

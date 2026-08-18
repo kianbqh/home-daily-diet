@@ -28,6 +28,7 @@ const { createDefaultStorage } = require('./storage');
 const { mergeFamilyStates } = require('./cloudbase-sync');
 
 const CLOUD_FALLBACK_MESSAGE = '云端连接失败，当前继续使用本地数据。';
+const PURGE_PENDING_MESSAGE = '菜品已删除，云端附件将在联网后继续清理';
 const IMAGE_URL_CACHE_MS = 30 * 60 * 1000;
 const DEFAULT_IMAGE_URL_CACHE_MAX_ENTRIES = 500;
 const MAX_RESOLVE_FILES = 50;
@@ -127,6 +128,7 @@ function sharedStatesEqual(left, right) {
 function createStore(options = {}) {
   const storage = options.storage || createDefaultStorage();
   const cloudSync = options.cloudSync || null;
+  const recipeArtifacts = options.recipeArtifacts || null;
   const clock = options.clock || Date.now;
   const syncIntervalMs = Number(options.syncIntervalMs || 5000);
   const imageCacheMaxEntries = Math.max(
@@ -147,6 +149,7 @@ function createStore(options = {}) {
   let failedCloudSyncRevision = null;
   let familyGeneration = 0;
   let activeFamilyTransitionGeneration = null;
+  let artifactCleanupPromise = null;
   const imageUrlCache = new Map();
 
   function familyIdOf(value) {
@@ -330,6 +333,103 @@ function createStore(options = {}) {
     return state.members.find((member) => member.id === state.currentMemberId);
   }
 
+  function purgeMarker(dishId) {
+    return (state.purgedDishes || []).find((item) => item && item.dishId === dishId) || null;
+  }
+
+  function normalizeCleanupResult(value) {
+    return {
+      deletedDocuments: Math.max(0, Number(value && value.deletedDocuments) || 0),
+      deletedFiles: Math.max(0, Number(value && value.deletedFiles) || 0),
+      pendingFiles: Math.max(0, Number(value && value.pendingFiles) || 0),
+    };
+  }
+
+  function requireCleanupResult(value) {
+    const fields = ['deletedDocuments', 'deletedFiles', 'pendingFiles'];
+    const valid = value && fields.every((field) => Number.isInteger(value[field]) && value[field] >= 0);
+    if (!valid) {
+      const error = new Error('Invalid recipe cleanup result');
+      error.code = 'CLEANUP_RESULT_INVALID';
+      throw error;
+    }
+    return normalizeCleanupResult(value);
+  }
+
+  function withPurgeCleanupState(dishId, status, result, errorCode = '') {
+    const updatedAt = new Date(clock()).toISOString();
+    return {
+      ...state,
+      purgedDishes: (state.purgedDishes || []).map((item) => item && item.dishId === dishId
+        ? {
+          ...item,
+          artifactCleanupStatus: status,
+          artifactCleanupUpdatedAt: updatedAt,
+          artifactCleanupResult: result ? normalizeCleanupResult(result) : null,
+          artifactCleanupErrorCode: String(errorCode || '').slice(0, 100),
+        }
+        : item),
+    };
+  }
+
+  function pendingPurgeOutcome(dishId) {
+    return {
+      purged: true,
+      dishId,
+      cleanupPending: true,
+      message: PURGE_PENDING_MESSAGE,
+    };
+  }
+
+  async function attemptRecipeArtifactCleanup(dishId, context = captureFamilyContext()) {
+    const marker = purgeMarker(dishId);
+    if (!marker || !isCurrentFamilyContext(context)) return pendingPurgeOutcome(dishId);
+    if (!recipeArtifacts || typeof recipeArtifacts.purgeDish !== 'function') {
+      return pendingPurgeOutcome(dishId);
+    }
+    try {
+      const result = requireCleanupResult(await recipeArtifacts.purgeDish({
+        familyId: context.familyId,
+        dishId,
+      }));
+      if (!isCurrentFamilyContext(context) || !purgeMarker(dishId)) return pendingPurgeOutcome(dishId);
+      const complete = result.pendingFiles === 0;
+      commit(withPurgeCleanupState(dishId, complete ? 'complete' : 'pending', result));
+      return complete
+        ? { purged: true, dishId, cleanupPending: false, result }
+        : { ...pendingPurgeOutcome(dishId), result };
+    } catch (error) {
+      if (isCurrentFamilyContext(context) && purgeMarker(dishId)) {
+        commit(withPurgeCleanupState(dishId, 'pending', null, error && error.code));
+      }
+      return pendingPurgeOutcome(dishId);
+    }
+  }
+
+  function retryPendingRecipeArtifactCleanup() {
+    if (artifactCleanupPromise) return artifactCleanupPromise;
+    const context = captureFamilyContext();
+    const dishIds = (state.purgedDishes || [])
+      .filter((item) => item && item.dishId && item.artifactCleanupStatus !== 'complete')
+      .map((item) => item.dishId);
+    if (!dishIds.length || !recipeArtifacts || typeof recipeArtifacts.purgeDish !== 'function') {
+      return Promise.resolve([]);
+    }
+    let request = null;
+    request = (async () => {
+      const outcomes = [];
+      for (const dishId of dishIds) {
+        if (!isCurrentFamilyContext(context)) break;
+        outcomes.push(await attemptRecipeArtifactCleanup(dishId, context));
+      }
+      return outcomes;
+    })().finally(() => {
+      if (artifactCleanupPromise === request) artifactCleanupPromise = null;
+    });
+    artifactCleanupPromise = request;
+    return request;
+  }
+
   async function performCloudSync(context) {
     if (!cloudSync || typeof cloudSync.load !== 'function') {
       if (isCurrentFamilyContext(context)) updateSyncStatus('local');
@@ -368,6 +468,7 @@ function createStore(options = {}) {
       }
       failedCloudSyncRevision = null;
       updateSyncStatus('ready');
+      await retryPendingRecipeArtifactCleanup();
       return { state, succeeded: true };
     } catch (error) {
       if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
@@ -510,9 +611,37 @@ function createStore(options = {}) {
     restoreDish(input, now) {
       return commit(restoreDish(state, input, now));
     },
-    purgeDish(input, now) {
-      return commit(purgeDish(state, input, now));
+    async purgeDish(input, now) {
+      const dishId = String(input && input.dishId || '').trim();
+      const nextState = purgeDish(state, input, now);
+      nextState.purgedDishes = (nextState.purgedDishes || []).map((item) => item.dishId === dishId
+        ? {
+          ...item,
+          artifactCleanupStatus: 'pending',
+          artifactCleanupUpdatedAt: new Date(clock()).toISOString(),
+          artifactCleanupResult: null,
+          artifactCleanupErrorCode: '',
+        }
+        : item);
+      const operation = commitWithCloudSave(nextState);
+      try {
+        await operation.save;
+      } catch (_) {
+        return pendingPurgeOutcome(dishId);
+      }
+      if (!isCurrentFamilyContext(operation.context)) return pendingPurgeOutcome(dishId);
+      return attemptRecipeArtifactCleanup(dishId, operation.context);
     },
+    getDishPurgeStatus(dishId) {
+      const marker = purgeMarker(String(dishId || '').trim());
+      if (!marker) return null;
+      return {
+        status: marker.artifactCleanupStatus || 'pending',
+        result: marker.artifactCleanupResult ? normalizeCleanupResult(marker.artifactCleanupResult) : null,
+        updatedAt: marker.artifactCleanupUpdatedAt || '',
+      };
+    },
+    retryPendingRecipeArtifactCleanup,
     getFamilySummary() {
       const summary = getFamilySummary(state);
       return {
@@ -588,4 +717,9 @@ function createStore(options = {}) {
   };
 }
 
-module.exports = { CLOUD_FALLBACK_MESSAGE, createStore, normalizePersistedState };
+module.exports = {
+  CLOUD_FALLBACK_MESSAGE,
+  PURGE_PENDING_MESSAGE,
+  createStore,
+  normalizePersistedState,
+};

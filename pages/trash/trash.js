@@ -95,14 +95,22 @@ Page({
       content: '会同时删除它的制作记录和评价，删除后无法恢复。',
       confirmText: '彻底删除',
       confirmColor: '#b85c45',
-      success: (result) => {
+      success: async (result) => {
         if (!result.confirm) return;
         const store = this.getStore();
         if (!store || typeof store.purgeDish !== 'function') return;
         try {
-          store.purgeDish({ dishId });
+          const outcome = await store.purgeDish({ dishId });
           this.refresh();
-          wx.showToast({ title: '已彻底删除', icon: 'success' });
+          if (outcome && outcome.cleanupPending) {
+            wx.showToast({
+              title: outcome.message || '菜品已删除，云端附件将在联网后继续清理',
+              icon: 'none',
+              duration: 3500,
+            });
+          } else {
+            wx.showToast({ title: '已彻底删除', icon: 'success' });
+          }
         } catch (error) {
           wx.showToast({ title: error.message || '删除失败', icon: 'none' });
         }

@@ -961,3 +961,122 @@ test('normalizes a persisted purge tombstone before local screens can render the
   assert.equal(normalized.recordReviews.length, 0);
   assert.equal(normalized.purgedDishes.length, 1);
 });
+
+test('permanent deletion commits its tombstone before remote cleanup and keeps a retryable failure state', async () => {
+  const storage = createMemoryStorage();
+  const setup = createStore({
+    storage,
+    initialState: createInitialState({ familyId: 'family-purge-order', memberId: 'member-1' }),
+  });
+  setup.addDish({ id: 'dish-purge', name: '待彻底删除' }, '2026-08-17T08:00:00.000Z');
+  setup.deleteDish({ dishId: 'dish-purge' }, '2026-08-17T09:00:00.000Z');
+
+  const events = [];
+  let store;
+  const cloudSync = {
+    async save(snapshot) {
+      events.push(['save', snapshot.purgedDishes.some((item) => item.dishId === 'dish-purge')]);
+      return snapshot;
+    },
+    async load() {
+      events.push(['load']);
+      return null;
+    },
+  };
+  const recipeArtifacts = {
+    async purgeDish(payload) {
+      events.push([
+        'purge',
+        payload,
+        store.getState().purgedDishes.some((item) => item.dishId === payload.dishId),
+      ]);
+      throw Object.assign(new Error('temporary cleanup failure'), { code: 'CLOUD_CALL_FAILED' });
+    },
+  };
+  store = createStore({ storage, cloudSync, recipeArtifacts });
+
+  const outcome = await store.purgeDish({ dishId: 'dish-purge' }, '2026-08-18T08:00:00.000Z');
+
+  assert.equal(store.getState().dishes.some((dish) => dish.id === 'dish-purge'), false);
+  assert.equal(store.getState().purgedDishes.some((item) => item.dishId === 'dish-purge'), true);
+  assert.deepEqual(events.slice(0, 2), [
+    ['save', true],
+    ['purge', { familyId: 'family-purge-order', dishId: 'dish-purge' }, true],
+  ]);
+  assert.equal(outcome.cleanupPending, true);
+  assert.equal(outcome.message, '菜品已删除，云端附件将在联网后继续清理');
+  assert.equal(store.getDishPurgeStatus('dish-purge').status, 'pending');
+  assert.equal(createStore({ storage }).getState().purgedDishes[0].artifactCleanupStatus, 'pending');
+});
+
+test('malformed recipe cleanup responses remain pending instead of being marked complete', async () => {
+  const storage = createMemoryStorage();
+  const setup = createStore({
+    storage,
+    initialState: createInitialState({ familyId: 'family-purge-malformed', memberId: 'member-1' }),
+  });
+  setup.addDish({ id: 'dish-malformed', name: '待重试清理' }, '2026-08-17T08:00:00.000Z');
+  setup.deleteDish({ dishId: 'dish-malformed' }, '2026-08-17T09:00:00.000Z');
+
+  const store = createStore({
+    storage,
+    cloudSync: {
+      async save(snapshot) { return snapshot; },
+      async load() { return null; },
+    },
+    recipeArtifacts: {
+      async purgeDish() { return {}; },
+    },
+  });
+
+  const outcome = await store.purgeDish(
+    { dishId: 'dish-malformed' },
+    '2026-08-18T08:00:00.000Z'
+  );
+
+  assert.equal(outcome.cleanupPending, true);
+  assert.equal(outcome.message, '菜品已删除，云端附件将在联网后继续清理');
+  assert.equal(store.getDishPurgeStatus('dish-malformed').status, 'pending');
+});
+
+test('a successful cloud sync retries pending recipe cleanup and records completion', async () => {
+  const storage = createMemoryStorage();
+  const setup = createStore({
+    storage,
+    initialState: createInitialState({ familyId: 'family-purge-retry', memberId: 'member-1' }),
+  });
+  setup.addDish({ id: 'dish-retry', name: '待重试' }, '2026-08-17T08:00:00.000Z');
+  setup.deleteDish({ dishId: 'dish-retry' }, '2026-08-17T09:00:00.000Z');
+
+  let attempts = 0;
+  let fail = true;
+  const store = createStore({
+    storage,
+    cloudSync: {
+      async save(snapshot) { return snapshot; },
+      async load() { return null; },
+    },
+    recipeArtifacts: {
+      async purgeDish() {
+        attempts += 1;
+        if (fail) throw new Error('offline');
+        return { deletedDocuments: 2, deletedFiles: 1, pendingFiles: 0 };
+      },
+    },
+  });
+
+  const first = await store.purgeDish({ dishId: 'dish-retry' }, '2026-08-18T08:00:00.000Z');
+  assert.equal(first.cleanupPending, true);
+  assert.equal(attempts, 1);
+
+  fail = false;
+  await store.syncFromCloud({ force: true });
+
+  assert.equal(attempts, 2);
+  assert.equal(store.getDishPurgeStatus('dish-retry').status, 'complete');
+  assert.deepEqual(store.getDishPurgeStatus('dish-retry').result, {
+    deletedDocuments: 2,
+    deletedFiles: 1,
+    pendingFiles: 0,
+  });
+});

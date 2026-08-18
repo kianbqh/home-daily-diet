@@ -54,6 +54,13 @@ function createApplicationStore(options = {}) {
         memberId,
       }),
     };
+    if (recipeAssistant && typeof recipeAssistant.purgeDishArtifacts === 'function') {
+      storeOptions.recipeArtifacts = {
+        purgeDish(payload) {
+          return recipeAssistant.purgeDishArtifacts(payload);
+        },
+      };
+    }
     if (options.storage) {
       storeOptions.storage = options.storage;
     }

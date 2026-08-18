@@ -44,7 +44,7 @@ test('trash page is registered and exposes restore and permanent delete actions'
   assert.match(styles, /\.trash-action-button\s*\{[\s\S]*display:\s*flex/);
 });
 
-test('trash page restores and permanently purges the selected dish through the store', () => {
+test('trash page restores and permanently purges the selected dish through the store', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   const calls = [];
@@ -82,6 +82,7 @@ test('trash page restores and permanently purges the selected dish through the s
   page.refresh();
   page.restoreDish({ currentTarget: { dataset: { dishId: 'dish-1' } } });
   page.purgeDish({ currentTarget: { dataset: { dishId: 'dish-1' } } });
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(calls, [
     ['restore', { dishId: 'dish-1' }],
@@ -90,6 +91,44 @@ test('trash page restores and permanently purges the selected dish through the s
 
   global.getApp = originalGetApp;
   global.wx = originalWx;
+});
+
+test('trash page reports durable deletion when cloud attachments remain pending', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const toasts = [];
+  const store = {
+    getState() {
+      return {
+        dishes: [], cookingRecords: [], dishRatings: [], recordReviews: [], purgedDishes: [],
+      };
+    },
+    listDeletedDishes() { return []; },
+    async purgeDish(input) {
+      assert.deepEqual(input, { dishId: 'dish-pending' });
+      return {
+        purged: true,
+        cleanupPending: true,
+        message: '菜品已删除，云端附件将在联网后继续清理',
+      };
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {
+    showModal(options) { options.success({ confirm: true }); },
+    showToast(options) { toasts.push(options); },
+  };
+  const page = createPageInstance(loadPage('pages/trash/trash.js'));
+
+  try {
+    page.purgeDish({ currentTarget: { dataset: { dishId: 'dish-pending' } } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(toasts.at(-1).title, '菜品已删除，云端附件将在联网后继续清理');
+    assert.equal(toasts.at(-1).icon, 'none');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
 });
 
 function createDeferredTrashHarness(action) {
@@ -153,6 +192,7 @@ test('trash ignores an older deferred image resolution after restoring the row',
 test('trash ignores an older deferred image resolution after permanently purging the row', async () => {
   const harness = createDeferredTrashHarness('purgeDish');
   try {
+    await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(harness.page.data.dishes, []);
     assert.equal(harness.requests.length, 1);
     harness.requests[0].resolve(new Map([[harness.cloudImageId, 'https://cdn.example/stale-purged.jpg']]));

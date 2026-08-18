@@ -69,6 +69,7 @@ const requiredFiles = [
   'pages/trash/trash.wxss',
   '.env.example',
   'docs/cloudbase-phase-two-setup.md',
+  'docs/qa/phase-two-dual-account-checklist.md',
 ];
 
 const missing = requiredFiles.filter((file) => !fs.existsSync(path.join(root, file)));
@@ -114,6 +115,54 @@ const requiredGuideFragments = [
 const missingGuideFragments = requiredGuideFragments.filter((fragment) => !setupGuide.includes(fragment));
 if (missingGuideFragments.length) {
   console.error(`SMOKE FAIL: phase two setup guide is incomplete\n${missingGuideFragments.join('\n')}`);
+  process.exit(1);
+}
+
+const acceptanceChecklist = fs.readFileSync(
+  path.join(root, 'docs/qa/phase-two-dual-account-checklist.md'),
+  'utf8'
+);
+const requiredAcceptanceFragments = [
+  '| caseId | account | device | buildVersion | result | screenshotOrLog | notes |',
+  'P0-01', 'P0-02', 'P0-03', 'P0-04', 'P0-05', 'P0-06', 'P0-07', 'P0-08', 'P0-09', 'P0-10',
+  'P0-11', 'P0-12', 'P1-13', 'P0-14', 'P0-15', 'P1-16', 'P0-17', 'P1-18', 'P0-19', 'P0-20',
+  'FILE_ACCESS_DENIED', 'TOKENHUB_API_KEY', 'ASR_SECRET_ID', '回滚',
+];
+const missingAcceptanceFragments = requiredAcceptanceFragments.filter(
+  (fragment) => !acceptanceChecklist.includes(fragment)
+);
+const acceptanceRows = acceptanceChecklist.split(/\r?\n/).filter((line) => /^\| P[01]-\d{2} \|/.test(line));
+const allowedAcceptanceResults = new Set(['待执行', '通过', '失败', '阻塞']);
+const invalidAcceptanceRows = acceptanceRows.filter((line) => {
+  const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+  return cells.length !== 7
+    || !allowedAcceptanceResults.has(cells[4])
+    || (cells[4] === '通过' && (!cells[5] || cells[5] === '—'));
+});
+const checklistGateMatch = acceptanceChecklist.match(/发布门槛状态：`(待执行|通过|失败|阻塞)`/);
+const passedWithoutCompleteEvidence = checklistGateMatch && checklistGateMatch[1] === '通过'
+  && acceptanceRows.some((line) => {
+    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+    return cells[4] !== '通过' || !cells[5] || cells[5] === '—';
+  });
+if (missingAcceptanceFragments.length || acceptanceRows.length !== 20 || invalidAcceptanceRows.length
+  || !checklistGateMatch || passedWithoutCompleteEvidence) {
+  console.error(`SMOKE FAIL: phase two device acceptance checklist is incomplete or claims unverified evidence\n${[
+    ...missingAcceptanceFragments,
+    acceptanceRows.length === 20 ? '' : `expected 20 evidence rows, found ${acceptanceRows.length}`,
+    ...invalidAcceptanceRows,
+    checklistGateMatch ? '' : 'missing release gate state',
+    passedWithoutCompleteEvidence ? 'release gate cannot pass before every evidence row passes' : '',
+  ].filter(Boolean).join('\n')}`);
+  process.exit(1);
+}
+
+const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+const readmeGateMatch = readme.match(/发布门槛状态：`(待执行|通过|失败|阻塞)`/);
+if (!readme.includes('[第二阶段双账号真机验收表](docs/qa/phase-two-dual-account-checklist.md)')
+  || !readmeGateMatch
+  || (readmeGateMatch[1] === '通过' && (!checklistGateMatch || checklistGateMatch[1] !== '通过'))) {
+  console.error('SMOKE FAIL: README must link and accurately report the phase two device release gate');
   process.exit(1);
 }
 
@@ -227,6 +276,7 @@ const protectedPackagePaths = [
   '.worktrees/feature-branch/app.js',
   'tests/fixtures/private/example.json',
   'docs/cloudbase-phase-two-setup.md',
+  'docs/qa/phase-two-dual-account-checklist.md',
   'scripts/smoke-check.js',
 ];
 const leakedProtectedPaths = protectedPackagePaths.filter((file) => !isPackagePathIgnored(file));

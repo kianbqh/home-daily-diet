@@ -3114,6 +3114,68 @@ test('a terminal ASR task failure consumes the reservation and clears the active
   assert.equal(operation.settled, 180);
 });
 
+test('replacing an expired ASR task settles the old operation before reserving the new one', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  let clock = 100;
+  let submissions = 0;
+  const services = recordingServices({
+    now: () => clock,
+    asrProvider: {
+      async submit() {
+        submissions += 1;
+        return {
+          taskId: 1000 + submissions,
+          requestId: `replacement-${submissions}`,
+          submittedAt: clock,
+          expiresAt: clock + 100,
+        };
+      },
+    },
+  });
+  await reserveOwnedRecording(db, services);
+  const event = {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  };
+  assert.equal((await invoke(db, event, 'openid-a', services)).ok, true);
+
+  clock = 201;
+  assert.equal((await invoke(db, event, 'openid-a', services)).ok, true);
+
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const operations = [...db.records('recipe_usage_daily').values()]
+    .filter((item) => item.sourceType === 'usage_operation');
+  assert.equal(usage.asrSeconds, 360);
+  assert.equal(Object.keys(usage.reservations).length, 1);
+  assert.equal(operations.find((item) => item.createdAt === 100).status, 'settled');
+  assert.equal(operations.find((item) => item.createdAt === 100).settled, 180);
+  assert.equal(operations.find((item) => item.createdAt === 201).status, 'reserved');
+});
+
+test('deleting an accepted transcribing recording settles its active ASR operation', async () => {
+  const db = createMemoryDatabase(baseSeed());
+  const services = recordingServices();
+  await reserveOwnedRecording(db, services);
+  const submitted = await invoke(db, {
+    action: 'submitRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+    fileId: 'cloud://env/families/family-a/recipe-audio/recording-fixed.mp3',
+  }, 'openid-a', services);
+  assert.equal(submitted.ok, true);
+
+  const removed = await invoke(db, {
+    action: 'deleteRecording', familyId: 'family-a', dishId: 'dish-1', recordingId: 'recording-fixed',
+  }, 'openid-a', services);
+
+  assert.equal(removed.ok, true);
+  const usage = db.records('recipe_usage_daily').get('family-a|1970-01-01');
+  const operation = [...db.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation');
+  assert.equal(usage.asrSeconds, 180);
+  assert.equal(Object.keys(usage.reservations).length, 0);
+  assert.equal(operation.status, 'settled');
+  assert.equal(operation.settled, 180);
+});
+
 test('organizeDraft releases a pre-request failure but consumes issued invalid output', async () => {
   const preflightDb = createMemoryDatabase(organizeSeed());
   const preflight = await invoke(preflightDb, organizeEvent(), 'openid-a', {

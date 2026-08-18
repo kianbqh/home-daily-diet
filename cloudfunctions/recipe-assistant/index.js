@@ -384,6 +384,7 @@ async function submitRecording(repository, member, familyId, dishId, event, depe
     if (totalDuration > MAX_WORKSPACE_DURATION_MS) {
       throw createRecipeError('RECORDING_LIMIT_EXCEEDED', '单次制作录音累计不能超过 15 分钟');
     }
+    await settleAsrReservationIfPresent(transaction, current, now);
     await transaction.reserveAsrUsage({
       familyId, seconds: ASR_RESERVATION_SECONDS, operationId: usageOperationId, now,
     });
@@ -546,6 +547,17 @@ function hasActiveSubmitLease(recording, now) {
   if (!recording || recording.status !== 'uploading' || !String(recording.asrSubmitToken || '')) return false;
   const expiresAt = Number(recording.asrSubmitLeaseExpiresAt);
   return Number.isFinite(expiresAt) && expiresAt > now;
+}
+
+async function settleAsrReservationIfPresent(transaction, recording, now) {
+  if (!recording || !recording.asrUsageOperationId) return;
+  await transaction.settleAsrUsage({
+    familyId: recording.familyId,
+    operationId: recording.asrUsageOperationId,
+    actualSeconds: ASR_RESERVATION_SECONDS,
+    billingTimestamp: recording.asrUsageReservedAt,
+    now,
+  });
 }
 
 function isSubmittableRecording(recording) {
@@ -778,6 +790,9 @@ async function tombstoneRecording(repository, member, recording, fileApi, now) {
           - (current.durationCommitted ? validDuration(current.durationMs) : 0)),
         updatedAt: now,
       });
+    }
+    if (current.status !== 'uploading' || !hasActiveSubmitLease(current, now)) {
+      await settleAsrReservationIfPresent(transaction, current, now);
     }
     const tombstone = await transaction.setRecording(current._id, {
       ...current, status: 'deleted', deletedAt: now, audioDeletePending: Boolean(cleanupFileId),

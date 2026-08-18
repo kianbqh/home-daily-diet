@@ -69,12 +69,15 @@ function collectRecipeFactEntries(value) {
     .map((item) => String(item.fieldPath || '').trim())
     .filter(Boolean);
   const entries = new Map();
-  const add = (type, fact, paths, itemUncertain = false) => {
+  const add = (type, fact, paths, itemUncertain = false, itemPath = '') => {
     const canonical = canonicalizeFact(fact);
     if (!canonical) return;
     const key = `${type}=${canonical}`;
-    const uncertain = itemUncertain
-      || (Array.isArray(paths) ? paths : [paths]).some((path) => isPathUncertain(path, uncertainPaths));
+    const factPaths = Array.isArray(paths) ? paths : [paths];
+    const hasFieldSpecificUncertainty = Boolean(itemPath)
+      && uncertainPaths.some((path) => pathIsWithin(path, itemPath));
+    const uncertain = factPaths.some((path) => isPathUncertain(path, uncertainPaths))
+      || (itemUncertain && !hasFieldSpecificUncertainty);
     const existing = entries.get(key);
     entries.set(key, {
       key,
@@ -86,13 +89,14 @@ function collectRecipeFactEntries(value) {
 
   recipe.ingredients.forEach((ingredient, index) => {
     const basePath = `ingredients[${index}]`;
-    add('ingredient.name', ingredient.name, `${basePath}.name`, ingredient.uncertain);
+    add('ingredient.name', ingredient.name, `${basePath}.name`, ingredient.uncertain, basePath);
     if (ingredient.amountText) {
       add(
         'ingredient',
         encodeIngredientTuple(ingredient.name, ingredient.amountText),
         [`${basePath}.name`, `${basePath}.amountText`],
         ingredient.uncertain,
+        basePath,
       );
     }
     if (ingredient.note) {
@@ -101,15 +105,16 @@ function collectRecipeFactEntries(value) {
         encodeIngredientTuple(ingredient.name, ingredient.note),
         [`${basePath}.name`, `${basePath}.note`],
         ingredient.uncertain,
+        basePath,
       );
     }
   });
   recipe.steps.forEach((step, index) => {
     const basePath = `steps[${index}]`;
-    add('step.instruction', step.instruction, `${basePath}.instruction`, step.uncertain);
-    add('step.heat', step.heat, `${basePath}.heat`, step.uncertain);
-    add('step.duration', step.durationText, `${basePath}.durationText`, step.uncertain);
-    add('step.keypoint', step.keyPoint, `${basePath}.keyPoint`, step.uncertain);
+    add('step.instruction', step.instruction, `${basePath}.instruction`, step.uncertain, basePath);
+    add('step.heat', step.heat, `${basePath}.heat`, step.uncertain, basePath);
+    add('step.duration', step.durationText, `${basePath}.durationText`, step.uncertain, basePath);
+    add('step.keypoint', step.keyPoint, `${basePath}.keyPoint`, step.uncertain, basePath);
   });
   recipe.tips.forEach((tip, index) => add('tip', tip, `tips[${index}]`));
   recipe.failures.forEach((failure, index) => {
@@ -134,11 +139,17 @@ function escapeIngredientTuplePart(value) {
 
 function isPathUncertain(path, uncertainPaths) {
   const candidate = String(path || '').trim();
-  return Boolean(candidate) && uncertainPaths.some((marker) => (
-    marker === candidate
-    || candidate.startsWith(`${marker}.`)
-    || candidate.startsWith(`${marker}[`)
-  ));
+  return Boolean(candidate) && uncertainPaths.some((marker) => pathIsWithin(candidate, marker));
+}
+
+function pathIsWithin(candidatePath, parentPath) {
+  const candidate = String(candidatePath || '').trim();
+  const parent = String(parentPath || '').trim();
+  return Boolean(candidate && parent) && (
+    candidate === parent
+    || candidate.startsWith(`${parent}.`)
+    || candidate.startsWith(`${parent}[`)
+  );
 }
 
 function forbiddenMatches(rule, candidate) {

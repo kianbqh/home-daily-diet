@@ -202,11 +202,33 @@ test('an uncertain amount never exempts an unmarked invented ingredient name', (
     recipe: validRecipe({
       ingredients: [
         { name: '鸡蛋', amountText: '3个', note: '', uncertain: false },
-        { name: '鱼翅', amountText: '少许', note: '', uncertain: false },
+        { name: '鱼翅', amountText: '少许', note: '', uncertain: true },
       ],
       uncertainties: [{ fieldPath: 'ingredients[1].amountText', message: '用量没听清' }],
     }),
     expectedFacts: ['ingredient.name=鸡蛋', 'ingredient=鸡蛋|3个'],
+    forbiddenFacts: [],
+  });
+
+  assert.equal(score.factRecall, 1);
+  assert.equal(score.unsupportedFacts, 1);
+  assert.equal(score.fieldAccuracy, 0.6667);
+});
+
+test('a field-specific step uncertainty does not exempt other fields on an uncertain step', () => {
+  const score = scoreRecipe({
+    recipe: validRecipe({
+      steps: [
+        {
+          order: 1, instruction: '炒熟', heat: '中火', durationText: '', keyPoint: '', uncertain: false,
+        },
+        {
+          order: 2, instruction: '放入鱼翅', heat: '大火', durationText: '', keyPoint: '', uncertain: true,
+        },
+      ],
+      uncertainties: [{ fieldPath: 'steps[1].heat', message: '火候没听清' }],
+    }),
+    expectedFacts: ['step.instruction=炒熟', 'step.heat=中火'],
     forbiddenFacts: [],
   });
 

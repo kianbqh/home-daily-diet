@@ -1,9 +1,7 @@
 const {
   ASR_DAILY_SECONDS,
   BILLING_TIMEZONE,
-  MAX_USAGE_RESERVATIONS,
   ORGANIZE_DAILY_CALLS,
-  RELEASED_RESERVATION_RETENTION_MS,
   createRecipeError,
   usageDocumentId,
   withoutSystemId,
@@ -149,24 +147,26 @@ function createRecipeRepository(db, config, options = {}) {
   async function settleAsrUsage(input) {
     return runUsageTransaction((transaction) => transaction.settleAsrUsage(input), async () => {
       const normalized = normalizeUsageLookup(input);
-      const usage = await requireUsageDocument(normalized);
-      const reservation = requireReservation(usage, normalized.operationId, 'asr');
-      const actualSeconds = boundedActualSeconds(input.actualSeconds, reservation.reserved);
-      if (reservation.status === 'released') return usageResult(usage, reservation, true);
-      if (reservation.status === 'settled') {
-        if (reservation.settled !== actualSeconds) throw usageConflict();
-        return usageResult(usage, reservation, true);
+      const operation = await requireUsageOperation(normalized, 'asr');
+      const usage = await requireUsageDocument(normalized, operation.usageDocumentId);
+      const actualSeconds = boundedActualSeconds(input.actualSeconds, operation.reserved);
+      if (operation.status === 'released') return usageResult(usage, operation, true);
+      if (operation.status === 'settled') {
+        if (operation.settled !== actualSeconds) throw usageConflict();
+        return usageResult(usage, operation, true);
       }
-      const updatedReservation = {
-        ...reservation, status: 'settled', settled: actualSeconds, settledAt: normalized.now,
+      const updatedOperation = {
+        ...operation, status: 'settled', settled: actualSeconds, settledAt: normalized.now,
         updatedAt: normalized.now,
       };
+      const reservations = withoutReservation(usage.reservations, normalized.operationId);
       const updated = await writeUsage(usage, {
-        asrSeconds: Math.max(0, usage.asrSeconds - reservation.reserved + actualSeconds),
-        reservations: { ...usage.reservations, [normalized.operationId]: updatedReservation },
+        asrSeconds: Math.max(0, usage.asrSeconds - operation.reserved + actualSeconds),
+        reservations,
         updatedAt: normalized.now,
       });
-      return usageResult(updated, updatedReservation, false);
+      await writeUsageOperation(updatedOperation);
+      return usageResult(updated, updatedOperation, false);
     });
   }
 
@@ -184,19 +184,20 @@ function createRecipeRepository(db, config, options = {}) {
   async function settleOrganizeUsage(input) {
     return runUsageTransaction((transaction) => transaction.settleOrganizeUsage(input), async () => {
       const normalized = normalizeUsageLookup(input);
-      const usage = await requireUsageDocument(normalized);
-      const reservation = requireReservation(usage, normalized.operationId, 'organize');
-      if (reservation.status === 'settled' || reservation.status === 'released') {
-        return usageResult(usage, reservation, true);
+      const operation = await requireUsageOperation(normalized, 'organize');
+      const usage = await requireUsageDocument(normalized, operation.usageDocumentId);
+      if (operation.status === 'settled' || operation.status === 'released') {
+        return usageResult(usage, operation, true);
       }
-      const updatedReservation = {
-        ...reservation, status: 'settled', settled: 1, settledAt: normalized.now, updatedAt: normalized.now,
+      const updatedOperation = {
+        ...operation, status: 'settled', settled: 1, settledAt: normalized.now, updatedAt: normalized.now,
       };
       const updated = await writeUsage(usage, {
-        reservations: { ...usage.reservations, [normalized.operationId]: updatedReservation },
+        reservations: withoutReservation(usage.reservations, normalized.operationId),
         updatedAt: normalized.now,
       });
-      return usageResult(updated, updatedReservation, false);
+      await writeUsageOperation(updatedOperation);
+      return usageResult(updated, updatedOperation, false);
     });
   }
 
@@ -209,68 +210,92 @@ function createRecipeRepository(db, config, options = {}) {
       kind === 'asr' ? transaction.releaseAsrUsage(input) : transaction.releaseOrganizeUsage(input)
     ), async () => {
       const normalized = normalizeUsageLookup(input);
-      const usage = await requireUsageDocument(normalized);
-      const reservation = requireReservation(usage, normalized.operationId, kind);
-      if (reservation.status === 'released' || reservation.status === 'settled') {
-        return usageResult(usage, reservation, true);
+      const operation = await requireUsageOperation(normalized, kind);
+      const usage = await requireUsageDocument(normalized, operation.usageDocumentId);
+      if (operation.status === 'released' || operation.status === 'settled') {
+        return usageResult(usage, operation, true);
       }
-      const updatedReservation = {
-        ...reservation, status: 'released', settled: 0, releasedAt: normalized.now, updatedAt: normalized.now,
+      const updatedOperation = {
+        ...operation, status: 'released', settled: 0, releasedAt: normalized.now, updatedAt: normalized.now,
       };
       const counters = kind === 'asr'
-        ? { asrSeconds: Math.max(0, usage.asrSeconds - reservation.reserved) }
+        ? { asrSeconds: Math.max(0, usage.asrSeconds - operation.reserved) }
         : { organizeCalls: Math.max(0, usage.organizeCalls - 1) };
       const updated = await writeUsage(usage, {
         ...counters,
-        reservations: { ...usage.reservations, [normalized.operationId]: updatedReservation },
+        reservations: withoutReservation(usage.reservations, normalized.operationId),
         updatedAt: normalized.now,
       });
-      return usageResult(updated, updatedReservation, false);
+      await writeUsageOperation(updatedOperation);
+      return usageResult(updated, updatedOperation, false);
     });
   }
 
   async function reserveUsage(input, reserved) {
+    const prior = await getUsageOperation(input.operationId);
+    if (prior) {
+      requireMatchingUsageOperation(prior, input, reserved);
+      const usage = await requireUsageDocument(input, prior.usageDocumentId);
+      return usageResult(usage, prior, true);
+    }
     const existing = await getDocument(config.usageCollection, input.documentId);
     const usage = normalizeUsageDocument(existing, input);
-    const reservations = pruneReleasedReservations(usage.reservations, input.now);
-    const prior = Object.hasOwn(reservations, input.operationId) ? reservations[input.operationId] : null;
-    if (prior) {
-      if (prior.kind !== input.kind || prior.reserved !== reserved) throw usageConflict();
-      return usageResult({ ...usage, reservations }, prior, true);
-    }
     if (input.kind === 'asr' && usage.asrSeconds + reserved > ASR_DAILY_SECONDS) {
       throw createRecipeError('DAILY_ASR_LIMIT', '今日语音转写额度已用完');
     }
     if (input.kind === 'organize' && usage.organizeCalls + 1 > ORGANIZE_DAILY_CALLS) {
       throw createRecipeError('DAILY_ORGANIZE_LIMIT', '今日菜谱整理额度已用完');
     }
-    if (Object.keys(reservations).length >= MAX_USAGE_RESERVATIONS) {
-      throw createRecipeError('USAGE_RESERVATION_CAPACITY', '今日用量记录已满，请稍后再试');
-    }
-    const reservation = {
+    const operation = {
+      sourceType: 'usage_operation', operationId: input.operationId,
+      familyId: input.familyId, usageDocumentId: input.documentId,
       kind: input.kind, reserved, status: 'reserved', settled: 0,
       createdAt: input.now, updatedAt: input.now,
     };
-    reservations[input.operationId] = reservation;
+    const reservation = activeReservation(operation);
+    const reservations = { ...usage.reservations, [input.operationId]: reservation };
     const updated = await writeUsage(usage, {
       asrSeconds: usage.asrSeconds + (input.kind === 'asr' ? reserved : 0),
       organizeCalls: usage.organizeCalls + (input.kind === 'organize' ? 1 : 0),
       reservations,
       updatedAt: input.now,
     });
-    return usageResult(updated, reservation, false);
+    await writeUsageOperation(operation);
+    return usageResult(updated, operation, false);
   }
 
-  async function requireUsageDocument(input) {
-    const existing = await getDocument(config.usageCollection, input.documentId);
+  async function requireUsageDocument(input, documentId = input.documentId) {
+    const existing = await getDocument(config.usageCollection, documentId);
     if (!existing || existing.familyId !== input.familyId) {
       throw createRecipeError('USAGE_OPERATION_NOT_FOUND', '找不到用量操作');
     }
-    return normalizeUsageDocument(existing, input);
+    return normalizeUsageDocument(existing, { ...input, documentId });
   }
 
   async function writeUsage(usage, patch) {
     return setDocument(config.usageCollection, usage._id, { ...usage, ...patch });
+  }
+
+  async function getUsageOperation(operationId) {
+    const operation = await getDocument(config.usageCollection, usageOperationDocumentId(operationId));
+    return operation && operation.sourceType === 'usage_operation' ? operation : null;
+  }
+
+  async function requireUsageOperation(input, kind) {
+    const operation = await getUsageOperation(input.operationId);
+    if (!operation || operation.familyId !== input.familyId) {
+      throw createRecipeError('USAGE_OPERATION_NOT_FOUND', '找不到用量操作');
+    }
+    if (operation.kind !== kind) throw usageConflict();
+    return operation;
+  }
+
+  async function writeUsageOperation(operation) {
+    return setDocument(
+      config.usageCollection,
+      usageOperationDocumentId(operation.operationId),
+      operation,
+    );
   }
 
   function runUsageTransaction(transactionCallback, directCallback) {
@@ -368,27 +393,35 @@ function validUsageOperationId(value) {
     && !['__proto__', 'prototype', 'constructor'].includes(value);
 }
 
-function pruneReleasedReservations(value, now) {
+function usageOperationDocumentId(operationId) {
+  return `usage-operation-${operationId}`;
+}
+
+function activeReservation(operation) {
+  return {
+    kind: operation.kind,
+    reserved: operation.reserved,
+    status: 'reserved',
+    settled: 0,
+    createdAt: operation.createdAt,
+    updatedAt: operation.updatedAt,
+  };
+}
+
+function withoutReservation(value, operationId) {
   const reservations = { ...value };
-  const keys = Object.keys(reservations);
-  if (keys.length < MAX_USAGE_RESERVATIONS) return reservations;
-  const removable = keys.filter((key) => {
-    const reservation = reservations[key];
-    return reservation.status === 'released'
-      && Number(reservation.releasedAt) <= now - RELEASED_RESERVATION_RETENTION_MS;
-  }).sort((left, right) => Number(reservations[left].releasedAt) - Number(reservations[right].releasedAt));
-  for (const key of removable) {
-    if (Object.keys(reservations).length < MAX_USAGE_RESERVATIONS) break;
-    delete reservations[key];
-  }
+  delete reservations[operationId];
   return reservations;
 }
 
-function requireReservation(usage, operationId, kind) {
-  const reservation = usage.reservations[operationId];
-  if (!reservation) throw createRecipeError('USAGE_OPERATION_NOT_FOUND', '找不到用量操作');
-  if (reservation.kind !== kind) throw usageConflict();
-  return reservation;
+function requireMatchingUsageOperation(operation, input, reserved) {
+  if (operation.familyId !== input.familyId
+    || operation.kind !== input.kind
+    || operation.reserved !== reserved
+    || !['reserved', 'settled', 'released'].includes(operation.status)
+    || !String(operation.usageDocumentId || '').trim()) {
+    throw usageConflict();
+  }
 }
 
 function boundedActualSeconds(value, reserved) {

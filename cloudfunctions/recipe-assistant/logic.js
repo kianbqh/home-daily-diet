@@ -4,8 +4,6 @@ const BILLING_TIMEZONE = 'Asia/Shanghai';
 const BILLING_TIMEZONE_OFFSET_MINUTES = 8 * 60;
 const ASR_DAILY_SECONDS = 3600;
 const ORGANIZE_DAILY_CALLS = 20;
-const MAX_USAGE_RESERVATIONS = 128;
-const RELEASED_RESERVATION_RETENTION_MS = 15 * 60 * 1000;
 
 function createRecipeError(code, message, stage = 'action') {
   const error = new Error(message);
@@ -156,9 +154,7 @@ module.exports = {
   ASR_DAILY_SECONDS,
   BILLING_TIMEZONE,
   BILLING_TIMEZONE_OFFSET_MINUTES,
-  MAX_USAGE_RESERVATIONS,
   ORGANIZE_DAILY_CALLS,
-  RELEASED_RESERVATION_RETENTION_MS,
   buildSourceText,
   createInputHash,
   createRecipeError,

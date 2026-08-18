@@ -2954,7 +2954,9 @@ test('submitRecording reserves 180 seconds, releases submit API failures, and se
   assert.equal(failed.ok, false);
   const failedUsage = failedDb.records('recipe_usage_daily').get('family-a|1970-01-01');
   assert.equal(failedUsage.asrSeconds, 0);
-  assert.equal(Object.values(failedUsage.reservations)[0].status, 'released');
+  assert.equal(Object.keys(failedUsage.reservations).length, 0);
+  assert.equal([...failedDb.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation').status, 'released');
   assert.equal(Object.hasOwn(failedUsage.reservations, 'forged-client-operation'), false);
 
   const rejectedDb = createMemoryDatabase(baseSeed());
@@ -2970,7 +2972,9 @@ test('submitRecording reserves 180 seconds, releases submit API failures, and se
   assert.equal(rejected.ok, false);
   const rejectedUsage = rejectedDb.records('recipe_usage_daily').get('family-a|1970-01-01');
   assert.equal(rejectedUsage.asrSeconds, 0);
-  assert.equal(Object.values(rejectedUsage.reservations)[0].status, 'released');
+  assert.equal(Object.keys(rejectedUsage.reservations).length, 0);
+  assert.equal([...rejectedDb.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation').status, 'released');
 
   const readyDb = createMemoryDatabase(baseSeed());
   const readyServices = recordingServices({
@@ -2998,8 +3002,11 @@ test('submitRecording reserves 180 seconds, releases submit API failures, and se
 
   const readyUsage = readyDb.records('recipe_usage_daily').get('family-a|1970-01-01');
   assert.equal(readyUsage.asrSeconds, 12.5);
-  assert.equal(Object.values(readyUsage.reservations)[0].status, 'settled');
-  assert.equal(Object.values(readyUsage.reservations)[0].settled, 12.5);
+  assert.equal(Object.keys(readyUsage.reservations).length, 0);
+  const readyOperation = [...readyDb.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation');
+  assert.equal(readyOperation.status, 'settled');
+  assert.equal(readyOperation.settled, 12.5);
   assert.equal(JSON.stringify(submitted.data).includes('UsageOperation'), false);
 });
 
@@ -3074,7 +3081,9 @@ test('organizeDraft releases a pre-request failure but consumes issued invalid o
   assert.equal(preflight.error.code, 'AI_NOT_CONFIGURED');
   const preflightUsage = preflightDb.records('recipe_usage_daily').get('family-a|1970-01-01');
   assert.equal(preflightUsage.organizeCalls, 0);
-  assert.equal(Object.values(preflightUsage.reservations)[0].status, 'released');
+  assert.equal(Object.keys(preflightUsage.reservations).length, 0);
+  assert.equal([...preflightDb.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation').status, 'released');
 
   const invalidDb = createMemoryDatabase(organizeSeed());
   const invalid = await invoke(invalidDb, organizeEvent(), 'openid-a', {
@@ -3085,7 +3094,9 @@ test('organizeDraft releases a pre-request failure but consumes issued invalid o
   assert.equal(invalid.error.code, 'AI_OUTPUT_INVALID');
   const invalidUsage = invalidDb.records('recipe_usage_daily').get('family-a|1970-01-01');
   assert.equal(invalidUsage.organizeCalls, 1);
-  assert.equal(Object.values(invalidUsage.reservations)[0].status, 'settled');
+  assert.equal(Object.keys(invalidUsage.reservations).length, 0);
+  assert.equal([...invalidDb.records('recipe_usage_daily').values()]
+    .find((item) => item.sourceType === 'usage_operation').status, 'settled');
   assert.equal(JSON.stringify(invalidUsage).includes('invalid provider output'), false);
 });
 

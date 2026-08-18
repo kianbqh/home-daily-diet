@@ -174,9 +174,10 @@ test('ASR reserve, release, and bounded settlement are idempotent and never go n
 
   const usage = db.records('recipe_usage_daily').values().next().value;
   assert.equal(usage.asrSeconds, 252.5);
-  assert.equal(usage.reservations['released-asr'].status, 'released');
-  assert.equal(usage.reservations['settled-asr'].settled, 72.5);
-  assert.equal(usage.reservations['bounded-asr'].settled, 180);
+  assert.equal(usage.reservations && Object.keys(usage.reservations).length, 0);
+  assert.equal(db.records('recipe_usage_daily').get('usage-operation-released-asr').status, 'released');
+  assert.equal(db.records('recipe_usage_daily').get('usage-operation-settled-asr').settled, 72.5);
+  assert.equal(db.records('recipe_usage_daily').get('usage-operation-bounded-asr').settled, 180);
   assert.ok(usage.asrSeconds >= 0);
 });
 
@@ -223,49 +224,42 @@ test('repository rejects operation IDs that are unsafe reservation-map keys', as
   }
 });
 
-test('released reservation cleanup is bounded and never prunes settled audit entries', async () => {
+test('short settled ASR operations do not create a hidden reservation-capacity limit', async () => {
   const db = createMemoryDatabase();
   const repository = createRecipeRepository(db, DEFAULT_CONFIG);
-  await repository.reserveAsrUsage({ familyId: 'family-1', operationId: 'settled-kept', seconds: 180, now: 0 });
-  await repository.settleAsrUsage({ familyId: 'family-1', operationId: 'settled-kept', actualSeconds: 1, now: 0 });
-
-  for (let index = 0; index < 300; index += 1) {
-    const now = (index + 1) * 2 * 60 * 1000;
-    const operationId = `released-${index}`;
-    await repository.reserveAsrUsage({ familyId: 'family-1', operationId, seconds: 180, now });
-    await repository.releaseAsrUsage({ familyId: 'family-1', operationId, now });
+  for (let index = 0; index < 129; index += 1) {
+    const operationId = `settled-${index}`;
+    await repository.reserveAsrUsage({ familyId: 'family-1', operationId, seconds: 180, now: 100 });
+    await repository.settleAsrUsage({
+      familyId: 'family-1', operationId, actualSeconds: 1, now: 100,
+    });
   }
 
-  const documents = [...db.records('recipe_usage_daily').values()];
-  for (const usage of documents) {
-    assert.ok(Object.keys(usage.reservations).length <= 128);
-  }
-  const firstDay = db.records('recipe_usage_daily').get('family-1|1970-01-01');
-  assert.equal(firstDay.reservations['settled-kept'].status, 'settled');
-  assert.equal(JSON.stringify(documents).includes('transcript'), false);
-  assert.equal(JSON.stringify(documents).includes('openid'), false);
+  const usage = db.records('recipe_usage_daily').get('family-1|1970-01-01');
+  assert.equal(usage.asrSeconds, 129);
+  assert.equal(Object.keys(usage.reservations).length, 0);
+  assert.equal(JSON.stringify([...db.records('recipe_usage_daily').values()]).includes('openid'), false);
 });
 
-test('quota exhaustion keeps the public daily-limit code when the reservation map is full', async () => {
-  const reservations = Object.fromEntries(Array.from({ length: 128 }, (_, index) => [`old-${index}`, {
-    kind: 'organize', reserved: 1, settled: 1, status: 'settled', createdAt: index, updatedAt: index,
-  }]));
-  const db = createMemoryDatabase({
-    recipe_usage_daily: {
-      'family-1|1970-01-01': {
-        familyId: 'family-1', billingDate: '1970-01-01', billingTimezone: 'Asia/Shanghai',
-        asrSeconds: 3600, organizeCalls: 20, reservations,
-      },
-    },
-  });
+test('released operation credentials remain idempotent after many later operations', async () => {
+  const db = createMemoryDatabase();
   const repository = createRecipeRepository(db, DEFAULT_CONFIG);
+  const original = { familyId: 'family-1', operationId: 'released-original', seconds: 180, now: 100 };
+  await repository.reserveAsrUsage(original);
+  await repository.releaseAsrUsage(original);
 
+  for (let index = 0; index < 300; index += 1) {
+    const operationId = `released-later-${index}`;
+    await repository.reserveAsrUsage({ familyId: 'family-1', operationId, seconds: 180, now: 100 });
+    await repository.releaseAsrUsage({ familyId: 'family-1', operationId, now: 100 });
+  }
+
+  const retry = await repository.reserveAsrUsage(original);
+  assert.equal(retry.reused, true);
+  assert.equal(retry.status, 'released');
+  assert.equal(db.records('recipe_usage_daily').get('family-1|1970-01-01').asrSeconds, 0);
   await assert.rejects(
-    repository.reserveOrganizeUsage({ familyId: 'family-1', operationId: 'over-organize', now: 100 }),
-    (error) => error && error.code === 'DAILY_ORGANIZE_LIMIT'
-  );
-  await assert.rejects(
-    repository.reserveAsrUsage({ familyId: 'family-1', operationId: 'over-asr', seconds: 180, now: 100 }),
-    (error) => error && error.code === 'DAILY_ASR_LIMIT'
+    repository.reserveAsrUsage({ ...original, seconds: 120 }),
+    (error) => error && error.code === 'USAGE_OPERATION_CONFLICT'
   );
 });

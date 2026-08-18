@@ -7,6 +7,10 @@
   padding: 28rpx;
 }
 
+.editor-section.is-empty {
+  padding: 24rpx 28rpx 22rpx;
+}
+
 .editor-heading,
 .item-topline {
   display: flex;
@@ -40,9 +44,29 @@
 }
 
 .editor-empty {
-  padding: 34rpx 0 10rpx;
-  color: #92968f;
+  padding: 18rpx 0 0;
+}
+
+.editor-empty-action {
+  display: block;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  margin: 0 auto;
+  padding: 0 22rpx;
+  border: 0;
+  border-radius: 999rpx;
+  background: #e6f0ea;
+  color: #315b49;
+  font-size: 23rpx;
+  font-weight: 600;
+  line-height: 52rpx;
   text-align: center;
+}
+
+.editor-empty-action::after {
+  border: 0;
 }
 
 .editor-item,

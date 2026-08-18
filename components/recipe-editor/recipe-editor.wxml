@@ -1,13 +1,13 @@
 <view class="recipe-editor">
-  <view class="editor-section card-surface">
+  <view class="editor-section card-surface {{!recipe.ingredients.length ? 'is-empty' : ''}}">
     <view class="editor-heading">
       <view>
         <view class="section-title">食材与用量</view>
         <text class="section-note">写清食材、用量和需要注意的处理方式</text>
       </view>
-      <button class="editor-add" disabled="{{disabled}}" bindtap="addIngredient">添加食材</button>
+      <button wx:if="{{recipe.ingredients.length}}" class="editor-add" disabled="{{disabled}}" bindtap="addIngredient">添加食材</button>
     </view>
-    <view wx:if="{{!recipe.ingredients.length}}" class="editor-empty">还没有食材</view>
+    <view wx:if="{{!recipe.ingredients.length}}" class="editor-empty"><button class="editor-empty-action" disabled="{{disabled}}" bindtap="addIngredient">+ 食材</button></view>
     <view wx:for="{{recipe.ingredients}}" wx:key="index" class="editor-item">
       <view class="item-topline">
         <text class="item-number">食材 {{index + 1}}</text>
@@ -21,15 +21,15 @@
     </view>
   </view>
 
-  <view class="editor-section card-surface">
+  <view class="editor-section card-surface {{!recipe.steps.length ? 'is-empty' : ''}}">
     <view class="editor-heading">
       <view>
         <view class="section-title">制作步骤</view>
         <text class="section-note">按实际顺序记录火候、时间和关键点</text>
       </view>
-      <button class="editor-add" disabled="{{disabled}}" bindtap="addStep">添加步骤</button>
+      <button wx:if="{{recipe.steps.length}}" class="editor-add" disabled="{{disabled}}" bindtap="addStep">添加步骤</button>
     </view>
-    <view wx:if="{{!recipe.steps.length}}" class="editor-empty">还没有制作步骤</view>
+    <view wx:if="{{!recipe.steps.length}}" class="editor-empty"><button class="editor-empty-action" disabled="{{disabled}}" bindtap="addStep">+ 步骤</button></view>
     <view wx:for="{{recipe.steps}}" wx:key="order" class="editor-item">
       <view class="item-topline">
         <text class="item-number">第 {{index + 1}} 步</text>
@@ -44,28 +44,30 @@
     </view>
   </view>
 
-  <view class="editor-section card-surface">
+  <view class="editor-section card-surface {{!recipe.tips.length ? 'is-empty' : ''}}">
     <view class="editor-heading">
       <view>
         <view class="section-title">技巧</view>
         <text class="section-note">容易忽略但会影响成品的小技巧</text>
       </view>
-      <button class="editor-add" disabled="{{disabled}}" data-field="tips" bindtap="addTextItem">添加技巧</button>
+      <button wx:if="{{recipe.tips.length}}" class="editor-add" disabled="{{disabled}}" data-field="tips" bindtap="addTextItem">添加技巧</button>
     </view>
+    <view wx:if="{{!recipe.tips.length}}" class="editor-empty"><button class="editor-empty-action" disabled="{{disabled}}" data-field="tips" bindtap="addTextItem">+ 技巧</button></view>
     <view wx:for="{{recipe.tips}}" wx:key="index" class="compact-item">
       <textarea class="visible-native-textarea" disabled="{{disabled}}" maxlength="1000" auto-height value="{{item}}" placeholder="写下一条技巧" data-index="{{index}}" data-field="tips" bindinput="onTextItemInput" />
       <text class="remove-action compact-remove" data-index="{{index}}" data-field="tips" bindtap="removeTextItem">删除</text>
     </view>
   </view>
 
-  <view class="editor-section card-surface">
+  <view class="editor-section card-surface {{!recipe.failures.length ? 'is-empty' : ''}}">
     <view class="editor-heading">
       <view>
         <view class="section-title">常见失败与补救</view>
         <text class="section-note">记录问题、原因和下次怎么补救</text>
       </view>
-      <button class="editor-add" disabled="{{disabled}}" bindtap="addFailure">添加问题</button>
+      <button wx:if="{{recipe.failures.length}}" class="editor-add" disabled="{{disabled}}" bindtap="addFailure">添加问题</button>
     </view>
+    <view wx:if="{{!recipe.failures.length}}" class="editor-empty"><button class="editor-empty-action" disabled="{{disabled}}" bindtap="addFailure">+ 问题</button></view>
     <view wx:for="{{recipe.failures}}" wx:key="index" class="editor-item">
       <view class="item-topline">
         <text class="item-number">问题 {{index + 1}}</text>
@@ -77,14 +79,15 @@
     </view>
   </view>
 
-  <view class="editor-section card-surface">
+  <view class="editor-section card-surface {{!recipe.familyNotes.length ? 'is-empty' : ''}}">
     <view class="editor-heading">
       <view>
         <view class="section-title">家庭经验</view>
         <text class="section-note">只属于你们家的口味和经验</text>
       </view>
-      <button class="editor-add" disabled="{{disabled}}" data-field="familyNotes" bindtap="addTextItem">添加经验</button>
+      <button wx:if="{{recipe.familyNotes.length}}" class="editor-add" disabled="{{disabled}}" data-field="familyNotes" bindtap="addTextItem">添加经验</button>
     </view>
+    <view wx:if="{{!recipe.familyNotes.length}}" class="editor-empty"><button class="editor-empty-action" disabled="{{disabled}}" data-field="familyNotes" bindtap="addTextItem">+ 经验</button></view>
     <view wx:for="{{recipe.familyNotes}}" wx:key="index" class="compact-item">
       <textarea class="visible-native-textarea" disabled="{{disabled}}" maxlength="1000" auto-height value="{{item}}" placeholder="写下一条家庭经验" data-index="{{index}}" data-field="familyNotes" bindinput="onTextItemInput" />
       <text class="remove-action compact-remove" data-index="{{index}}" data-field="familyNotes" bindtap="removeTextItem">删除</text>

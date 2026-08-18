@@ -170,6 +170,7 @@ Page({
     this.resolveHistoryImages(displayDetail.history, displayDetail.reviews, historyGeneration);
     this.refreshRecipeSummary();
     this.refreshRecordRecipeStates();
+    if (options.openVoice === '1') this.startVoiceRecipeEntry();
   },
 
   onShow() {

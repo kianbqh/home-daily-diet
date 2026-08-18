@@ -100,6 +100,7 @@ Page({
     draftStatus: '',
     stateMessage: '',
     manualEditing: false,
+    manualDraft: false,
     organizeRequestPending: false,
     sourceExpanded: false,
     sourceLoading: false,
@@ -182,6 +183,7 @@ Page({
       this.lastSavedRecipeJson = JSON.stringify(remoteRecipe);
       this.recipeDirty = preserveLocalRecipe;
       const draftStatus = String(draft.status || 'editing');
+      const manualDraft = !draft.recordId && draft.sourceType === 'manual';
       this.setData({
         loading: false,
         draft,
@@ -192,6 +194,7 @@ Page({
         draftStatus,
         stateMessage: DRAFT_STATE_MESSAGES[draftStatus] || '',
         manualEditing: draftStatus !== 'failed',
+        manualDraft,
         organizeRequestPending: false,
         uncertaintyItems: uncertaintyViews(recipe),
       });
@@ -335,6 +338,29 @@ Page({
   continueManualEditing() {
     if (this.data.draftStatus !== 'failed' || this.data.confirming) return;
     this.setData({ manualEditing: true });
+  },
+
+  switchToVoiceRecording() {
+    if (!this.data.manualDraft
+      || this.data.confirming
+      || this.data.draftStatus === 'organizing'
+      || this.data.draftStatus === 'confirmed'
+      || (this.data.draftStatus === 'failed' && !this.data.manualEditing)) return;
+    const pages = typeof getCurrentPages === 'function' ? getCurrentPages() : [];
+    const previousPage = pages.length > 1 ? pages[pages.length - 2] : null;
+    if (previousPage
+      && typeof previousPage.startVoiceRecipeEntry === 'function'
+      && typeof wx !== 'undefined'
+      && typeof wx.navigateBack === 'function') {
+      previousPage.startVoiceRecipeEntry();
+      wx.navigateBack({ delta: 1 });
+      return;
+    }
+    if (typeof wx !== 'undefined' && typeof wx.redirectTo === 'function') {
+      wx.redirectTo({
+        url: `/pages/dish-edit/dish-edit?dishId=${encodeURIComponent(this.data.dishId)}&openVoice=1`,
+      });
+    }
   },
 
   openConfirmedRecipe() {

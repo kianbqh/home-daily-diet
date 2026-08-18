@@ -1,8 +1,4 @@
 <view class="page recipe-draft-page">
-  <view class="eyebrow">RECIPE DRAFT</view>
-  <view class="page-title">整理家庭菜谱</view>
-  <view class="page-subtitle">补全食材、步骤和家里最在意的经验，确认后会生成只读版本。</view>
-
   <view wx:if="{{loading}}" class="card-surface draft-state-card">正在读取草稿…</view>
   <view wx:elif="{{error}}" class="card-surface draft-state-card draft-error-card">
     <view class="draft-error-title">{{error}}</view>
@@ -32,17 +28,19 @@
       </view>
     </view>
 
-    <view wx:if="{{draftStatus}}" class="draft-progress-card status-{{draftStatus}}">
-      <view class="draft-progress-title">{{draftStatus === 'organizing' ? '正在智能整理' : draftStatus === 'ready' ? '草稿待确认' : draftStatus === 'failed' ? '整理未完成' : draftStatus === 'confirmed' ? '已经保存' : '手动草稿'}}</view>
-      <text wx:if="{{draftStatus === 'organizing'}}">正在整理，可以离开页面</text>
-      <text wx:else>{{stateMessage}}</text>
-      <view wx:if="{{draftStatus === 'failed' && !manualEditing}}" class="draft-failure-actions">
-        <button class="primary-button" loading="{{organizeRequestPending}}" disabled="{{organizeRequestPending}}" bindtap="retryOrganize">重试整理</button>
-        <button class="secondary-button" disabled="{{organizeRequestPending}}" bindtap="continueManualEditing">继续手动编辑</button>
+    <view wx:if="{{draftStatus}}" class="draft-context status-{{draftStatus}}">
+      <view class="draft-context-copy">
+        <text class="draft-context-title">{{draftStatus === 'organizing' ? '正在智能整理' : draftStatus === 'ready' ? '草稿待确认' : draftStatus === 'failed' ? '整理未完成' : draftStatus === 'confirmed' ? '已经保存' : '手动草稿'}}</text>
+        <text class="draft-context-message">{{draftStatus === 'organizing' ? '正在整理，可以离开页面' : stateMessage}}</text>
       </view>
-      <button wx:if="{{draftStatus === 'editing' && draft.recordId && canOrganizeSources}}" class="primary-button organize-draft-action" loading="{{organizeRequestPending}}" disabled="{{organizeRequestPending}}" bindtap="retryOrganize">整理成菜谱</button>
+      <button wx:if="{{manualDraft && draftStatus !== 'organizing' && draftStatus !== 'confirmed' && (draftStatus !== 'failed' || manualEditing)}}" class="context-action voice-switch-action" disabled="{{confirming}}" bindtap="switchToVoiceRecording">改用语音记录</button>
+      <view wx:if="{{draftStatus === 'failed' && !manualEditing}}" class="draft-failure-actions">
+        <button class="context-action primary-context-action" loading="{{organizeRequestPending}}" disabled="{{organizeRequestPending}}" bindtap="retryOrganize">重试整理</button>
+        <button class="context-action" disabled="{{organizeRequestPending}}" bindtap="continueManualEditing">继续手动编辑</button>
+      </view>
+      <button wx:if="{{draftStatus === 'editing' && draft.recordId && canOrganizeSources}}" class="context-action primary-context-action organize-draft-action" loading="{{organizeRequestPending}}" disabled="{{organizeRequestPending}}" bindtap="retryOrganize">整理成菜谱</button>
       <text wx:if="{{draftStatus === 'editing' && draft.recordId && sourceRecordings.length && !canOrganizeSources}}" class="organize-waiting-copy">还有来源片段尚未就绪，全部转写并校对后即可整理。</text>
-      <button wx:if="{{draftStatus === 'confirmed'}}" class="secondary-button confirmed-action" bindtap="openConfirmedRecipe">查看已保存做法</button>
+      <button wx:if="{{draftStatus === 'confirmed'}}" class="context-action confirmed-action" bindtap="openConfirmedRecipe">查看已保存做法</button>
     </view>
 
     <view class="save-status {{saveState}}">

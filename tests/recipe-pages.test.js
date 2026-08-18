@@ -224,6 +224,99 @@ test('manual recipe pages are registered, package-safe, and keep history read on
   assert.doesNotMatch(dishWxml, /family-internal|familyId/);
 });
 
+test('compact recipe draft collapses empty sections into centered add actions', () => {
+  const draftTemplate = read('pages/recipe-draft/recipe-draft.wxml');
+  const editorTemplate = read('components/recipe-editor/recipe-editor.wxml');
+  const editorStyles = read('components/recipe-editor/recipe-editor.wxss');
+
+  assert.doesNotMatch(draftTemplate, /RECIPE DRAFT|class="page-title">整理家庭菜谱/);
+  assert.match(draftTemplate, /class="draft-context status-\{\{draftStatus\}\}"/);
+
+  const emptySectionClasses = editorTemplate.match(/class="editor-section card-surface \{\{![^}]+\.length \? 'is-empty' : ''\}\}"/g) || [];
+  assert.equal(emptySectionClasses.length, 5);
+  for (const label of ['+ 食材', '+ 步骤', '+ 技巧', '+ 问题', '+ 经验']) {
+    assert.match(editorTemplate, new RegExp(`class="editor-empty-action"[^>]*>${label.replace('+', '\\+')}<`));
+  }
+  assert.match(editorStyles, /\.editor-empty-action\s*\{[\s\S]*?width:\s*auto;/);
+  assert.match(editorStyles, /\.editor-empty-action\s*\{[\s\S]*?margin:\s*0 auto;/);
+  assert.match(editorStyles, /\.editor-empty-action\s*\{[\s\S]*?line-height:\s*\d+rpx;/);
+});
+
+test('switches a manual draft to voice without deleting it and supports the route fallback', async () => {
+  const originalGetApp = global.getApp;
+  const originalGetCurrentPages = global.getCurrentPages;
+  const originalWx = global.wx;
+  const assistantCalls = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getDraft(payload) {
+          assistantCalls.push({ action: 'getDraft', payload });
+          return { draft: draftFixture() };
+        },
+      },
+    },
+  });
+  try {
+    const definition = loadPage('pages/recipe-draft/recipe-draft.js');
+    const page = createPageInstance(definition);
+    await page.onLoad({ familyId: 'family-internal-1', dishId: 'dish 1/海', draftId: 'draft-1' });
+    await page.onShow();
+    assert.equal(page.data.manualDraft, true);
+
+    const draftTemplate = read('pages/recipe-draft/recipe-draft.wxml');
+    assert.match(draftTemplate, /wx:if="\{\{manualDraft[^}]*\}\}"[^>]*bindtap="switchToVoiceRecording"[^>]*>改用语音记录</);
+
+    const transitions = [];
+    const previousDishPage = {
+      startVoiceRecipeEntry() { transitions.push('voice'); },
+    };
+    global.getCurrentPages = () => [previousDishPage, page];
+    global.wx = {
+      navigateBack() { transitions.push('back'); },
+      redirectTo() { throw new Error('previous dish page should be reused'); },
+    };
+    page.switchToVoiceRecording();
+    assert.deepEqual(transitions, ['voice', 'back']);
+
+    let redirectUrl = '';
+    global.getCurrentPages = () => [page];
+    global.wx = {
+      navigateBack() { throw new Error('fallback should not navigate back'); },
+      redirectTo(options) { redirectUrl = options.url; },
+    };
+    page.switchToVoiceRecording();
+    assert.equal(redirectUrl, '/pages/dish-edit/dish-edit?dishId=dish%201%2F%E6%B5%B7&openVoice=1');
+    assert.deepEqual(assistantCalls.map((call) => call.action), ['getDraft']);
+
+    const state = {
+      family: { id: 'family-internal-1' },
+      dishes: [{ id: 'dish-1', name: '番茄炒蛋', coverImage: '', category: '', tags: [], status: 'active' }],
+      cookingRecords: [],
+      recordReviews: [],
+      members: [],
+    };
+    global.getApp = () => ({
+      globalData: {
+        store: { getState: () => state },
+        recipeAssistant: null,
+      },
+    });
+    global.wx = {};
+    const dishPage = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+    const opened = [];
+    dishPage.startVoiceRecipeEntry = function startVoiceRecipeEntry() {
+      opened.push({ dishId: this.data.dishId, isExisting: this.data.isExisting });
+    };
+    dishPage.onLoad({ dishId: 'dish-1', openVoice: '1' });
+    assert.deepEqual(opened, [{ dishId: 'dish-1', isExisting: true }]);
+  } finally {
+    global.getApp = originalGetApp;
+    global.getCurrentPages = originalGetCurrentPages;
+    global.wx = originalWx;
+  }
+});
+
 test('recipe editor emits a complete normalized recipe and validation without app or cloud access', () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;

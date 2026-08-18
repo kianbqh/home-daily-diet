@@ -172,9 +172,15 @@ Page({
       const draft = result && result.draft;
       if (!draft) throw new Error('missing draft');
       if (generation !== this.draftLoadGeneration) return false;
-      const recipe = cloneRecipe(draft.recipe);
-      this.lastSavedRecipeJson = JSON.stringify(recipe);
-      this.recipeDirty = false;
+      const remoteRecipe = cloneRecipe(draft.recipe);
+      const preserveEditsAfterGeneration = Number.isInteger(options.preserveEditsAfterGeneration)
+        ? options.preserveEditsAfterGeneration
+        : null;
+      const preserveLocalRecipe = preserveEditsAfterGeneration !== null
+        && (this.editGeneration || 0) !== preserveEditsAfterGeneration;
+      const recipe = preserveLocalRecipe ? cloneRecipe(this.data.recipe) : remoteRecipe;
+      this.lastSavedRecipeJson = JSON.stringify(remoteRecipe);
+      this.recipeDirty = preserveLocalRecipe;
       const draftStatus = String(draft.status || 'editing');
       this.setData({
         loading: false,
@@ -456,6 +462,7 @@ Page({
       const recipe = cloneRecipe(this.data.recipe);
       const generation = this.editGeneration || 0;
       const revision = this.data.draft.revision;
+      const baseMainVersionId = String(this.data.draft.baseMainVersionId || '');
       this.setData({ saveState: 'saving', saveMessage: '保存中' });
       try {
         const result = await recipeAssistant.updateDraft({
@@ -464,6 +471,7 @@ Page({
           draftId: this.data.draftId,
           revision,
           recipe,
+          baseMainVersionId,
         });
         const draft = result && result.draft
           ? result.draft
@@ -500,13 +508,17 @@ Page({
   async resolveDraftConflict(localRecipe) {
     this.clearAutosaveTimer();
     const localConflictRecipe = cloneRecipe(localRecipe);
+    const reloadEditGeneration = this.editGeneration || 0;
     this.recipeDirty = false;
     this.setData({
       localConflictRecipe,
       saveState: 'conflict',
       saveMessage: CONFLICT_MESSAGE,
     });
-    const loaded = await this.loadDraft({ allowLocalOverwrite: true });
+    const loaded = await this.loadDraft({
+      allowLocalOverwrite: true,
+      preserveEditsAfterGeneration: reloadEditGeneration,
+    });
     const recipeAssistant = this.getRecipeAssistant();
     if (loaded && recipeAssistant && typeof recipeAssistant.getRecipe === 'function') {
       try {
@@ -524,8 +536,14 @@ Page({
         // The latest draft is still usable; publishing can retry pointer refresh later.
       }
     }
+    const editedDuringReload = (this.editGeneration || 0) !== reloadEditGeneration;
+    const latestLocalConflictRecipe = editedDuringReload
+      ? cloneRecipe(this.data.recipe)
+      : localConflictRecipe;
+    this.clearAutosaveTimer();
+    this.recipeDirty = false;
     this.setData({
-      localConflictRecipe,
+      localConflictRecipe: latestLocalConflictRecipe,
       saveState: 'conflict',
       saveMessage: CONFLICT_MESSAGE,
     });

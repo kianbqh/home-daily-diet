@@ -1273,6 +1273,10 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
   const draftId = requireValue(event.draftId, 'DRAFT_REQUIRED', '缺少菜谱草稿');
   const revision = requireRevision(event.revision);
   const recipe = normalizeAndValidateRecipe(event.recipe);
+  const hasBaseMainVersionId = Object.prototype.hasOwnProperty.call(event, 'baseMainVersionId');
+  const baseMainVersionId = hasBaseMainVersionId
+    ? String(event.baseMainVersionId || '').trim()
+    : undefined;
   return repository.runTransaction(async (transaction) => {
     const draft = await transaction.getDraft({ familyId, dishId, draftId });
     if (!draft) throw createRecipeError('DRAFT_NOT_FOUND', '找不到这个菜谱草稿', 'authorize');
@@ -1284,6 +1288,7 @@ async function updateDraft(repository, member, familyId, dishId, event, now) {
     const updated = await transaction.setDraft(draftId, {
       ...draft,
       recipe,
+      ...(hasBaseMainVersionId ? { baseMainVersionId } : {}),
       revision: revision + 1,
       updatedBy: member.memberId,
       updatedAt: now,

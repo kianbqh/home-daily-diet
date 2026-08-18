@@ -517,7 +517,7 @@ test('updateDraft normalizes valid recipes, increments revision, and rejects a s
 
   const saved = await invoke(db, {
     action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: draft._id,
-    revision: 0, recipe, memberId: 'forged-member',
+    revision: 0, recipe, memberId: 'forged-member', baseMainVersionId: 'version-refreshed',
   });
   const stale = await invoke(db, {
     action: 'updateDraft', familyId: 'family-a', dishId: 'dish-1', draftId: draft._id,
@@ -526,6 +526,7 @@ test('updateDraft normalizes valid recipes, increments revision, and rejects a s
 
   assert.equal(saved.data.draft.revision, 1);
   assert.equal(saved.data.draft.updatedBy, 'member-a');
+  assert.equal(saved.data.draft.baseMainVersionId, 'version-refreshed');
   assert.equal(saved.data.draft.recipe.ingredients[0].name, '鸡蛋');
   assert.equal(Object.hasOwn(saved.data.draft.recipe.ingredients[0], 'ignored'), false);
   assert.deepEqual(stale.error, {

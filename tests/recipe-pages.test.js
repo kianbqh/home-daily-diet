@@ -475,6 +475,7 @@ test('draft autosave waits 800 ms and preserves a complete local copy on conflic
       draftId: 'draft-1',
       revision: 3,
       recipe: localRecipe,
+      baseMainVersionId: '',
     }]);
     assert.deepEqual(page.data.recipe, remoteRecipe);
     assert.notEqual(page.data.localConflictRecipe, page.data.recipe);
@@ -694,6 +695,96 @@ test('reloading a conflicted draft keeps the local copy and reapplies it against
     assert.match(read('pages/recipe-draft/recipe-draft.wxml'), />用本地内容重新应用<\/button>/);
   } finally {
     global.getApp = originalGetApp;
+  }
+});
+
+test('a conflict reload never overwrites edits entered while the cloud draft is loading', async () => {
+  const originalGetApp = global.getApp;
+  const draftLoad = deferred();
+  const localRecipe = completeRecipe({ familyNotes: ['冲突前的本地内容'] });
+  const newestLocalRecipe = completeRecipe({ familyNotes: ['加载期间继续输入的内容'] });
+  const remoteRecipe = completeRecipe({ familyNotes: ['云端版本'] });
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        getDraft() { return draftLoad.promise; },
+      },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: localRecipe }), recipe: localRecipe,
+      localConflictRecipe: localRecipe, saveState: 'conflict',
+    });
+
+    const reload = page.reloadAfterConflict();
+    page.onRecipeChange({ detail: { recipe: newestLocalRecipe } });
+    draftLoad.resolve({ draft: draftFixture({ revision: 4, recipe: remoteRecipe }) });
+    await reload;
+    page.clearAutosaveTimer();
+
+    assert.deepEqual(page.data.recipe, newestLocalRecipe);
+    assert.deepEqual(page.data.localConflictRecipe, newestLocalRecipe);
+    assert.equal(page.data.draft.revision, 4);
+    assert.equal(page.data.saveState, 'conflict');
+    assert.equal(page.data.saveMessage, '云端已被家人更新');
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('reapplying after a main conflict persists the refreshed main pointer for confirmation', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const localRecipe = completeRecipe({ familyNotes: ['按最新主菜谱重新应用'] });
+  const updates = [];
+  const confirmations = [];
+  global.getApp = () => ({
+    globalData: {
+      recipeAssistant: {
+        async getDraft() {
+          return { draft: draftFixture({
+            revision: 4, recipe: localRecipe, baseMainVersionId: 'version-old',
+          }) };
+        },
+        async getRecipe() {
+          return { pointer: { currentVersionId: 'version-new' } };
+        },
+        async updateDraft(payload) {
+          updates.push(payload);
+          return { draft: draftFixture({
+            revision: 5, recipe: payload.recipe, baseMainVersionId: payload.baseMainVersionId,
+          }) };
+        },
+        async confirmDraft(payload) {
+          confirmations.push(payload);
+          return { version: { _id: 'version-confirmed' } };
+        },
+      },
+    },
+  });
+  global.wx = { showToast() {}, redirectTo() {} };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1', dishId: 'dish-1', draftId: 'draft-1',
+      draft: draftFixture({ revision: 3, recipe: localRecipe, baseMainVersionId: 'version-old' }),
+      recipe: localRecipe, localConflictRecipe: localRecipe,
+      validation: { ok: true, errors: [] }, confirmMode: 'main', draftStatus: 'editing',
+    });
+
+    await page.reloadAfterConflict();
+    await page.reapplyLocalConflict();
+    await page.confirmRecipe();
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].baseMainVersionId, 'version-new');
+    assert.equal(page.data.draft.baseMainVersionId, 'version-new');
+    assert.equal(confirmations.length, 1);
+    assert.equal(confirmations[0].baseMainVersionId, 'version-new');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
   }
 });
 

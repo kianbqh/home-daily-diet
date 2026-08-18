@@ -300,12 +300,18 @@ test('purge advances beyond a full page of persistent file failures', async () =
 
 test('opportunistic cleanup skips expired artifacts once their workspace claim is attached', async () => {
   const now = 1_786_000_000_000;
-  const claimId = 'workspace-family-a-dish-1-record-1';
+  const claimId = 'workspace-claim-record-1';
   const db = createLifecycleDatabase({
     recipe_recordings: {
       [claimId]: {
         familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
-        sourceType: 'workspace_state', workspaceClaim: true, status: 'attached', draftExpiresAt: null,
+        sourceType: 'workspace_state', workspaceClaim: true,
+        workspaceFamilyId: 'family-a', workspaceDishId: 'dish-1', workspaceRecordId: 'record-1',
+        status: 'attached', createdBy: 'member-a', draftExpiresAt: null,
+      },
+      'workspace-family-a-dish-1-record-1': {
+        familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+        sourceType: 'workspace_state', status: 'active', createdBy: 'member-a', draftExpiresAt: null,
       },
       'expired-after-attach': {
         familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
@@ -326,6 +332,40 @@ test('opportunistic cleanup skips expired artifacts once their workspace claim i
   assert.equal(result.processed, 0);
   assert.equal(db.records('recipe_recordings').has('expired-after-attach'), true);
   assert.equal(db.records('recipe_drafts').has('draft-expired-after-attach'), true);
+});
+
+test('an expired cleanup claim prevents a later attachment from reporting success', async () => {
+  const now = 1_786_000_000_000;
+  const seed = baseSeed('active');
+  seed.recipe_recordings = {
+    'workspace-claim-record-1': {
+      familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sourceType: 'workspace_state', workspaceClaim: true,
+      workspaceFamilyId: 'family-a', workspaceDishId: 'dish-1', workspaceRecordId: 'record-1',
+      status: 'temporary', createdBy: 'member-a', draftExpiresAt: now - 1,
+    },
+    'workspace-family-a-dish-1-record-1': {
+      familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sourceType: 'workspace_state', status: 'active', createdBy: 'member-a', draftExpiresAt: null,
+    },
+    'expired-before-attach': {
+      familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+      sourceType: 'audio', status: 'ready', createdBy: 'member-a', fileId: '', draftExpiresAt: now - 1,
+    },
+  };
+  const db = createLifecycleDatabase(seed);
+  const repository = createRecipeRepository(db, DEFAULT_CONFIG);
+
+  const cleanup = await cleanupExpiredWorkspaces(repository, null, now, 20);
+  const attach = await invoke(db, {
+    action: 'attachRecordWorkspace', familyId: 'family-a', dishId: 'dish-1', recordId: 'record-1',
+  });
+
+  assert.equal(cleanup.deletedDocuments, 1);
+  assert.equal(db.records('recipe_recordings').get('workspace-claim-record-1').status, 'expired');
+  assert.equal(db.records('recipe_recordings').get('workspace-claim-record-1').cleanupPending, true);
+  assert.equal(attach.ok, false);
+  assert.equal(attach.error.code, 'WORKSPACE_EXPIRED');
 });
 
 test('opportunistic cleanup processes at most twenty indexed expired artifacts and retries failed files', async () => {

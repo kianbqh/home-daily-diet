@@ -1076,13 +1076,40 @@ async function claimExpiredWorkspaceForCleanup(transaction, artifact, now) {
   const familyId = String(artifact && artifact.familyId || '');
   const dishId = String(artifact && artifact.dishId || '');
   const recordId = String(artifact && artifact.recordId || '');
-  if (!familyId || !dishId || !recordId || typeof transaction.getWorkspaceState !== 'function') return true;
+  if (!familyId || !dishId || !recordId) return true;
+  if (typeof transaction.getRecordingArtifact !== 'function'
+    || typeof transaction.setRecording !== 'function') return false;
+
+  const claimId = workspaceClaimDocumentId(recordId);
+  const claim = await transaction.getRecordingArtifact(claimId);
+  if (claim) {
+    const matchesWorkspace = claim.sourceType === 'workspace_state'
+      && claim.workspaceClaim === true
+      && claim.workspaceFamilyId === familyId
+      && claim.workspaceDishId === dishId
+      && claim.workspaceRecordId === recordId;
+    if (!matchesWorkspace || claim.status === 'attached') return false;
+    if (claim.cleanupPending !== true || claim.status !== 'expired' || claim.draftExpiresAt != null) {
+      await transaction.setRecording(claimId, {
+        ...claim, status: 'expired', cleanupPending: true, draftExpiresAt: null, updatedAt: now,
+      });
+    }
+  } else {
+    await transaction.setRecording(claimId, {
+      familyId, dishId, recordId, sourceType: 'workspace_state', workspaceClaim: true,
+      workspaceFamilyId: familyId, workspaceDishId: dishId, workspaceRecordId: recordId,
+      status: 'expired', cleanupPending: true,
+      createdBy: String(artifact.createdBy || ''), createdAt: now, updatedAt: now,
+      draftExpiresAt: null,
+    });
+  }
+
+  if (typeof transaction.getWorkspaceState !== 'function') return true;
   const state = await transaction.getWorkspaceState(familyId, dishId, recordId);
-  if (!state) return true;
-  if (state.status === 'attached') return false;
-  if (state.cleanupPending !== true && typeof transaction.setWorkspaceState === 'function') {
+  if (state && state.cleanupPending !== true && typeof transaction.setWorkspaceState === 'function') {
     await transaction.setWorkspaceState(familyId, dishId, recordId, {
-      ...state, cleanupPending: true, updatedAt: now,
+      ...state, familyId, dishId, recordId, sourceType: 'workspace_state',
+      status: state.status || 'expired', cleanupPending: true, updatedAt: now,
     });
   }
   return true;
@@ -1090,6 +1117,7 @@ async function claimExpiredWorkspaceForCleanup(transaction, artifact, now) {
 
 function isExpiredWorkspaceArtifact(value, now) {
   return Boolean(value)
+    && value.sourceType !== 'workspace_state'
     && value.draftExpiresAt != null
     && Number(value.draftExpiresAt) <= Number(now);
 }

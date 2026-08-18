@@ -453,4 +453,10 @@ test('committed fixture contains exactly two fictional sanitized Mandarin sample
     item.forbiddenFacts.forEach((fact) => assert.match(fact, /^(?:\*|[a-z.]+)=/));
     assert.doesNotMatch(item.transcript, /(?:openid|wxid_|1\d{10}|@|PRIVATE_)/i);
   });
+
+  const byId = Object.fromEntries(fixture.map((item) => [item.id, item]));
+  assert.ok(byId['fictional-tomato-eggs'].expectedFacts.includes('step.instruction=锅里放少许油'));
+  assert.ok(byId['fictional-tomato-eggs'].expectedFacts.includes('step.instruction=加少许盐'));
+  assert.ok(byId['fictional-seaweed-soup'].expectedFacts.includes('step.instruction=鸡蛋打散'));
+  assert.ok(byId['fictional-seaweed-soup'].expectedFacts.includes('step.instruction=关火前放入香油'));
 });

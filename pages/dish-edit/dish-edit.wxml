@@ -27,6 +27,7 @@
     <view wx:elif="{{recipeError}}" class="recipe-card-state recipe-card-error">
       <text>{{recipeError}}</text>
       <text wx:if="{{recipeUnavailable}}" class="recipe-card-support">菜品、照片、评价和制作记录仍可正常使用。</text>
+      <button wx:if="{{!isArchived}}" class="secondary-button recipe-card-button" bindtap="openManualFamilyRecipe">直接手动填写</button>
     </view>
     <block wx:elif="{{recipeSummary.hasRecipe}}">
       <view class="recipe-summary-counts">

@@ -339,6 +339,46 @@ test('manual recipe entry creates a manual draft when no main exists and opens r
   }
 });
 
+test('recipe error state renders a manual action that invokes the manual handler', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  const navigations = [];
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ family: { id: 'family-internal-1' } }) },
+      recipeAssistant: {
+        async createManualDraft(payload) {
+          calls.push(payload);
+          return { draft: draftFixture() };
+        },
+      },
+    },
+  });
+  global.wx = { navigateTo(options) { navigations.push(options.url); }, showToast() {} };
+  try {
+    const template = read('pages/dish-edit/dish-edit.wxml');
+    const errorState = template.match(/<view wx:elif="\{\{recipeError\}\}"[\s\S]*?<\/view>/);
+    assert.ok(errorState, 'recipe error state should render');
+    const action = errorState[0].match(/<button[^>]*bindtap="([^"]+)"[^>]*>直接手动填写<\/button>/);
+    assert.ok(action, 'recipe error state should render a manual action');
+
+    const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'), {
+      dishId: 'dish-1',
+      isArchived: false,
+      recipeError: '家庭菜谱暂时无法读取',
+      recipeSummary: { hasRecipe: false },
+    });
+    await page[action[1]]();
+
+    assert.deepEqual(calls, [{ familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'manual' }]);
+    assert.equal(navigations[0], '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=draft-1');
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
 test('voice-first recipe entry opens the recorder, collapses extras, and keeps manual entry visible', () => {
   const originalWx = global.wx;
   const scrollCalls = [];

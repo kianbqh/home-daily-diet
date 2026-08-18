@@ -322,15 +322,19 @@ if (badWxml.length) {
 }
 
 const dishDetailTemplate = fs.readFileSync(path.join(root, 'pages/dish-edit/dish-edit.wxml'), 'utf8');
-const recordingAnchorIndex = dishDetailTemplate.indexOf('id="recordingWorkspaceAnchor"');
+const emptyFamilyRecipeBlockMatch = dishDetailTemplate.match(
+  /<block wx:else>\s*<text class="recipe-empty-title">还没有记录做法<\/text>[\s\S]*?<\/block>/
+);
+const emptyFamilyRecipeBlock = emptyFamilyRecipeBlockMatch ? emptyFamilyRecipeBlockMatch[0] : '';
+const recordingWorkspaceIndex = dishDetailTemplate.search(/<recipe-recording-workspace(?:\s|\/?>)/);
 const optionalRecordMetadataIndex = dishDetailTemplate.indexOf('这次的照片');
 const recipeEntryIssues = [
-  /bindtap="startVoiceRecipeEntry"[^>]*>语音记录做法<\/button>/.test(dishDetailTemplate)
+  /bindtap="startVoiceRecipeEntry"[^>]*>语音记录做法<\/button>/.test(emptyFamilyRecipeBlock)
     ? '' : 'missing visible voice-first recipe entry',
-  /bindtap="openManualFamilyRecipe"[^>]*>直接手动填写<\/button>/.test(dishDetailTemplate)
+  /bindtap="openManualFamilyRecipe"[^>]*>直接手动填写<\/button>/.test(emptyFamilyRecipeBlock)
     ? '' : 'missing manual recipe fallback entry',
-  recordingAnchorIndex >= 0 && optionalRecordMetadataIndex >= 0
-    && recordingAnchorIndex < optionalRecordMetadataIndex
+  recordingWorkspaceIndex >= 0 && optionalRecordMetadataIndex >= 0
+    && recordingWorkspaceIndex < optionalRecordMetadataIndex
     ? '' : 'recording workspace must appear before optional record metadata',
 ].filter(Boolean);
 if (recipeEntryIssues.length) {
@@ -340,17 +344,48 @@ if (recipeEntryIssues.length) {
 
 const recipeDraftTemplate = fs.readFileSync(path.join(root, 'pages/recipe-draft/recipe-draft.wxml'), 'utf8');
 const recipeEditorTemplate = fs.readFileSync(path.join(root, 'components/recipe-editor/recipe-editor.wxml'), 'utf8');
-const compactEmptySectionCount = (recipeEditorTemplate.match(/\? 'is-empty' : ''/g) || []).length;
+const recipeSectionSpecs = [
+  { field: 'ingredients', label: '+ 食材', handler: 'addIngredient' },
+  { field: 'steps', label: '+ 步骤', handler: 'addStep' },
+  { field: 'tips', label: '+ 技巧', handler: 'addTextItem', dataField: 'tips' },
+  { field: 'failures', label: '+ 问题', handler: 'addFailure' },
+  { field: 'familyNotes', label: '+ 经验', handler: 'addTextItem', dataField: 'familyNotes' },
+];
+const recipeSectionStartPattern = /<view class="editor-section card-surface \{\{!recipe\.([A-Za-z][A-Za-z0-9]*)\.length \? 'is-empty' : ''\}\}">/g;
+const recipeSectionStarts = Array.from(recipeEditorTemplate.matchAll(recipeSectionStartPattern));
+const recipeSections = recipeSectionStarts.map((match, index) => ({
+  field: match[1],
+  template: recipeEditorTemplate.slice(
+    match.index,
+    index + 1 < recipeSectionStarts.length ? recipeSectionStarts[index + 1].index : recipeEditorTemplate.length
+  ),
+}));
+const compactSectionIssues = recipeSectionSpecs.flatMap((spec) => {
+  const matchingSections = recipeSections.filter((section) => section.field === spec.field);
+  if (matchingSections.length !== 1) {
+    return [`expected exactly one compact ${spec.field} section, found ${matchingSections.length}`];
+  }
+
+  const sectionTemplate = matchingSections[0].template;
+  const dataFieldAssertion = spec.dataField
+    ? `(?=[^>]*data-field="${spec.dataField}")`
+    : '';
+  const escapedLabel = spec.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emptyActionPattern = new RegExp(
+    `<view wx:if="\\{\\{!recipe\\.${spec.field}\\.length\\}\\}" class="editor-empty">\\s*`
+      + `<button(?=[^>]*class="editor-empty-action")(?=[^>]*bindtap="${spec.handler}")${dataFieldAssertion}[^>]*>`
+      + `${escapedLabel}<\\/button>\\s*<\\/view>`
+  );
+  return emptyActionPattern.test(sectionTemplate)
+    ? []
+    : [`compact ${spec.field} section has an invalid empty binding, label, or handler`];
+});
 const compactDraftIssues = [
   /RECIPE DRAFT|class="page-title">整理家庭菜谱/.test(recipeDraftTemplate)
     ? 'recipe draft repeats the page title' : '',
   /bindtap="switchToVoiceRecording">改用语音记录<\/button>/.test(recipeDraftTemplate)
     ? '' : 'manual draft is missing the voice escape hatch',
-  compactEmptySectionCount === 5
-    ? '' : `expected 5 compact empty recipe sections, found ${compactEmptySectionCount}`,
-  ['+ 食材', '+ 步骤', '+ 技巧', '+ 问题', '+ 经验'].every(
-    (label) => recipeEditorTemplate.includes(`>${label}</button>`)
-  ) ? '' : 'compact recipe section actions are incomplete',
+  ...compactSectionIssues,
 ].filter(Boolean);
 if (compactDraftIssues.length) {
   console.error(`SMOKE FAIL: compact recipe draft shell is incomplete\n${compactDraftIssues.join('\n')}`);

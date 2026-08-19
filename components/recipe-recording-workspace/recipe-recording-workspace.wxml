@@ -7,7 +7,7 @@
     <text wx:if="{{clips.length}}" class="workspace-count">{{clips.length}} / 10 段</text>
   </view>
 
-  <view class="recording-panel {{recording ? 'active' : ''}}">
+  <view class="recording-panel {{recordingStatus === 'recording' ? 'active' : ''}}">
     <view class="recording-time">
       <text class="elapsed-time">{{elapsedLabel}}</text>
       <text class="remaining-time">倒计时 {{remainingLabel}}</text>
@@ -20,15 +20,16 @@
       </view>
     </button>
     <button wx:else class="record-button stop primary-record-action" disabled="{{disabled}}" bindtap="stopRecording">
-      <text class="record-icon">■</text>
+      <text class="record-icon">{{recordingStatus === 'interrupted' ? 'Ⅱ' : '■'}}</text>
       <view class="record-button-copy">
-        <text class="record-button-label">结束录音</text>
-        <text class="record-button-helper">录音中，点此结束</text>
+        <text class="record-button-label">{{recordingStatus === 'starting' ? '正在启动' : recordingStatus === 'interrupted' ? '录音已暂停' : '结束录音'}}</text>
+        <text class="record-button-helper">{{recordingStatus === 'starting' ? '正在启用麦克风' : recordingStatus === 'interrupted' ? '系统占用结束后会自动继续' : '录音中，点此结束'}}</text>
       </view>
     </button>
   </view>
 
   <text wx:if="{{workspaceError}}" class="workspace-message">{{workspaceError}}</text>
+  <button wx:if="{{microphoneDenied}}" class="secondary-action permission-action" bindtap="openMicrophoneSettings">打开麦克风设置</button>
 
   <view wx:if="{{clips.length}}" class="clip-list">
     <view wx:for="{{clips}}" wx:key="key" class="clip-card">

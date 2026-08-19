@@ -1,0 +1,26 @@
+<view class="page voice-recording-page">
+  <view class="eyebrow">VOICE RECIPE</view>
+  <view class="voice-intro-title">把家里的做法慢慢说出来</view>
+  <view class="page-subtitle">可以分几段录音，系统会转成文字；确认前都能继续校对和补充。</view>
+
+  <view wx:if="{{error}}" class="card-surface voice-state-card error-state">{{error}}</view>
+
+  <view wx:else class="card-surface voice-workspace-card">
+    <view wx:if="{{preparing}}" class="voice-state-card">
+      <text class="preparing-title">正在准备录音</text>
+      <text class="preparing-copy">正在恢复这道菜未完成的记录…</text>
+    </view>
+    <view hidden="{{preparing}}">
+      <recipe-recording-workspace
+        id="recipeRecordingWorkspace"
+        family-id="{{familyId}}"
+        dish-id="{{dishId}}"
+        record-id="{{recordId}}"
+        bindworkspacechange="onRecordingWorkspaceChange"
+        bindopendraft="onOpenRecordingDraft"
+      />
+    </view>
+  </view>
+
+  <view class="voice-footnote">原始语音会随本次记录保留，整理后仍可返回校对。</view>
+</view>

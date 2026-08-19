@@ -47,19 +47,26 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
       emit(errorState('RECORDING_LIMIT_EXCEEDED'));
       return;
     }
-    const startedAt = currentTime();
     const token = {};
     active = {
-      token, workspaceKey, startedAt, durationLimit, stopping: false, discarded: false,
+      token,
+      workspaceKey,
+      durationLimit,
+      stopping: false,
+      discarded: false,
+      started: false,
+      paused: false,
+      interrupted: false,
+      elapsedMs: 0,
+      segmentStartedAt: null,
     };
-    emit(recordingState(0, durationLimit));
-    timerId = timerApi.setInterval(() => {
-      if (!isActive(token)) return;
-      const elapsedMs = Math.min(durationLimit, currentTime() - startedAt);
-      emit(recordingState(elapsedMs, durationLimit));
-      if (elapsedMs >= durationLimit) stop();
-    }, 1000);
-    recorderManager.start({ ...RECORDING_OPTIONS, duration: durationLimit });
+    emit(startingState(durationLimit));
+    try {
+      recorderManager.start({ ...RECORDING_OPTIONS, duration: durationLimit });
+      if (typeof recorderManager.onStart !== 'function') handleStarted(token);
+    } catch (error) {
+      handleRecorderError(error, token);
+    }
   }
 
   function stop() {
@@ -170,32 +177,45 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
   }
 
   function bindRecorderHandlers() {
+    if (typeof recorderManager.onStart === 'function') {
+      recorderHandlers.start = () => handleStarted(active && active.token);
+      recorderManager.onStart(recorderHandlers.start);
+    }
     if (typeof recorderManager.onStop === 'function') {
-      recorderHandlers.stop = (result) => handleFinished(result, false);
+      recorderHandlers.stop = (result) => handleFinished(result);
       recorderManager.onStop(recorderHandlers.stop);
     }
     if (typeof recorderManager.onError === 'function') {
-      recorderHandlers.error = (error) => {
-        if (destroyed || !active) return;
-        const session = active;
-        active = null;
-        clearTimer();
-        if (session.discarded) return;
-        emit(errorState(isMicrophoneDenied(error) ? 'MICROPHONE_DENIED' : 'RECORDING_INTERRUPTED'));
-      };
+      recorderHandlers.error = (error) => handleRecorderError(error, active && active.token);
       recorderManager.onError(recorderHandlers.error);
     }
+    if (typeof recorderManager.onPause === 'function') {
+      recorderHandlers.pause = () => handlePaused(active && active.token, false);
+      recorderManager.onPause(recorderHandlers.pause);
+    }
+    if (typeof recorderManager.onResume === 'function') {
+      recorderHandlers.resume = () => handleResumed(active && active.token);
+      recorderManager.onResume(recorderHandlers.resume);
+    }
     if (typeof recorderManager.onInterruptionBegin === 'function') {
-      recorderHandlers.interruption = (result) => handleFinished(result, true);
+      recorderHandlers.interruption = () => handlePaused(active && active.token, true);
       recorderManager.onInterruptionBegin(recorderHandlers.interruption);
+    }
+    if (typeof recorderManager.onInterruptionEnd === 'function') {
+      recorderHandlers.interruptionEnd = () => handleInterruptionEnded(active && active.token);
+      recorderManager.onInterruptionEnd(recorderHandlers.interruptionEnd);
     }
   }
 
   function unbindRecorderHandlers() {
     const mappings = [
+      ['offStart', 'start'],
       ['offStop', 'stop'],
       ['offError', 'error'],
+      ['offPause', 'pause'],
+      ['offResume', 'resume'],
       ['offInterruptionBegin', 'interruption'],
+      ['offInterruptionEnd', 'interruptionEnd'],
     ];
     mappings.forEach(([offMethod, handlerName]) => {
       if (recorderHandlers[handlerName] && typeof recorderManager[offMethod] === 'function') {
@@ -204,27 +224,104 @@ function createRecordingController({ recorderManager, fileSystem, storage, clock
     });
   }
 
-  async function handleFinished(result, interrupted) {
+  function handleStarted(token) {
+    if (!isActive(token)) return;
+    const session = active;
+    if (session.discarded || session.stopping || session.started) return;
+    session.started = true;
+    session.paused = false;
+    session.segmentStartedAt = currentTime();
+    emit(recordingState(session.elapsedMs, session.durationLimit));
+    armTimer(token);
+  }
+
+  function handlePaused(token, interrupted) {
+    if (!isActive(token)) return;
+    const session = active;
+    if (session.discarded || session.stopping || !session.started) return;
+    if (!session.paused) {
+      session.elapsedMs = elapsedFor(session);
+      session.segmentStartedAt = null;
+      session.paused = true;
+      clearTimer();
+    }
+    if (interrupted) session.interrupted = true;
+    emit(interruptedState(session.elapsedMs, session.durationLimit));
+  }
+
+  function handleResumed(token) {
+    if (!isActive(token)) return;
+    const session = active;
+    if (session.discarded || session.stopping || !session.started || !session.paused) return;
+    session.paused = false;
+    session.interrupted = false;
+    session.segmentStartedAt = currentTime();
+    emit(recordingState(session.elapsedMs, session.durationLimit));
+    armTimer(token);
+  }
+
+  function handleInterruptionEnded(token) {
+    if (!isActive(token)) return;
+    const session = active;
+    if (session.discarded || session.stopping || !session.interrupted) return;
+    try {
+      if (typeof recorderManager.resume !== 'function') {
+        failActive(session, 'RECORDING_INTERRUPTED');
+        return;
+      }
+      recorderManager.resume();
+      if (typeof recorderManager.onResume !== 'function') handleResumed(token);
+    } catch (error) {
+      failActive(session, 'RECORDING_INTERRUPTED');
+    }
+  }
+
+  function handleRecorderError(error, token) {
+    if (!isActive(token)) return;
+    const session = active;
+    const errorCode = classifyRecorderError(error, session.started);
+    failActive(session, errorCode);
+  }
+
+  function failActive(session, errorCode) {
+    if (active === session) active = null;
+    clearTimer();
+    if (!session.discarded) emit(errorState(errorCode));
+  }
+
+  function armTimer(token) {
+    clearTimer();
+    timerId = timerApi.setInterval(() => {
+      if (!isActive(token) || active.paused || !active.started) return;
+      const elapsedMs = elapsedFor(active);
+      emit(recordingState(elapsedMs, active.durationLimit));
+      if (elapsedMs >= active.durationLimit) stop();
+    }, 1000);
+  }
+
+  function elapsedFor(session) {
+    const runningMs = session.started && !session.paused && session.segmentStartedAt !== null
+      ? Math.max(0, currentTime() - session.segmentStartedAt)
+      : 0;
+    return Math.min(session.durationLimit, Math.max(0, session.elapsedMs + runningMs));
+  }
+
+  async function handleFinished(result) {
     if (destroyed || !active) return;
     const session = active;
     clearTimer();
     if (session.discarded) {
-      // Interruption begin is non-terminal; retain the gate so a late stop cannot bind to a replacement.
-      if (!interrupted) active = null;
+      active = null;
       return;
     }
     if (!result || !result.tempFilePath) {
-      if (interrupted) {
-        emit(errorState('RECORDING_INTERRUPTED'));
-        return;
-      }
       active = null;
       emit(errorState('LOCAL_FILE_UNAVAILABLE'));
       return;
     }
     active = null;
     const reportedDuration = Number(result.duration);
-    const elapsedMs = Math.min(session.durationLimit, Math.max(0, currentTime() - session.startedAt));
+    const elapsedMs = elapsedFor(session);
     const durationMs = Number.isFinite(reportedDuration) && reportedDuration > 0
       ? reportedDuration
       : elapsedMs;
@@ -397,12 +494,35 @@ function errorState(errorCode) {
   return { status: 'error', elapsedMs: 0, remainingMs: MAX_DURATION_MS, localClip: null, errorCode };
 }
 
+function startingState(durationLimit) {
+  return { status: 'starting', elapsedMs: 0, remainingMs: durationLimit, localClip: null, errorCode: null };
+}
+
 function recordingState(elapsedMs, durationLimit) {
   return { status: 'recording', elapsedMs, remainingMs: durationLimit - elapsedMs, localClip: null, errorCode: null };
 }
 
+function interruptedState(elapsedMs, durationLimit) {
+  return { status: 'interrupted', elapsedMs, remainingMs: durationLimit - elapsedMs, localClip: null, errorCode: null };
+}
+
 function isMicrophoneDenied(error) {
-  return /auth|permission|deny/i.test(String(error && (error.errMsg || error.message || error.code || '')));
+  return /auth|permission|deny|denied|未授权|拒绝/i.test(recorderErrorText(error));
+}
+
+function isMicrophoneBusy(error) {
+  return /busy|occup|in[ _-]?use|device_busy|占用|正在使用/i.test(recorderErrorText(error));
+}
+
+function classifyRecorderError(error, started) {
+  if (isMicrophoneDenied(error)) return 'MICROPHONE_DENIED';
+  if (isMicrophoneBusy(error)) return 'MICROPHONE_BUSY';
+  return started ? 'RECORDING_INTERRUPTED' : 'RECORDING_START_FAILED';
+}
+
+function recorderErrorText(error) {
+  if (!error) return '';
+  return [error.errMsg, error.message, error.code, error.name].filter(Boolean).join(' ');
 }
 
 function clone(value) {

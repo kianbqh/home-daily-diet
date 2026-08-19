@@ -29,6 +29,7 @@ const requiredFiles = [
   'cloudfunctions/recipe-assistant/package-lock.json',
   'utils/format.js',
   'utils/page-refresh.js',
+  'utils/recipe-recording-entry.js',
   'utils/view-model.js',
   'components/dish-card/dish-card.js',
   'components/dish-card/dish-card.wxml',
@@ -54,6 +55,10 @@ const requiredFiles = [
   'pages/recipe/recipe.json',
   'pages/recipe/recipe.wxml',
   'pages/recipe/recipe.wxss',
+  'pages/recipe-recording/recipe-recording.js',
+  'pages/recipe-recording/recipe-recording.json',
+  'pages/recipe-recording/recipe-recording.wxml',
+  'pages/recipe-recording/recipe-recording.wxss',
   'pages/recipe-draft/recipe-draft.js',
   'pages/recipe-draft/recipe-draft.json',
   'pages/recipe-draft/recipe-draft.wxml',
@@ -171,6 +176,7 @@ const expectedPages = [
   'pages/dishes/dishes',
   'pages/dish-edit/dish-edit',
   'pages/recipe/recipe',
+  'pages/recipe-recording/recipe-recording',
   'pages/recipe-draft/recipe-draft',
   'pages/meal/meal',
   'pages/family/family',
@@ -322,6 +328,10 @@ if (badWxml.length) {
 }
 
 const dishDetailTemplate = fs.readFileSync(path.join(root, 'pages/dish-edit/dish-edit.wxml'), 'utf8');
+const recipeHubTemplate = fs.readFileSync(path.join(root, 'pages/recipe/recipe.wxml'), 'utf8');
+const recipeHubLogic = fs.readFileSync(path.join(root, 'pages/recipe/recipe.js'), 'utf8');
+const recipeDraftLogic = fs.readFileSync(path.join(root, 'pages/recipe-draft/recipe-draft.js'), 'utf8');
+const recipeRecordingEntryLogic = fs.readFileSync(path.join(root, 'utils/recipe-recording-entry.js'), 'utf8');
 const emptyFamilyRecipeBlockMatch = dishDetailTemplate.match(
   /<block wx:else>\s*<text class="recipe-empty-title">还没有记录做法<\/text>[\s\S]*?<\/block>/
 );
@@ -329,10 +339,22 @@ const emptyFamilyRecipeBlock = emptyFamilyRecipeBlockMatch ? emptyFamilyRecipeBl
 const recordingWorkspaceIndex = dishDetailTemplate.search(/<recipe-recording-workspace(?:\s|\/?>)/);
 const optionalRecordMetadataIndex = dishDetailTemplate.indexOf('这次的照片');
 const recipeEntryIssues = [
-  /bindtap="startVoiceRecipeEntry"[^>]*>语音记录做法<\/button>/.test(emptyFamilyRecipeBlock)
-    ? '' : 'missing visible voice-first recipe entry',
-  /bindtap="openManualFamilyRecipe"[^>]*>直接手动填写<\/button>/.test(emptyFamilyRecipeBlock)
-    ? '' : 'missing manual recipe fallback entry',
+  /bindtap="openFamilyRecipe"[^>]*>进入家庭菜谱<\/button>/.test(emptyFamilyRecipeBlock)
+    ? '' : 'dish detail must expose one family recipe hub entry',
+  /bindtap="(?:startVoiceRecipeEntry|openManualFamilyRecipe)"/.test(emptyFamilyRecipeBlock)
+    ? 'dish detail must not choose voice or manual before entering the recipe hub' : '',
+  /bindtap="startVoiceRecipeEntry"[^>]*>语音记录<\/button>/.test(recipeHubTemplate)
+    ? '' : 'recipe hub is missing its voice path',
+  /bindtap="openManualRecipe"/.test(recipeHubTemplate)
+    ? '' : 'recipe hub is missing its manual path',
+  /recipeRecordingUrl\(\{/.test(recipeHubLogic)
+    && /\/pages\/recipe-recording\/recipe-recording/.test(recipeRecordingEntryLogic)
+    ? '' : 'recipe hub voice action must open the dedicated recording page',
+  /recipeRecordingUrl\(\{/.test(recipeDraftLogic)
+    && /\/pages\/recipe-recording\/recipe-recording/.test(recipeRecordingEntryLogic)
+    ? '' : 'manual draft voice action must open the dedicated recording page',
+  /openVoice=1|getCurrentPages\(\)/.test(`${recipeHubLogic}\n${recipeDraftLogic}`)
+    ? 'recipe voice entry must not call a hidden previous page or use the old bottom-of-page route' : '',
   recordingWorkspaceIndex >= 0 && optionalRecordMetadataIndex >= 0
     && recordingWorkspaceIndex < optionalRecordMetadataIndex
     ? '' : 'recording workspace must appear before optional record metadata',

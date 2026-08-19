@@ -6,7 +6,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "tencentcloud-sdk-nodejs-asr": "4.1.273",
     "wx-server-sdk": "^3.0.1"
   }
 }

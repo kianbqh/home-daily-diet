@@ -13,12 +13,14 @@ CloudBase 环境: home-daily-diet-d8f5e7d6907dd53a
 入口: index.main
 ```
 
+截至 2026-08-19，测试环境已完成：五个集合创建、`ADMINONLY` 权限、五个业务复合索引、`recipe-assistant` 部署，以及四个非敏感默认环境变量。仍待完成的是 `TOKENHUB_API_KEY`、外部服务启用/权限确认和双账号真机验收。
+
 ## 0. 部署前检查
 
 - [ ] 确认当前操作的是测试环境，并导出或备份现有 `family_states` 数据。
 - [ ] 确认 `npm test` 与 `node scripts/smoke-check.js` 在本地通过。
 - [ ] 不把真实 Key 写入 `.env.example`、截图、Git、聊天记录或小程序代码。
-- [ ] 不上传 `cloudfunctions/recipe-assistant/node_modules`；使用“云端安装依赖”。
+- [ ] 不把 `cloudfunctions/recipe-assistant/node_modules` 提交到 Git；部署包必须严格依据 `package-lock.json` 安装或打包依赖。
 
 ## 1. 创建五个服务端集合
 
@@ -60,7 +62,7 @@ recipe_usage_daily
 1. 创建普通事件云函数 `recipe-assistant`，不要创建 HTTP 云函数。
 2. 运行环境选择 `Node.js 20.19`，执行入口填写 `index.main`。
 3. 上传整个 `cloudfunctions/recipe-assistant/` 目录。
-4. 选择“上传并部署：云端安装依赖”，让云端依据 `package-lock.json` 安装固定版本依赖。
+4. 微信开发者工具部署时选择“上传并部署：云端安装依赖”；自动化部署也可以按 `package-lock.json` 预装依赖后上传，并关闭远程安装。当前测试环境采用后一种方式。
 5. 确认函数详情页能看到 `$LATEST` 部署成功，再进行调用测试。
 6. 云函数调用权限只允许已登录、非匿名用户；业务层仍会使用微信调用上下文中的 `OPENID` 再校验家庭成员身份。
 
@@ -72,21 +74,23 @@ recipe_usage_daily
 TOKENHUB_API_KEY=<TokenHub API Key>
 RECIPE_MODEL=hy3
 RECIPE_PROMPT_VERSION=v1
+ASR_REGION=ap-shanghai
+ASR_ENGINE=16k_zh
+
+# 仅当 SCF 内置临时凭据不可用时配置以下备用项
 ASR_SECRET_ID=<最小权限凭据 ID>
 ASR_SECRET_KEY=<最小权限凭据 Key>
 ASR_SESSION_TOKEN=<使用临时凭据时填写；长期凭据留空>
-ASR_REGION=ap-shanghai
-ASR_ENGINE=16k_zh
 ```
 
-`ASR_SESSION_TOKEN` 是可选项；其余七项按上面填写。代码只识别普通话 `16k_zh`，不尝试识别温州话或自动选择方言模型。
+`TOKENHUB_API_KEY` 是 AI 整理必需的私密项。其余四个非敏感值已有代码默认值，但建议在云函数环境中显式配置。SCF 运行时会注入临时腾讯云凭据，代码优先使用它们；只有运行身份不可用时才成对配置 `ASR_SECRET_ID` 与 `ASR_SECRET_KEY`，临时备用凭据再附带 `ASR_SESSION_TOKEN`。代码只识别普通话 `16k_zh`，不尝试识别温州话或自动选择方言模型。
 
 ## 4. 开通外部服务
 
 ### 腾讯云录音文件识别
 
 - [ ] 开通语音识别服务。
-- [ ] 最小权限凭据仅允许录音文件识别所需的 `CreateRecTask` 和 `DescribeTaskStatus`。
+- [ ] 云函数运行身份仅允许录音文件识别所需的 `CreateRecTask` 和 `DescribeTaskStatus`；如改用备用凭据，也保持同样的最小权限。
 - [ ] 固定区域 `ap-shanghai`、引擎 `16k_zh`。
 - [ ] 不启用实时转写、说话人分离、情绪识别等额外能力。
 

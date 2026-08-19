@@ -4,6 +4,7 @@
     "pages/dishes/dishes",
     "pages/dish-edit/dish-edit",
     "pages/recipe/recipe",
+    "pages/recipe-recording/recipe-recording",
     "pages/recipe-draft/recipe-draft",
     "pages/meal/meal",
     "pages/family/family",
@@ -16,6 +17,11 @@
     "backgroundColor": "#fbfaf7",
     "backgroundTextStyle": "dark",
     "enablePullDownRefresh": true
+  },
+  "permission": {
+    "scope.record": {
+      "desc": "用于记录做菜过程并整理家庭菜谱"
+    }
   },
   "style": "v2",
   "sitemapLocation": "sitemap.json"

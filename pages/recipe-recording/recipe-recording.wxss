@@ -1,0 +1,55 @@
+.voice-recording-page {
+  padding-bottom: 84rpx;
+}
+
+.voice-intro-title {
+  max-width: 650rpx;
+  margin-top: 14rpx;
+  color: #252824;
+  font-size: 46rpx;
+  font-weight: 720;
+  line-height: 1.25;
+  letter-spacing: -1rpx;
+}
+
+.voice-workspace-card {
+  margin-top: 30rpx;
+  padding: 30rpx;
+}
+
+.voice-state-card {
+  padding: 54rpx 28rpx;
+  color: #737a72;
+  text-align: center;
+}
+
+.preparing-title,
+.preparing-copy {
+  display: block;
+}
+
+.preparing-title {
+  color: #315b49;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.preparing-copy {
+  margin-top: 12rpx;
+  font-size: 24rpx;
+  line-height: 1.6;
+}
+
+.error-state {
+  margin-top: 30rpx;
+  background: #fff4e8;
+  color: #8b5948;
+}
+
+.voice-footnote {
+  margin: 24rpx 12rpx 0;
+  color: #8a8f87;
+  font-size: 22rpx;
+  line-height: 1.6;
+  text-align: center;
+}

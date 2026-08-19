@@ -3,6 +3,19 @@
   <view class="page-title">{{isHistorical ? '历史菜谱' : '家庭菜谱'}}</view>
   <view class="page-subtitle">{{isHistorical ? '这是已确认的只读版本。' : '家人共同确认的当前做法。'}}</view>
 
+  <view wx:if="{{!isHistorical && !isArchived}}" class="card-surface recipe-entry-card">
+    <view class="entry-heading">
+      <view>
+        <text class="entry-title">整理这道菜的做法</text>
+        <text class="entry-copy">先选择记录方式，内容都会进入可检查、可修改的菜谱草稿。</text>
+      </view>
+    </view>
+    <view class="entry-actions">
+      <button class="primary-button entry-button" bindtap="startVoiceRecipeEntry">语音记录</button>
+      <button class="secondary-button entry-button" disabled="{{loading || actionBusy || error}}" bindtap="openManualRecipe">{{version ? '手动编辑' : '手动填写'}}</button>
+    </view>
+  </view>
+
   <view wx:if="{{loading}}" class="card-surface state-card">正在读取菜谱…</view>
   <view wx:elif="{{error}}" class="card-surface state-card error-card">
     <view class="state-title">{{error}}</view>
@@ -11,7 +24,7 @@
   <view wx:elif="{{!version}}" class="empty-card">
     <view class="empty-icon">📖</view>
     <view class="empty-title">还没有家庭菜谱</view>
-    <view class="empty-description">从菜品详情手动创建第一版做法。</view>
+    <view class="empty-description">可以用语音记录做菜过程，也可以直接手动填写。</view>
   </view>
 
   <block wx:else>
@@ -21,7 +34,6 @@
         <view><text class="meta-number">{{summary.stepCount}}</text><text class="meta-label">个步骤</text></view>
       </view>
       <view class="confirmed-meta">第 {{version.versionNumber}} 版 · {{version.confirmedByLabel}} · {{version.confirmedAtLabel}}</view>
-      <button wx:if="{{!isHistorical}}" class="secondary-button edit-main-button" bindtap="editMainRecipe">编辑主菜谱</button>
     </view>
 
     <view class="card-surface recipe-section">
@@ -65,6 +77,11 @@
       <text wx:for="{{recipe.familyNotes}}" wx:key="index" class="bullet-item">• {{item}}</text>
     </view>
   </block>
+
+  <view wx:if="{{versionsError}}" class="history-error-card">
+    <text>{{versionsError}}</text>
+    <text class="history-error-copy">正文不受影响，可下拉刷新后重试。</text>
+  </view>
 
   <view wx:if="{{versions.length}}" class="card-surface history-version-section">
     <view class="section-heading compact-heading">

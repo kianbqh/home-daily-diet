@@ -122,18 +122,30 @@ function createRecordingWx(initialEntries = [], options = {}) {
   };
   const removedFiles = [];
   const modalCalls = [];
+  const authorizationCalls = [];
+  const openSettingCalls = [];
   const recorder = {
     startCalls: [],
     stopCalls: 0,
+    resumeCalls: 0,
     offCalls: [],
+    onStart(callback) { handlers.start = callback; },
     onStop(callback) { handlers.stop = callback; },
     onError(callback) { handlers.error = callback; },
+    onPause(callback) { handlers.pause = callback; },
+    onResume(callback) { handlers.resume = callback; },
     onInterruptionBegin(callback) { handlers.interruption = callback; },
+    onInterruptionEnd(callback) { handlers.interruptionEnd = callback; },
+    offStart(callback) { if (handlers.start === callback) delete handlers.start; this.offCalls.push('start'); },
     offStop(callback) { if (handlers.stop === callback) delete handlers.stop; this.offCalls.push('stop'); },
     offError(callback) { if (handlers.error === callback) delete handlers.error; this.offCalls.push('error'); },
+    offPause(callback) { if (handlers.pause === callback) delete handlers.pause; this.offCalls.push('pause'); },
+    offResume(callback) { if (handlers.resume === callback) delete handlers.resume; this.offCalls.push('resume'); },
     offInterruptionBegin(callback) { if (handlers.interruption === callback) delete handlers.interruption; this.offCalls.push('interruption'); },
-    start(options) { this.startCalls.push(clone(options)); },
+    offInterruptionEnd(callback) { if (handlers.interruptionEnd === callback) delete handlers.interruptionEnd; this.offCalls.push('interruptionEnd'); },
+    start(options) { this.startCalls.push(clone(options)); handlers.start && handlers.start(); },
     stop() { this.stopCalls += 1; },
+    resume() { this.resumeCalls += 1; handlers.resume && handlers.resume(); },
     finish(result) { return handlers.stop && handlers.stop(result); },
   };
   const api = {
@@ -149,6 +161,25 @@ function createRecordingWx(initialEntries = [], options = {}) {
     },
     getStorageSync(key) { return clone(storageValues[key]); },
     setStorageSync(key, value) { storageValues[key] = clone(value); },
+    getSetting({ success }) {
+      const permission = options.recordPermission || 'granted';
+      const authSetting = {};
+      if (permission === 'granted') authSetting['scope.record'] = true;
+      if (permission === 'denied') authSetting['scope.record'] = false;
+      success({ authSetting });
+    },
+    authorize({ scope, success, fail }) {
+      authorizationCalls.push(scope);
+      if (options.authorizeResult === false || options.recordPermission === 'denied') {
+        fail({ errMsg: 'authorize:fail auth deny' });
+        return;
+      }
+      success({});
+    },
+    openSetting({ success }) {
+      openSettingCalls.push(true);
+      success({ authSetting: { 'scope.record': options.openSettingResult !== false } });
+    },
     showToast() {},
   };
   if (Object.hasOwn(options, 'modalResult')) {
@@ -162,6 +193,8 @@ function createRecordingWx(initialEntries = [], options = {}) {
     recorder,
     removedFiles,
     modalCalls,
+    authorizationCalls,
+    openSettingCalls,
     storageEntries: () => clone(storageValues['recipe-recording-workspaces-v1']),
     storageValue: (key) => clone(storageValues[key]),
   };
@@ -242,13 +275,17 @@ test('compact recipe draft collapses empty sections into centered add actions', 
   assert.match(editorStyles, /\.editor-empty-action\s*\{[\s\S]*?line-height:\s*\d+rpx;/);
 });
 
-test('switches a manual draft to voice without deleting it and supports the route fallback', async () => {
+test('switches a manual draft to the dedicated voice page without deleting it', async () => {
   const originalGetApp = global.getApp;
-  const originalGetCurrentPages = global.getCurrentPages;
   const originalWx = global.wx;
   const assistantCalls = [];
   global.getApp = () => ({
     globalData: {
+      store: {
+        getState: () => ({
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish 1/海', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
+      },
       recipeAssistant: {
         async getDraft(payload) {
           assistantCalls.push({ action: 'getDraft', payload });
@@ -268,68 +305,22 @@ test('switches a manual draft to voice without deleting it and supports the rout
     assert.match(draftTemplate, /wx:if="\{\{manualDraft[^}]*\}\}"[^>]*bindtap="switchToVoiceRecording"[^>]*>改用语音记录</);
 
     const transitions = [];
-    const previousDishPage = {
-      startVoiceRecipeEntry() { transitions.push('voice'); },
-    };
-    global.getCurrentPages = () => [previousDishPage, page];
     global.wx = {
-      navigateBack() { transitions.push('back'); },
-      redirectTo() { throw new Error('previous dish page should be reused'); },
+      redirectTo(options) { transitions.push(options.url); },
     };
-    await page.switchToVoiceRecording();
-    assert.deepEqual(transitions, ['voice', 'back']);
-
-    let failedBackRedirectUrl = '';
-    global.wx = {
-      navigateBack(options) {
-        if (typeof options.fail === 'function') options.fail({ errMsg: 'navigateBack:fail' });
-      },
-      redirectTo(options) { failedBackRedirectUrl = options.url; },
-    };
-    await page.switchToVoiceRecording();
-    assert.equal(failedBackRedirectUrl, '/pages/dish-edit/dish-edit?dishId=dish%201%2F%E6%B5%B7&openVoice=1');
-
-    let redirectUrl = '';
-    global.getCurrentPages = () => [page];
-    global.wx = {
-      navigateBack() { throw new Error('fallback should not navigate back'); },
-      redirectTo(options) { redirectUrl = options.url; },
-    };
-    await page.switchToVoiceRecording();
-    assert.equal(redirectUrl, '/pages/dish-edit/dish-edit?dishId=dish%201%2F%E6%B5%B7&openVoice=1');
+    assert.equal(await page.switchToVoiceRecording(), true);
+    assert.deepEqual(transitions, [
+      '/pages/recipe-recording/recipe-recording?familyId=family-internal-1&dishId=dish%201%2F%E6%B5%B7&recordId=record-saved',
+    ]);
     assert.deepEqual(assistantCalls.map((call) => call.action), ['getDraft']);
-
-    const state = {
-      family: { id: 'family-internal-1' },
-      dishes: [{ id: 'dish-1', name: '番茄炒蛋', coverImage: '', category: '', tags: [], status: 'active' }],
-      cookingRecords: [],
-      recordReviews: [],
-      members: [],
-    };
-    global.getApp = () => ({
-      globalData: {
-        store: { getState: () => state },
-        recipeAssistant: null,
-      },
-    });
-    global.wx = {};
-    const dishPage = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
-    const opened = [];
-    dishPage.startVoiceRecipeEntry = function startVoiceRecipeEntry() {
-      opened.push({ dishId: this.data.dishId, isExisting: this.data.isExisting });
-    };
-    dishPage.onLoad({ dishId: 'dish-1', openVoice: '1' });
-    assert.deepEqual(opened, [{ dishId: 'dish-1', isExisting: true }]);
   } finally {
     global.getApp = originalGetApp;
-    global.getCurrentPages = originalGetCurrentPages;
     global.wx = originalWx;
   }
 });
 
 test('switches a dirty manual draft only after its pending autosave finishes', async () => {
   const originalGetApp = global.getApp;
-  const originalGetCurrentPages = global.getCurrentPages;
   const originalWx = global.wx;
   const pendingSave = deferred();
   const operations = [];
@@ -337,6 +328,11 @@ test('switches a dirty manual draft only after its pending autosave finishes', a
   const recipe = completeRecipe({ familyNotes: ['刚补充的经验'] });
   global.getApp = () => ({
     globalData: {
+      store: {
+        getState: () => ({
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
+      },
       recipeAssistant: {
         updateDraft(payload) {
           operations.push('save');
@@ -361,12 +357,8 @@ test('switches a dirty manual draft only after its pending autosave finishes', a
     page.editGeneration = 1;
     page.lastSavedRecipeJson = JSON.stringify(completeRecipe());
     page.autosaveTimer = 23;
-    global.getCurrentPages = () => [{
-      startVoiceRecipeEntry() { operations.push('voice'); },
-    }, page];
     global.wx = {
-      navigateBack() { operations.push('back'); },
-      redirectTo() { throw new Error('the previous page should remain usable'); },
+      redirectTo() { operations.push('redirect'); },
     };
 
     const switching = page.switchToVoiceRecording();
@@ -379,18 +371,16 @@ test('switches a dirty manual draft only after its pending autosave finishes', a
     pendingSave.resolve({ draft: draftFixture({ revision: 1, recipe }) });
     await switching;
 
-    assert.deepEqual(operations, ['save', 'voice', 'back']);
+    assert.deepEqual(operations, ['save', 'redirect']);
     assert.equal(page.recipeDirty, false);
   } finally {
     global.getApp = originalGetApp;
-    global.getCurrentPages = originalGetCurrentPages;
     global.wx = originalWx;
   }
 });
 
 test('switches an incomplete manual draft to voice only after preserving the partial recipe', async () => {
   const originalGetApp = global.getApp;
-  const originalGetCurrentPages = global.getCurrentPages;
   const originalWx = global.wx;
   const operations = [];
   const updateCalls = [];
@@ -400,6 +390,11 @@ test('switches an incomplete manual draft to voice only after preserving the par
   });
   global.getApp = () => ({
     globalData: {
+      store: {
+        getState: () => ({
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
+      },
       recipeAssistant: {
         async updateDraft(payload) {
           operations.push('save');
@@ -424,23 +419,55 @@ test('switches an incomplete manual draft to voice only after preserving the par
     page.editGeneration = 1;
     page.lastSavedRecipeJson = JSON.stringify(completeRecipe());
     page.autosaveTimer = 29;
-    global.getCurrentPages = () => [{
-      startVoiceRecipeEntry() { operations.push('voice'); },
-    }, page];
     global.wx = {
-      navigateBack() { operations.push('back'); },
-      redirectTo() { throw new Error('the previous page should remain usable'); },
+      redirectTo() { operations.push('redirect'); },
     };
 
     const switched = await page.switchToVoiceRecording();
 
     assert.equal(switched, true);
-    assert.deepEqual(operations, ['save', 'voice', 'back']);
+    assert.deepEqual(operations, ['save', 'redirect']);
     assert.deepEqual(updateCalls[0].recipe, partialRecipe);
     assert.equal(page.recipeDirty, false);
   } finally {
     global.getApp = originalGetApp;
-    global.getCurrentPages = originalGetCurrentPages;
+    global.wx = originalWx;
+  }
+});
+
+test('manual draft voice switch unlocks when native navigation throws synchronously', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const toasts = [];
+  global.getApp = () => ({
+    globalData: {
+      store: {
+        getState: () => ({
+          family: { id: 'family-internal-1' },
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
+      },
+    },
+  });
+  global.wx = {
+    redirectTo() { throw new Error('navigation unavailable'); },
+    showToast(options) { toasts.push(options.title); },
+  };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-draft/recipe-draft.js'), {
+      familyId: 'family-internal-1',
+      dishId: 'dish-1',
+      draft: draftFixture(),
+      manualDraft: true,
+      manualEditing: true,
+      draftStatus: 'editing',
+    });
+
+    assert.equal(await page.switchToVoiceRecording(), false);
+    assert.equal(page.data.voiceSwitchPending, false);
+    assert.deepEqual(toasts, ['语音记录页面暂时无法打开']);
+  } finally {
+    global.getApp = originalGetApp;
     global.wx = originalWx;
   }
 });
@@ -533,7 +560,7 @@ test('recipe byte length counts a non-BMP emoji without Buffer or TextEncoder', 
   }
 });
 
-test('manual recipe entry creates a manual draft when no main exists and opens read only when it does', async () => {
+test('dish detail always opens the recipe hub before choosing voice or manual entry', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   const calls = [];
@@ -558,13 +585,13 @@ test('manual recipe entry creates a manual draft when no main exists and opens r
       recipeSummary: { hasRecipe: false },
     });
 
-    await page.openManualFamilyRecipe();
-    assert.deepEqual(calls, [{ familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'manual' }]);
-    assert.equal(navigations[0], '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=draft-1');
+    await page.openFamilyRecipe();
+    assert.deepEqual(calls, []);
+    assert.equal(navigations[0], '/pages/recipe/recipe?familyId=family-internal-1&dishId=dish-1');
 
     page.setData({ recipeSummary: { hasRecipe: true } });
-    await page.openManualFamilyRecipe();
-    assert.equal(calls.length, 1);
+    await page.openFamilyRecipe();
+    assert.deepEqual(calls, []);
     assert.equal(navigations[1], '/pages/recipe/recipe?familyId=family-internal-1&dishId=dish-1');
   } finally {
     global.getApp = originalGetApp;
@@ -572,20 +599,19 @@ test('manual recipe entry creates a manual draft when no main exists and opens r
   }
 });
 
-test('recipe error state renders a manual action that invokes the manual handler', async () => {
+test('dish recipe card exposes one hub action even when summary loading fails', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
-  const calls = [];
   const navigations = [];
   global.getApp = () => ({
     globalData: {
-      store: { getState: () => ({ family: { id: 'family-internal-1' } }) },
-      recipeAssistant: {
-        async createManualDraft(payload) {
-          calls.push(payload);
-          return { draft: draftFixture() };
-        },
+      store: {
+        getState: () => ({
+          family: { id: 'family-internal-1' },
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
       },
+      recipeAssistant: null,
     },
   });
   global.wx = { navigateTo(options) { navigations.push(options.url); }, showToast() {} };
@@ -593,8 +619,8 @@ test('recipe error state renders a manual action that invokes the manual handler
     const template = read('pages/dish-edit/dish-edit.wxml');
     const errorState = template.match(/<view wx:elif="\{\{recipeError\}\}"[\s\S]*?<\/view>/);
     assert.ok(errorState, 'recipe error state should render');
-    const action = errorState[0].match(/<button[^>]*bindtap="([^"]+)"[^>]*>直接手动填写<\/button>/);
-    assert.ok(action, 'recipe error state should render a manual action');
+    const action = errorState[0].match(/<button[^>]*bindtap="([^"]+)"[^>]*>进入家庭菜谱<\/button>/);
+    assert.ok(action, 'recipe error state should render the hub action');
 
     const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'), {
       dishId: 'dish-1',
@@ -604,45 +630,237 @@ test('recipe error state renders a manual action that invokes the manual handler
     });
     await page[action[1]]();
 
-    assert.deepEqual(calls, [{ familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'manual' }]);
-    assert.equal(navigations[0], '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=draft-1');
+    assert.equal(navigations[0], '/pages/recipe/recipe?familyId=family-internal-1&dishId=dish-1');
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;
   }
 });
 
-test('voice-first recipe entry opens the recorder, collapses extras, and keeps manual entry visible', () => {
+test('dish voice destination opens the dedicated recorder while the recipe card keeps one entry action', () => {
+  const originalGetApp = global.getApp;
   const originalWx = global.wx;
-  const scrollCalls = [];
-  global.wx = { pageScrollTo(options) { scrollCalls.push(options); } };
+  const transitions = [];
+  global.getApp = () => ({
+    globalData: {
+      store: {
+        getState: () => ({
+          family: { id: 'family-internal-1' },
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
+      },
+    },
+  });
+  global.wx = { navigateTo(options) { transitions.push(options.url); } };
   try {
     const definition = loadPage('pages/dish-edit/dish-edit.js');
     const page = createPageInstance(definition, {
       isExisting: true,
-      recordExtrasExpanded: true,
+      dishId: 'dish-1',
     });
-    let startCalls = 0;
-    page.startRecordEntry = () => {
-      startCalls += 1;
-      page.setData({ recordFormVisible: true });
-    };
 
     page.startVoiceRecipeEntry();
 
-    assert.equal(definition.data.recordExtrasExpanded, false);
-    assert.equal(startCalls, 1);
-    assert.equal(page.data.recordExtrasExpanded, false);
-    assert.deepEqual(scrollCalls, [{ selector: '#recordingWorkspaceAnchor', duration: 240 }]);
+    assert.deepEqual(transitions, [
+      '/pages/recipe-recording/recipe-recording?familyId=family-internal-1&dishId=dish-1&recordId=record-saved',
+    ]);
+    assert.equal(page.data.recordFormVisible, false);
 
     const template = read('pages/dish-edit/dish-edit.wxml');
-    assert.match(template, /语音记录做法/);
-    assert.match(template, /直接手动填写/);
-    assert.match(template, /说着做，就能生成可编辑的菜谱草稿/);
-    assert.match(template, /bindtap="openManualFamilyRecipe"/);
+    assert.doesNotMatch(template, /语音记录做法/);
+    assert.doesNotMatch(template, /直接手动填写/);
+    assert.match(template, /bindtap="openFamilyRecipe"/);
+    assert.match(template, /进入家庭菜谱/);
     assert.match(template, /补充这次信息/);
     assert.ok(template.indexOf('id="recordingWorkspaceAnchor"') < template.indexOf('这次的照片'));
   } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('recipe hub offers voice and manual paths only after navigation', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  const transitions = [];
+  const recipeAssistant = {
+    async getRecipe(payload) {
+      calls.push({ action: 'getRecipe', payload });
+      return { pointer: null, version: null };
+    },
+    async listVersions(payload) {
+      calls.push({ action: 'listVersions', payload });
+      return { versions: [] };
+    },
+    async createManualDraft(payload) {
+      calls.push({ action: 'createManualDraft', payload });
+      return { draft: draftFixture({ _id: 'hub-draft' }) };
+    },
+  };
+  global.getApp = () => ({
+    globalData: {
+      store: {
+        getState: () => ({
+          members: [],
+          cookingRecords: [{ id: 'record-saved', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+        }),
+      },
+      recipeAssistant,
+    },
+  });
+  global.wx = {
+    navigateTo(options) { transitions.push(options.url); },
+    showToast() {},
+  };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe/recipe.js'));
+
+    await page.onLoad({ familyId: 'family-internal-1', dishId: 'dish-1' });
+    assert.equal(page.data.isHistorical, false);
+    assert.equal(page.data.version, null);
+
+    assert.equal(page.startVoiceRecipeEntry(), true);
+    assert.deepEqual(transitions, [
+      '/pages/recipe-recording/recipe-recording?familyId=family-internal-1&dishId=dish-1&recordId=record-saved',
+    ]);
+
+    await page.openManualRecipe();
+    assert.deepEqual(calls.at(-1), {
+      action: 'createManualDraft',
+      payload: { familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'manual' },
+    });
+    assert.equal(transitions.at(-1), '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=hub-draft');
+
+    const template = read('pages/recipe/recipe.wxml');
+    assert.match(template, /bindtap="startVoiceRecipeEntry"/);
+    assert.match(template, /bindtap="openManualRecipe"/);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dedicated voice page recovers a workspace and opens its generated draft', () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  let navigation = '';
+  global.wx = {
+    navigateTo(options) { navigation = options.url; },
+  };
+  global.getApp = () => ({
+    globalData: {
+      store: {
+        getState: () => ({
+          cookingRecords: [{ id: 'record-recovered', dishId: 'dish-1', recordedAt: '2026-08-18T12:00:00.000Z' }],
+        }),
+      },
+    },
+  });
+  try {
+    const definition = loadPage('pages/recipe-recording/recipe-recording.js');
+    const page = createPageInstance(definition);
+    let recoveredScope = null;
+    page.selectComponent = () => ({
+      findWorkspace(scope) {
+        recoveredScope = scope;
+        return { recordId: 'record-recovered' };
+      },
+    });
+
+    page.onLoad({ familyId: 'family-1', dishId: 'dish-1' });
+    assert.equal(page.prepareWorkspace(), true);
+    assert.deepEqual(recoveredScope, { familyId: 'family-1', dishId: 'dish-1' });
+    assert.equal(page.data.recordId, 'record-recovered');
+    assert.equal(page.data.preparing, false);
+
+    assert.equal(page.onOpenRecordingDraft({ detail: { draftId: 'draft-1' } }), true);
+    assert.equal(
+      navigation,
+      '/pages/recipe-draft/recipe-draft?familyId=family-1&dishId=dish-1&draftId=draft-1',
+    );
+
+    const template = read('pages/recipe-recording/recipe-recording.wxml');
+    assert.match(template, /class="card-surface voice-workspace-card"/);
+    assert.match(template, /<recipe-recording-workspace/);
+    assert.match(template, /bindopendraft="onOpenRecordingDraft"/);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dedicated voice page refuses to create an orphan workspace without a saved cooking record', () => {
+  const originalGetApp = global.getApp;
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ cookingRecords: [] }) },
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe-recording/recipe-recording.js'));
+    page.selectComponent = () => ({ findWorkspace: () => null });
+    page.onLoad({ familyId: 'family-1', dishId: 'dish-without-records' });
+
+    assert.equal(page.prepareWorkspace(), false);
+    assert.equal(page.data.recordId, '');
+    assert.match(page.data.error, /先.*制作记录|制作记录.*再/);
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('recipe recording record resolver rejects a stale page after the current family changes', () => {
+  const { resolveRecipeRecordingRecordId } = require('../utils/recipe-recording-entry');
+  const state = {
+    family: { id: 'family-new' },
+    cookingRecords: [{ id: 'record-new', dishId: 'dish-1', recordedAt: '2026-08-19T12:00:00.000Z' }],
+  };
+
+  assert.equal(
+    resolveRecipeRecordingRecordId(state, 'dish-1', '', 'family-old'),
+    '',
+  );
+});
+
+test('recipe hub clones the current main recipe for manual editing', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const calls = [];
+  let navigation = '';
+  const recipeAssistant = {
+    async getRecipe() {
+      return {
+        pointer: { currentVersionId: 'version-1' },
+        version: {
+          _id: 'version-1', versionNumber: 1, recipe: completeRecipe(),
+          confirmedBy: 'member-1', confirmedAt: 123,
+        },
+      };
+    },
+    async listVersions() { return { versions: [] }; },
+    async createManualDraft(payload) {
+      calls.push(payload);
+      return { draft: draftFixture({ _id: 'edit-main-draft', sourceType: 'edit_main' }) };
+    },
+  };
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ members: [] }) },
+      recipeAssistant,
+    },
+  });
+  global.wx = { navigateTo(options) { navigation = options.url; }, showToast() {} };
+  try {
+    const page = createPageInstance(loadPage('pages/recipe/recipe.js'));
+    await page.onLoad({ familyId: 'family-internal-1', dishId: 'dish-1' });
+    assert.equal(await page.openManualRecipe(), true);
+    assert.deepEqual(calls, [{
+      familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'edit_main',
+    }]);
+    assert.equal(navigation, '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=edit-main-draft');
+  } finally {
+    global.getApp = originalGetApp;
     global.wx = originalWx;
   }
 });
@@ -690,7 +908,7 @@ test('dish recipe failure is isolated and lifecycle refresh does not replace rec
   }
 });
 
-test('manual recipe path reports unavailable CloudBase without breaking the dish page', async () => {
+test('recipe hub remains reachable when CloudBase summary loading is unavailable', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   const toasts = [];
@@ -711,12 +929,12 @@ test('manual recipe path reports unavailable CloudBase without breaking the dish
       recipeSummary: { hasRecipe: false },
     });
     await page.refreshRecipeSummary();
-    await page.openManualFamilyRecipe();
+    await page.openFamilyRecipe();
 
     assert.equal(page.data.recipeUnavailable, true);
     assert.equal(page.data.recipeError, '家庭菜谱需要启用 CloudBase');
-    assert.deepEqual(toasts, ['家庭菜谱需要启用 CloudBase']);
-    assert.equal(navigated, false);
+    assert.deepEqual(toasts, []);
+    assert.equal(navigated, true);
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;
@@ -1610,7 +1828,48 @@ test('failed draft can switch to manual editing or retry without a background ti
   }
 });
 
-test('recipe page loads an immutable selected version and edits main by cloning a draft', async () => {
+test('historical recipe remains visible when the optional version list fails', async () => {
+  const originalGetApp = global.getApp;
+  const recipeAssistant = {
+    async getVersion() {
+      return {
+        version: {
+          _id: 'version-2',
+          versionNumber: 2,
+          recipe: completeRecipe({
+            ingredients: [{ name: '番茄', amountText: '2 个', note: '', uncertain: false }],
+          }),
+          confirmedBy: 'member-1',
+          confirmedAt: 123,
+        },
+      };
+    },
+    async listVersions() {
+      const error = new Error('database query requires an index');
+      error.code = 'DATABASE_INDEX_REQUIRED';
+      throw error;
+    },
+  };
+  global.getApp = () => ({
+    globalData: {
+      store: { getState: () => ({ members: [{ id: 'member-1', displayName: '妈妈' }] }) },
+      recipeAssistant,
+    },
+  });
+  try {
+    const page = createPageInstance(loadPage('pages/recipe/recipe.js'));
+    await page.onLoad({ familyId: 'family-internal-1', dishId: 'dish-1', versionId: 'version-2' });
+
+    assert.equal(page.data.version._id, 'version-2');
+    assert.equal(page.data.recipe.ingredients[0].name, '番茄');
+    assert.equal(page.data.error, '');
+    assert.equal(page.data.versionsError, '历史版本暂时无法读取');
+  } finally {
+    global.getApp = originalGetApp;
+  }
+});
+
+test('recipe page loads an immutable selected version without exposing a mutation path', async () => {
   const originalGetApp = global.getApp;
   const originalWx = global.wx;
   const calls = [];
@@ -1643,12 +1902,9 @@ test('recipe page loads an immutable selected version and edits main by cloning 
     assert.equal(page.data.isHistorical, true);
     assert.equal(page.data.version.confirmedByLabel, '妈妈');
     assert.deepEqual(calls.slice(0, 2).map((call) => call.action), ['getVersion', 'listVersions']);
-    await page.editMainRecipe();
-    assert.deepEqual(calls.at(-1), {
-      action: 'createManualDraft',
-      payload: { familyId: 'family-internal-1', dishId: 'dish-1', sourceType: 'edit_main' },
-    });
-    assert.equal(navigation, '/pages/recipe-draft/recipe-draft?familyId=family-internal-1&dishId=dish-1&draftId=edit-draft');
+    assert.equal(await page.editMainRecipe(), false);
+    assert.deepEqual(calls.map((call) => call.action), ['getVersion', 'listVersions']);
+    assert.equal(navigation, '');
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;
@@ -1710,7 +1966,7 @@ test('recording purpose repeat uses stored consent without another modal', async
     definition.lifetimes.attached.call(component);
 
     assert.equal(await component.confirmRecordingPurpose(), true);
-    component.startRecording();
+    await component.startRecording();
 
     assert.equal(harness.recorder.startCalls.length, 1);
     assert.equal(harness.modalCalls.length, 0);
@@ -1737,6 +1993,65 @@ test('recording purpose cancellation leaves the recorder stopped and consent uns
 
     assert.equal(harness.recorder.startCalls.length, 0);
     assert.equal(harness.storageValue('recipe-recording-purpose-consent-v1'), undefined);
+  } finally {
+    if (component) definition.lifetimes.detached.call(component);
+    global.wx = originalWx;
+  }
+});
+
+test('recording requests scope.record before starting and declares its microphone purpose', async () => {
+  const originalWx = global.wx;
+  const harness = createRecordingWx([], {
+    recordPermission: 'prompt',
+    authorizeResult: true,
+    storage: { 'recipe-recording-purpose-consent-v1': true },
+  });
+  let definition;
+  let component;
+  global.wx = harness.api;
+  try {
+    definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    assert.equal(await component.startRecording(), true);
+    assert.deepEqual(harness.authorizationCalls, ['scope.record']);
+    assert.equal(harness.recorder.startCalls.length, 1);
+
+    const appConfig = JSON.parse(read('app.json'));
+    assert.match(appConfig.permission['scope.record'].desc, /录音|做菜|菜谱/);
+  } finally {
+    if (component) definition.lifetimes.detached.call(component);
+    global.wx = originalWx;
+  }
+});
+
+test('denied microphone permission keeps the recorder stopped and offers settings recovery', async () => {
+  const originalWx = global.wx;
+  const harness = createRecordingWx([], {
+    recordPermission: 'denied',
+    storage: { 'recipe-recording-purpose-consent-v1': true },
+  });
+  let definition;
+  let component;
+  global.wx = harness.api;
+  try {
+    definition = loadComponent('components/recipe-recording-workspace/recipe-recording-workspace.js');
+    component = createComponentInstance(definition, {
+      familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
+    });
+    definition.lifetimes.attached.call(component);
+
+    assert.equal(await component.startRecording(), false);
+    assert.equal(harness.recorder.startCalls.length, 0);
+    assert.equal(component.data.microphoneDenied, true);
+    assert.match(component.data.workspaceError, /设置.*麦克风|麦克风.*设置/);
+    assert.match(read('components/recipe-recording-workspace/recipe-recording-workspace.wxml'), /bindtap="openMicrophoneSettings"/);
+
+    assert.equal(await component.openMicrophoneSettings(), true);
+    assert.equal(harness.openSettingCalls.length, 1);
   } finally {
     if (component) definition.lifetimes.detached.call(component);
     global.wx = originalWx;
@@ -1780,7 +2095,7 @@ test('recording workspace uses native lifecycle and uploads each completed clip 
     });
     definition.lifetimes.attached.call(component);
 
-    component.startRecording();
+    await component.startRecording();
     await harness.recorder.finish({ tempFilePath: 'wxfile://tmp/clip.mp3', duration: 1200 });
     await flushPromises();
     await flushPromises();
@@ -1794,10 +2109,12 @@ test('recording workspace uses native lifecycle and uploads each completed clip 
     assert.equal(component.data.clips[0].localPath, '', 'uploaded clips must not retain a deleted local playback path');
     assert.equal(harness.storageEntries()[0].uploadStatus, 'uploaded');
 
-    component.startRecording();
+    await component.startRecording();
     assert.equal(harness.recorder.startCalls.length, 2, 'a transcribing clip must not block the next recording');
     definition.lifetimes.detached.call(component);
-    assert.deepEqual(harness.recorder.offCalls.sort(), ['error', 'interruption', 'stop']);
+    assert.deepEqual(harness.recorder.offCalls.sort(), [
+      'error', 'interruption', 'interruptionEnd', 'pause', 'resume', 'start', 'stop',
+    ]);
   } finally {
     global.getApp = originalGetApp;
     global.wx = originalWx;
@@ -1829,7 +2146,7 @@ test('recording workspace retains a local clip and offers re-upload after upload
       familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
     });
     definition.lifetimes.attached.call(component);
-    component.startRecording();
+    await component.startRecording();
     await harness.recorder.finish({ tempFilePath: 'wxfile://tmp/offline.mp3', duration: 900 });
     await flushPromises();
     await flushPromises();
@@ -1892,7 +2209,7 @@ test('submit rejection keeps saved audio recoverable after component and control
       familyId: 'family-internal-1', dishId: 'dish-1', recordId: 'record-1', disabled: false,
     });
     definition.lifetimes.attached.call(first);
-    first.startRecording();
+    await first.startRecording();
     await harness.recorder.finish({ tempFilePath: 'wxfile://tmp/recoverable.mp3', duration: 1100 });
     await flushPromises();
     await flushPromises();

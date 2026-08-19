@@ -3,11 +3,45 @@
 }
 
 .state-card,
+.recipe-entry-card,
 .recipe-meta-card,
 .recipe-section,
 .history-version-section {
   margin-top: 26rpx;
   padding: 30rpx;
+}
+
+.recipe-entry-card {
+  background: linear-gradient(145deg, #eef6f1 0%, #f7f3e9 100%);
+}
+
+.entry-title,
+.entry-copy {
+  display: block;
+}
+
+.entry-title {
+  color: #2f5545;
+  font-size: 34rpx;
+  font-weight: 700;
+}
+
+.entry-copy {
+  margin-top: 10rpx;
+  color: #737b73;
+  line-height: 1.6;
+}
+
+.entry-actions {
+  display: flex;
+  gap: 18rpx;
+  margin-top: 26rpx;
+}
+
+.entry-button {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
 }
 
 .state-card {
@@ -60,9 +94,19 @@
   text-align: center;
 }
 
-.edit-main-button {
-  width: 100%;
+.history-error-card {
   margin-top: 24rpx;
+  padding: 22rpx 26rpx;
+  border-radius: 22rpx;
+  background: #fff8e9;
+  color: #7b6040;
+}
+
+.history-error-copy {
+  display: block;
+  margin-top: 8rpx;
+  color: #8c8478;
+  font-size: 24rpx;
 }
 
 .ingredient-row,

@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "语音记录做法",
+  "enablePullDownRefresh": false,
+  "usingComponents": {
+    "recipe-recording-workspace": "/components/recipe-recording-workspace/recipe-recording-workspace"
+  }
+}

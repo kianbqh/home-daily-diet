@@ -1,6 +1,11 @@
+const crypto = require('node:crypto');
+
 const DEFAULT_REGION = 'ap-shanghai';
 const DEFAULT_ENGINE = '16k_zh';
 const TASK_TTL_MS = 24 * 60 * 60 * 1000;
+const ASR_HOST = 'asr.tencentcloudapi.com';
+const ASR_SERVICE = 'asr';
+const ASR_VERSION = '2019-06-14';
 
 function createTencentAsrProvider(options = {}) {
   const clock = typeof options.clock === 'function' ? options.clock : Date.now;
@@ -8,7 +13,8 @@ function createTencentAsrProvider(options = {}) {
   const client = options.client || createProductionClient({
     region: String(options.region || process.env.ASR_REGION || DEFAULT_REGION),
     env: options.env || process.env,
-    sdk: options.sdk,
+    fetchImpl: options.fetch,
+    clock: options.apiClock,
   });
 
   return {
@@ -53,17 +59,109 @@ function createTencentAsrProvider(options = {}) {
   };
 }
 
-function createProductionClient({ region, env, sdk }) {
-  const loaded = sdk || require('tencentcloud-sdk-nodejs-asr');
-  const Client = loaded && loaded.asr && loaded.asr.v20190614 && loaded.asr.v20190614.Client;
-  if (typeof Client !== 'function') throw new Error('Tencent ASR SDK is unavailable');
+function createProductionClient({ region, env, fetchImpl, clock }) {
   const credential = runtimeCredential(env);
   if (!credential.secretId || !credential.secretKey) throw new Error('Tencent ASR credentials are unavailable');
-  return new Client({
-    credential,
-    region,
-    profile: { httpProfile: { endpoint: 'asr.tencentcloudapi.com' } },
-  });
+  const request = createTencentApiRequester({ credential, region, fetchImpl, clock });
+  return {
+    CreateRecTask(input) { return request('CreateRecTask', input); },
+    DescribeTaskStatus(input) { return request('DescribeTaskStatus', input); },
+  };
+}
+
+function createTencentApiRequester({ credential, region, fetchImpl, clock }) {
+  const requestFetch = typeof fetchImpl === 'function' ? fetchImpl : globalThis.fetch;
+  if (typeof requestFetch !== 'function') throw new Error('Tencent ASR HTTP client is unavailable');
+  const requestClock = typeof clock === 'function' ? clock : Date.now;
+
+  return async function request(action, input) {
+    const body = JSON.stringify(input || {});
+    const headers = signRequest({
+      action,
+      body,
+      credential,
+      region,
+      timestamp: Math.floor(Number(requestClock()) / 1000),
+    });
+    const response = await requestFetch(`https://${ASR_HOST}`, {
+      method: 'POST',
+      headers,
+      body,
+    });
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw providerError('ASR_RESPONSE_INVALID', 'Tencent ASR response is not valid JSON');
+    }
+    const providerResponse = payload && payload.Response;
+    if (!response.ok) {
+      throw providerError(`ASR_HTTP_${response.status}`, `Tencent ASR HTTP ${response.status}`);
+    }
+    if (providerResponse && providerResponse.Error) {
+      throw providerError(
+        String(providerResponse.Error.Code || 'ASR_REQUEST_FAILED'),
+        String(providerResponse.Error.Message || 'Tencent ASR request failed'),
+      );
+    }
+    if (!providerResponse || typeof providerResponse !== 'object') {
+      throw providerError('ASR_RESPONSE_INVALID', 'Tencent ASR response is invalid');
+    }
+    return providerResponse;
+  };
+}
+
+function signRequest({ action, body, credential, region, timestamp }) {
+  const date = new Date(timestamp * 1000).toISOString().slice(0, 10);
+  const contentType = 'application/json; charset=utf-8';
+  const signedHeaders = 'content-type;host';
+  const canonicalHeaders = `content-type:${contentType}\nhost:${ASR_HOST}\n`;
+  const canonicalRequest = [
+    'POST',
+    '/',
+    '',
+    canonicalHeaders,
+    signedHeaders,
+    sha256(body),
+  ].join('\n');
+  const credentialScope = `${date}/${ASR_SERVICE}/tc3_request`;
+  const stringToSign = [
+    'TC3-HMAC-SHA256',
+    timestamp,
+    credentialScope,
+    sha256(canonicalRequest),
+  ].join('\n');
+  const secretDate = hmac(`TC3${credential.secretKey}`, date);
+  const secretService = hmac(secretDate, ASR_SERVICE);
+  const secretSigning = hmac(secretService, 'tc3_request');
+  const signature = hmac(secretSigning, stringToSign, 'hex');
+  const headers = {
+    Authorization: `TC3-HMAC-SHA256 Credential=${credential.secretId}/${credentialScope}, `
+      + `SignedHeaders=${signedHeaders}, Signature=${signature}`,
+    'Content-Type': contentType,
+    Host: ASR_HOST,
+    'X-TC-Action': action,
+    'X-TC-Version': ASR_VERSION,
+    'X-TC-Timestamp': String(timestamp),
+    'X-TC-Region': region,
+  };
+  if (credential.token) headers['X-TC-Token'] = credential.token;
+  return headers;
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function hmac(key, value, encoding) {
+  return crypto.createHmac('sha256', key).update(value).digest(encoding);
+}
+
+function providerError(code, message) {
+  const error = new Error(message);
+  error.name = 'TencentAsrProviderError';
+  error.code = code;
+  return error;
 }
 
 function runtimeCredential(env = {}) {

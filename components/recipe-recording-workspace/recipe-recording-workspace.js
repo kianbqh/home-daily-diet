@@ -209,10 +209,12 @@ Component({
   data: {
     clips: [],
     recording: false,
+    recordingStatus: 'idle',
     elapsedLabel: '00:00',
     remainingLabel: '03:00',
     manualTextDraft: '',
     workspaceError: '',
+    microphoneDenied: false,
     asrUnavailable: false,
     draftId: '',
     playingClipKey: '',
@@ -376,16 +378,59 @@ Component({
       return this.recordingPurposePromise;
     },
 
-    startRecording() {
-      if (this.data.disabled || this.data.recording) return;
+    async ensureMicrophonePermission() {
+      if (typeof wx === 'undefined' || typeof wx.getSetting !== 'function') return true;
+      try {
+        const settings = await callNative(wx, 'getSetting', {});
+        const authSetting = settings && settings.authSetting ? settings.authSetting : {};
+        if (authSetting['scope.record'] === true) {
+          this.setData({ microphoneDenied: false });
+          return true;
+        }
+        if (authSetting['scope.record'] === false) {
+          this.setData({
+            microphoneDenied: true,
+            workspaceError: '请在小程序设置中允许使用麦克风',
+          });
+          return false;
+        }
+        await callNative(wx, 'authorize', { scope: 'scope.record' });
+        this.setData({ microphoneDenied: false, workspaceError: '' });
+        return true;
+      } catch (error) {
+        this.setData({
+          microphoneDenied: true,
+          workspaceError: '请在小程序设置中允许使用麦克风',
+        });
+        return false;
+      }
+    },
+
+    async openMicrophoneSettings() {
+      if (typeof wx === 'undefined' || typeof wx.openSetting !== 'function') return false;
+      try {
+        const result = await callNative(wx, 'openSetting', {});
+        const authorized = Boolean(result && result.authSetting && result.authSetting['scope.record']);
+        this.setData({
+          microphoneDenied: !authorized,
+          workspaceError: authorized ? '' : '仍未允许使用麦克风，可继续添加文字说明',
+        });
+        return authorized;
+      } catch (error) {
+        return false;
+      }
+    },
+
+    async startRecording() {
+      if (this.data.disabled || this.data.recording) return false;
       const key = this.getWorkspaceKey();
       if (!key) {
         showToast('制作记录还没有准备好');
-        return;
+        return false;
       }
       if (!this.recordingController) {
         showToast('录音暂时不可用，可添加文字说明');
-        return;
+        return false;
       }
       const shouldAskPurpose = typeof wx !== 'undefined' && typeof wx.showModal === 'function';
       let consented = false;
@@ -396,16 +441,15 @@ Component({
           consented = false;
         }
       }
-      if (!shouldAskPurpose || consented) {
-        this.recordingController.start(key);
-        return true;
-      }
-      return this.confirmRecordingPurpose().then((confirmed) => {
-        const currentKey = this.getWorkspaceKey();
-        if (!confirmed || this.data.disabled || this.data.recording || !this.recordingController || !currentKey) return false;
-        this.recordingController.start(currentKey);
-        return true;
-      });
+      const confirmed = !shouldAskPurpose || consented
+        ? true
+        : await this.confirmRecordingPurpose();
+      const currentKey = this.getWorkspaceKey();
+      if (!confirmed || this.data.disabled || this.data.recording || !this.recordingController || !currentKey) return false;
+      if (!await this.ensureMicrophonePermission()) return false;
+      if (this.data.disabled || this.data.recording || !this.recordingController || currentKey !== this.getWorkspaceKey()) return false;
+      this.recordingController.start(currentKey);
+      return true;
     },
 
     stopRecording() {
@@ -417,15 +461,23 @@ Component({
       const status = String(state && state.status || 'idle');
       const errorMessages = {
         MICROPHONE_DENIED: '请授权麦克风后重试，也可以添加文字说明',
+        MICROPHONE_BUSY: '麦克风正被通话或其他应用占用，请稍后重试',
+        RECORDING_START_FAILED: '录音没有成功启动，请稍后重试',
         RECORDING_LIMIT_EXCEEDED: '每次最多 10 段、累计 15 分钟',
         LOCAL_FILE_UNAVAILABLE: '本地录音文件不可用，请重新录制',
         RECORDING_INTERRUPTED: '录音被中断，请重新录制',
       };
+      const activeStatuses = ['starting', 'recording', 'interrupted'];
+      const errorCode = String(state && state.errorCode || '');
       this.setData({
-        recording: status === 'recording',
+        recording: activeStatuses.includes(status),
+        recordingStatus: status,
         elapsedLabel: formatClock(state && state.elapsedMs),
         remainingLabel: formatClock(state && state.remainingMs == null ? 180000 : state.remainingMs),
-        workspaceError: state && state.errorCode ? errorMessages[state.errorCode] || '录音暂时不可用' : '',
+        microphoneDenied: errorCode === 'MICROPHONE_DENIED',
+        workspaceError: errorCode
+          ? errorMessages[errorCode] || '录音暂时不可用'
+          : status === 'interrupted' ? '录音因系统占用暂停，结束后会自动继续' : '',
       });
       if (!state || !state.localClip || state.localClip.workspaceKey !== this.getWorkspaceKey()) return;
       const clip = localClipView(state.localClip);
@@ -886,7 +938,8 @@ Component({
       this.setData({
         clips: [], manualTextDraft: '', draftId: '', draftStatus: '', workspaceError: '',
         organizeRequestPending: false, organizeMessage: '', pendingLabels: [],
-        recording: false, elapsedLabel: '00:00', remainingLabel: '03:00',
+        recording: false, recordingStatus: 'idle', microphoneDenied: false,
+        elapsedLabel: '00:00', remainingLabel: '03:00',
       });
       this.emitWorkspaceChange([]);
     },

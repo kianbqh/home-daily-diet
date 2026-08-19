@@ -4,6 +4,10 @@ const {
   validateDraftRecipe,
   validateRecipe,
 } = require('../../services/recipe-domain');
+const {
+  recipeRecordingUrl,
+  resolveRecipeRecordingRecordId,
+} = require('../../utils/recipe-recording-entry');
 
 function cloneRecipe(value) {
   return normalizeRecipe(JSON.parse(JSON.stringify(normalizeRecipe(value || emptyRecipe()))));
@@ -115,6 +119,7 @@ Page({
     canOrganizeSources: false,
     uncertaintyItems: [],
     playingSourceId: '',
+    voiceSwitchPending: false,
   },
 
   getRecipeAssistant() {
@@ -352,31 +357,52 @@ Page({
   async switchToVoiceRecording() {
     if (!this.data.manualDraft
       || this.data.confirming
+      || this.data.voiceSwitchPending
       || this.data.draftStatus === 'organizing'
       || this.data.draftStatus === 'confirmed'
       || (this.data.draftStatus === 'failed' && !this.data.manualEditing)) return false;
-    if (this.autosaveTimer != null || this.recipeDirty || this.saveDrainPromise) {
-      const saved = await this.saveDraftNow();
-      if (!saved) return false;
-    }
-    const redirectToVoiceRecording = () => {
+    this.setData({ voiceSwitchPending: true });
+    let switching = false;
+    try {
+      if (this.autosaveTimer != null || this.recipeDirty || this.saveDrainPromise) {
+        const saved = await this.saveDraftNow();
+        if (!saved) return false;
+      }
+      const app = typeof getApp === 'function' ? getApp() : null;
+      const store = app && app.globalData ? app.globalData.store : null;
+      const state = store && typeof store.getState === 'function' ? store.getState() : {};
+      const recordId = resolveRecipeRecordingRecordId(
+        state,
+        this.data.dishId,
+        this.data.draft && this.data.draft.recordId,
+        this.data.familyId,
+      );
+      if (!recordId) {
+        showToast('请先为这道菜保存一次制作记录');
+        return false;
+      }
       if (typeof wx === 'undefined' || typeof wx.redirectTo !== 'function') return false;
-      wx.redirectTo({
-        url: `/pages/dish-edit/dish-edit?dishId=${encodeURIComponent(this.data.dishId)}&openVoice=1`,
-      });
+      try {
+        wx.redirectTo({
+          url: recipeRecordingUrl({
+            familyId: this.data.familyId,
+            dishId: this.data.dishId,
+            recordId,
+          }),
+          fail: () => {
+            this.setData({ voiceSwitchPending: false });
+            showToast('语音记录页面暂时无法打开');
+          },
+        });
+        switching = true;
+      } catch (error) {
+        showToast('语音记录页面暂时无法打开');
+        return false;
+      }
       return true;
-    };
-    const pages = typeof getCurrentPages === 'function' ? getCurrentPages() : [];
-    const previousPage = pages.length > 1 ? pages[pages.length - 2] : null;
-    if (previousPage
-      && typeof previousPage.startVoiceRecipeEntry === 'function'
-      && typeof wx !== 'undefined'
-      && typeof wx.navigateBack === 'function') {
-      previousPage.startVoiceRecipeEntry();
-      wx.navigateBack({ delta: 1, fail: redirectToVoiceRecording });
-      return true;
+    } finally {
+      if (!switching) this.setData({ voiceSwitchPending: false });
     }
-    return redirectToVoiceRecording();
   },
 
   openConfirmedRecipe() {

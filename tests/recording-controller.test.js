@@ -39,28 +39,44 @@ function createTimer(clock) {
   };
 }
 
-function createRecorder(options = {}) {
+function createRecorder(config = {}) {
   const handlers = {};
   const recorder = {
-    startCalls: [], stopCalls: 0, cancelCalls: 0,
+    startCalls: [], stopCalls: 0, cancelCalls: 0, pauseCalls: 0, resumeCalls: 0,
     offCalls: [],
     onStart(callback) { handlers.start = callback; },
     onStop(callback) { handlers.stop = callback; },
     onError(callback) { handlers.error = callback; },
+    onPause(callback) { handlers.pause = callback; },
+    onResume(callback) { handlers.resume = callback; },
     onInterruptionBegin(callback) { handlers.interruption = callback; },
-    start(options) { this.startCalls.push(clone(options)); handlers.start?.(); },
+    onInterruptionEnd(callback) { handlers.interruptionEnd = callback; },
+    start(options) {
+      this.startCalls.push(clone(options));
+      if (!config.deferStart) handlers.start?.();
+    },
     stop() { this.stopCalls += 1; },
     cancel() { this.cancelCalls += 1; },
+    pause() { this.pauseCalls += 1; handlers.pause?.(); },
+    resume() {
+      this.resumeCalls += 1;
+      if (!config.deferResume) handlers.resume?.();
+    },
+    begin() { return handlers.start?.(); },
     finish(result) { return handlers.stop?.(result); },
     fail(error) { return handlers.error?.(error); },
-    interrupt(result) { return handlers.interruption?.(result); },
+    interrupt() { return handlers.interruption?.(); },
+    endInterruption() { return handlers.interruptionEnd?.(); },
   };
-  if (options.withoutCancel) delete recorder.cancel;
-  if (options.withOff) {
+  if (config.withoutCancel) delete recorder.cancel;
+  if (config.withOff) {
     recorder.offStart = (callback) => { recorder.offCalls.push('start'); if (handlers.start === callback) delete handlers.start; };
     recorder.offStop = (callback) => { recorder.offCalls.push('stop'); if (handlers.stop === callback) delete handlers.stop; };
     recorder.offError = (callback) => { recorder.offCalls.push('error'); if (handlers.error === callback) delete handlers.error; };
+    recorder.offPause = (callback) => { recorder.offCalls.push('pause'); if (handlers.pause === callback) delete handlers.pause; };
+    recorder.offResume = (callback) => { recorder.offCalls.push('resume'); if (handlers.resume === callback) delete handlers.resume; };
     recorder.offInterruptionBegin = (callback) => { recorder.offCalls.push('interruption'); if (handlers.interruption === callback) delete handlers.interruption; };
+    recorder.offInterruptionEnd = (callback) => { recorder.offCalls.push('interruptionEnd'); if (handlers.interruptionEnd === callback) delete handlers.interruptionEnd; };
   }
   return recorder;
 }
@@ -189,30 +205,45 @@ test('retains a session-only temporary clip when saving it fails', async () => {
   controller.destroy();
 });
 
-test('keeps a supplied interrupted file and otherwise emits RECORDING_INTERRUPTED', async () => {
-  const preserved = createController();
-  preserved.controller.start('family-1|dish-1|record-1');
-  await preserved.recorderManager.interrupt({ tempFilePath: 'wxfile://tmp/interrupted.mp3', duration: 400 });
-  assert.equal(preserved.storage.entries()[0].durationMs, 400);
-  assert.equal(preserved.storage.entries()[0].savedFilePath, 'wxfile://saved/interrupted.mp3');
-  preserved.controller.destroy();
-
-  const missing = createController();
+test('waits for RecorderManager onStart before publishing recording state', () => {
+  const recorderManager = createRecorder({ deferStart: true });
+  const { controller, timerApi } = createController({ recorderManager });
   const states = [];
-  missing.controller.on('state', (state) => states.push(state));
-  missing.controller.start('family-1|dish-1|record-1');
-  missing.recorderManager.interrupt({});
+  controller.on('state', (state) => states.push(state));
+
+  controller.start('family-1|dish-1|record-1');
   assert.deepEqual(states.at(-1), {
-    status: 'error', elapsedMs: 0, remainingMs: 180000, localClip: null, errorCode: 'RECORDING_INTERRUPTED',
+    status: 'starting', elapsedMs: 0, remainingMs: 180000, localClip: null, errorCode: null,
   });
-  assert.deepEqual(missing.storage.entries(), []);
-  missing.controller.destroy();
+  assert.equal(timerApi.activeCount(), 0);
+
+  recorderManager.begin();
+  assert.equal(states.at(-1).status, 'recording');
+  assert.equal(timerApi.activeCount(), 1);
+  controller.destroy();
 });
 
-test('retains a valid stop clip that arrives after a pathless interruption notification', async () => {
-  const { controller, recorderManager, storage } = createController();
+test('system interruption pauses elapsed time and resumes the same recording', async () => {
+  const { controller, recorderManager, storage, timerApi } = createController();
+  const states = [];
+  controller.on('state', (state) => states.push(state));
   controller.start('family-1|dish-1|record-1');
-  await recorderManager.interrupt({});
+  timerApi.advanceBy(1000);
+
+  recorderManager.interrupt();
+  assert.deepEqual(states.at(-1), {
+    status: 'interrupted', elapsedMs: 1000, remainingMs: 179000, localClip: null, errorCode: null,
+  });
+  assert.equal(timerApi.activeCount(), 0);
+  timerApi.advanceBy(5000);
+
+  recorderManager.endInterruption();
+  assert.equal(recorderManager.resumeCalls, 1);
+  assert.equal(states.at(-1).status, 'recording');
+  assert.equal(states.at(-1).elapsedMs, 1000);
+  timerApi.advanceBy(1000);
+  assert.equal(states.at(-1).elapsedMs, 2000);
+
   await recorderManager.finish({ tempFilePath: 'wxfile://tmp/late-interrupted.mp3', duration: 400 });
   assert.equal(storage.entries()[0].savedFilePath, 'wxfile://saved/late-interrupted.mp3');
   controller.destroy();
@@ -228,15 +259,26 @@ test('emits MICROPHONE_DENIED for recorder permission failures', () => {
   controller.destroy();
 });
 
-test('maps non-permission recorder failures to the stable interruption code only', () => {
+test('maps recorder occupancy to a stable busy error', () => {
   const { controller, recorderManager } = createController();
   const states = [];
   controller.on('state', (state) => states.push(state));
   controller.start('family-1|dish-1|record-1');
   recorderManager.fail({ code: 'DEVICE_BUSY', errMsg: 'hardware returned an internal code' });
   assert.deepEqual(states.at(-1), {
-    status: 'error', elapsedMs: 0, remainingMs: 180000, localClip: null, errorCode: 'RECORDING_INTERRUPTED',
+    status: 'error', elapsedMs: 0, remainingMs: 180000, localClip: null, errorCode: 'MICROPHONE_BUSY',
   });
+  controller.destroy();
+});
+
+test('maps a failure before onStart to RECORDING_START_FAILED', () => {
+  const recorderManager = createRecorder({ deferStart: true });
+  const { controller } = createController({ recorderManager });
+  const states = [];
+  controller.on('state', (state) => states.push(state));
+  controller.start('family-1|dish-1|record-1');
+  recorderManager.fail({ errMsg: 'operateRecorder:fail internal error' });
+  assert.equal(states.at(-1).errorCode, 'RECORDING_START_FAILED');
   controller.destroy();
 });
 
@@ -487,7 +529,9 @@ test('destroy unbinds RecorderManager handlers when off methods exist', () => {
   const recorderManager = createRecorder({ withOff: true });
   const { controller } = createController({ recorderManager });
   controller.destroy();
-  assert.deepEqual(recorderManager.offCalls.sort(), ['error', 'interruption', 'stop']);
+  assert.deepEqual(recorderManager.offCalls.sort(), [
+    'error', 'interruption', 'interruptionEnd', 'pause', 'resume', 'start', 'stop',
+  ]);
 });
 
 test('allocates a unique local id at an existing clock timestamp', async () => {
@@ -616,7 +660,7 @@ test('destroy stops an active recorder without cancel and leaves no timer, callb
   assert.equal(timerApi.activeCount(), 0);
   await recorderManager.finish({ tempFilePath: 'wxfile://tmp/destroyed.mp3', duration: 500 });
   assert.deepEqual(storage.entries(), []);
-  assert.equal(states.length, 1);
+  assert.deepEqual(states.map((state) => state.status), ['starting', 'recording']);
 });
 
 test('destroy cleans up even when recorder shutdown throws', () => {
@@ -627,7 +671,9 @@ test('destroy cleans up even when recorder shutdown throws', () => {
   assert.doesNotThrow(() => controller.destroy());
   assert.equal(recorderManager.stopCalls, 1);
   assert.equal(timerApi.activeCount(), 0);
-  assert.deepEqual(recorderManager.offCalls.sort(), ['error', 'interruption', 'stop']);
+  assert.deepEqual(recorderManager.offCalls.sort(), [
+    'error', 'interruption', 'interruptionEnd', 'pause', 'resume', 'start', 'stop',
+  ]);
 });
 
 test('destroy removes a saved file when deferred saveFile resolves after invalidation', async () => {

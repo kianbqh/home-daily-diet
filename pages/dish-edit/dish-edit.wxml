@@ -27,7 +27,7 @@
     <view wx:elif="{{recipeError}}" class="recipe-card-state recipe-card-error">
       <text>{{recipeError}}</text>
       <text wx:if="{{recipeUnavailable}}" class="recipe-card-support">菜品、照片、评价和制作记录仍可正常使用。</text>
-      <button wx:if="{{!isArchived}}" class="secondary-button recipe-card-button" bindtap="openManualFamilyRecipe">直接手动填写</button>
+      <button class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">进入家庭菜谱</button>
     </view>
     <block wx:elif="{{recipeSummary.hasRecipe}}">
       <view class="recipe-summary-counts">
@@ -35,13 +35,12 @@
         <text>{{recipeSummary.stepCount}} 个步骤</text>
       </view>
       <text class="recipe-confirmed-meta">{{recipeSummary.confirmedByLabel}} · {{recipeSummary.confirmedAtLabel}}</text>
-      <button class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">查看完整菜谱</button>
+      <button class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">进入家庭菜谱</button>
     </block>
     <block wx:else>
       <text class="recipe-empty-title">还没有记录做法</text>
-      <text class="recipe-empty-copy">说着做，就能生成可编辑的菜谱草稿。</text>
-      <button wx:if="{{!isArchived}}" class="primary-button recipe-card-button" bindtap="startVoiceRecipeEntry">语音记录做法</button>
-      <button wx:if="{{!isArchived}}" class="secondary-button recipe-card-button recipe-card-secondary-button" bindtap="openManualFamilyRecipe">直接手动填写</button>
+      <text class="recipe-empty-copy">进入后可以选择语音记录或手动填写。</text>
+      <button class="primary-button recipe-card-button" bindtap="openFamilyRecipe">进入家庭菜谱</button>
     </block>
   </view>
 

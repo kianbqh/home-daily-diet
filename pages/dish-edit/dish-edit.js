@@ -4,6 +4,10 @@ const { buildDishDetailViewModel } = require('../../utils/view-model');
 const { buildRecipeSummary, buildRecordRecipeState } = require('../../utils/recipe-view-model');
 const { isCloudFileId, resolveCloudFileUrls } = require('../../utils/cloud-image');
 const { syncPageFromCloud } = require('../../utils/page-refresh');
+const {
+  recipeRecordingUrl,
+  resolveRecipeRecordingRecordId,
+} = require('../../utils/recipe-recording-entry');
 
 function isoForDate(date) {
   return `${date}T12:00:00.000Z`;
@@ -170,7 +174,6 @@ Page({
     this.resolveHistoryImages(displayDetail.history, displayDetail.reviews, historyGeneration);
     this.refreshRecipeSummary();
     this.refreshRecordRecipeStates();
-    if (options.openVoice === '1') this.startVoiceRecipeEntry();
   },
 
   onShow() {
@@ -223,44 +226,18 @@ Page({
     }
   },
 
-  async openManualFamilyRecipe() {
+  openFamilyRecipe() {
     if (!this.data.dishId) return;
-    const { store, recipeAssistant } = this.getRecipeContext();
-    if (!recipeAssistant) {
-      this.setData({ recipeUnavailable: true, recipeError: '家庭菜谱需要启用 CloudBase' });
-      showToast('家庭菜谱需要启用 CloudBase');
-      return;
-    }
+    const { store } = this.getRecipeContext();
     const state = store && typeof store.getState === 'function' ? store.getState() : {};
     const familyId = String(state && state.family && state.family.id || '');
     if (!familyId) {
       showToast('家庭信息还没有准备好');
       return;
     }
-    try {
-      let url = `/pages/recipe/recipe?familyId=${encodeURIComponent(familyId)}&dishId=${encodeURIComponent(this.data.dishId)}`;
-      if (!this.data.recipeSummary || !this.data.recipeSummary.hasRecipe) {
-        if (this.data.isArchived) {
-          showToast('历史菜品不能新建菜谱');
-          return;
-        }
-        const result = await recipeAssistant.createManualDraft({
-          familyId,
-          dishId: this.data.dishId,
-          sourceType: 'manual',
-        });
-        const draftId = result && result.draft && (result.draft._id || result.draft.id);
-        if (!draftId) throw new Error('missing draft');
-        url = `/pages/recipe-draft/recipe-draft?familyId=${encodeURIComponent(familyId)}&dishId=${encodeURIComponent(this.data.dishId)}&draftId=${encodeURIComponent(draftId)}`;
-      }
-      if (typeof wx !== 'undefined' && typeof wx.navigateTo === 'function') wx.navigateTo({ url });
-    } catch (error) {
-      showToast('暂时无法打开家庭菜谱');
-    }
-  },
-
-  openFamilyRecipe() {
-    return this.openManualFamilyRecipe();
+    const archived = this.data.isArchived ? '&archived=1' : '';
+    const url = `/pages/recipe/recipe?familyId=${encodeURIComponent(familyId)}&dishId=${encodeURIComponent(this.data.dishId)}${archived}`;
+    if (typeof wx !== 'undefined' && typeof wx.navigateTo === 'function') wx.navigateTo({ url });
   },
 
   async refreshRecordRecipeStates(options = {}) {
@@ -488,11 +465,20 @@ Page({
   },
 
   startVoiceRecipeEntry() {
-    this.startRecordEntry();
-    this.setData({ recordExtrasExpanded: false });
-    if (typeof wx !== 'undefined' && typeof wx.pageScrollTo === 'function') {
-      wx.pageScrollTo({ selector: '#recordingWorkspaceAnchor', duration: 240 });
+    const familyId = this.currentFamilyId();
+    if (!this.data.isExisting || this.data.isArchived || !familyId || !this.data.dishId) return false;
+    const store = this.getStore();
+    const state = store && typeof store.getState === 'function' ? store.getState() : {};
+    const recordId = resolveRecipeRecordingRecordId(state, this.data.dishId, '', familyId);
+    if (!recordId) {
+      showToast('请先为这道菜保存一次制作记录');
+      return false;
     }
+    if (typeof wx === 'undefined' || typeof wx.navigateTo !== 'function') return false;
+    wx.navigateTo({
+      url: recipeRecordingUrl({ familyId, dishId: this.data.dishId, recordId }),
+    });
+    return true;
   },
 
   toggleRecordExtras() {

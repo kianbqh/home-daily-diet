@@ -25,6 +25,12 @@ function chooseDish(remoteItem, localItem) {
   return chooseLatest(remoteItem, localItem);
 }
 
+function chooseProfile(remoteItem, localItem, fallbackField) {
+  const remoteTime = String(remoteItem && (remoteItem.updatedAt || remoteItem[fallbackField]) || '');
+  const localTime = String(localItem && (localItem.updatedAt || localItem[fallbackField]) || '');
+  return localTime > remoteTime ? localItem : remoteItem;
+}
+
 function mergeByKey(remoteItems = [], localItems = [], keyOf, resolver = chooseLatest) {
   const merged = new Map();
   remoteItems.forEach((item) => merged.set(keyOf(item), item));
@@ -59,13 +65,30 @@ function purgeDishReferences(state) {
   };
 }
 
+function assertSameFamily(remote, local) {
+  const remoteFamilyId = String(remote && remote.family && remote.family.id || '').trim();
+  const localFamilyId = String(local && local.family && local.family.id || '').trim();
+  if (!remoteFamilyId || !localFamilyId || remoteFamilyId !== localFamilyId) {
+    const error = new Error('不能合并不同家庭的状态');
+    error.code = 'FAMILY_MISMATCH';
+    throw error;
+  }
+  return remoteFamilyId;
+}
+
 function mergeFamilyStates(remote, local) {
   if (!remote) return purgeDishReferences(local);
+  assertSameFamily(remote, local);
   const merged = {
     ...remote,
     ...local,
-    family: { ...remote.family, ...local.family },
-    members: mergeByKey(remote.members, local.members, (item) => item.id),
+    family: chooseProfile(remote.family, local.family, 'createdAt'),
+    members: mergeByKey(
+      remote.members,
+      local.members,
+      (item) => item.id,
+      (remoteMember, localMember) => chooseProfile(remoteMember, localMember, 'joinedAt')
+    ),
     dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id, chooseDish),
     cookingRecords: mergeByKey(remote.cookingRecords, local.cookingRecords, (item) => item.id),
     dishRatings: mergeByKey(
@@ -138,6 +161,11 @@ function unwrapFunctionResult(result) {
   return body.data || {};
 }
 
+function uniqueCloudFileIds(fileIds) {
+  const values = Array.isArray(fileIds) ? fileIds : [fileIds];
+  return [...new Set(values.filter((fileId) => typeof fileId === 'string' && fileId.indexOf('cloud://') === 0))];
+}
+
 function createCloudBaseSync(api, options = {}) {
   const envId = String(options.envId || '').trim();
   if (!api || !api.cloud || !envId) {
@@ -177,6 +205,12 @@ function createCloudBaseSync(api, options = {}) {
       if (!familyId) return null;
       const data = await callFunction('load', { familyId });
       return data.state || null;
+    },
+    async resolveFiles(familyId, fileIds) {
+      const ids = uniqueCloudFileIds(fileIds);
+      if (!familyId || !ids.length) return [];
+      const data = await callFunction('resolveFiles', { familyId, fileIds: ids });
+      return Array.isArray(data.files) ? data.files : [];
     },
     async save(state) {
       if (!state || !state.family || !state.family.id) {

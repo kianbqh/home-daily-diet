@@ -28,6 +28,10 @@ const { createDefaultStorage } = require('./storage');
 const { mergeFamilyStates } = require('./cloudbase-sync');
 
 const CLOUD_FALLBACK_MESSAGE = '云端连接失败，当前继续使用本地数据。';
+const PURGE_PENDING_MESSAGE = '菜品已删除，云端附件将在联网后继续清理';
+const IMAGE_URL_CACHE_MS = 30 * 60 * 1000;
+const DEFAULT_IMAGE_URL_CACHE_MAX_ENTRIES = 500;
+const MAX_RESOLVE_FILES = 50;
 
 function cloudErrorMessage(error) {
   switch (error && error.code) {
@@ -59,6 +63,7 @@ function normalizePersistedState(candidate, fallbackState) {
     id: String(candidateFamily.id || fallback.family.id || '').trim() || 'family-local',
     name: String(candidateFamily.name || fallback.family.name || '').trim() || '我们家的饭桌',
   };
+  family.updatedAt = String(candidateFamily.updatedAt || family.createdAt || '');
 
   let members = Array.isArray(candidate.members)
     ? candidate.members.filter((member) => member && member.id)
@@ -66,6 +71,11 @@ function normalizePersistedState(candidate, fallbackState) {
   if (members.length === 0) {
     members = fallback.members.map((member) => ({ ...member }));
   }
+  members = members.map((member) => ({
+    ...member,
+    joinedAt: String(member.joinedAt || family.createdAt || ''),
+    updatedAt: String(member.updatedAt || member.joinedAt || family.createdAt || ''),
+  }));
 
   let currentMemberId = String(candidate.currentMemberId || '').trim();
   if (!currentMemberId || !members.some((member) => member.id === currentMemberId)) {
@@ -105,9 +115,26 @@ function normalizePersistedState(candidate, fallbackState) {
   };
 }
 
+function sharedSnapshot(value) {
+  const snapshot = JSON.parse(JSON.stringify(value || {}));
+  delete snapshot.currentMemberId;
+  return snapshot;
+}
+
+function sharedStatesEqual(left, right) {
+  return JSON.stringify(sharedSnapshot(left)) === JSON.stringify(sharedSnapshot(right));
+}
+
 function createStore(options = {}) {
   const storage = options.storage || createDefaultStorage();
   const cloudSync = options.cloudSync || null;
+  const recipeArtifacts = options.recipeArtifacts || null;
+  const clock = options.clock || Date.now;
+  const syncIntervalMs = Number(options.syncIntervalMs || 5000);
+  const imageCacheMaxEntries = Math.max(
+    1,
+    Number(options.imageCacheMaxEntries || DEFAULT_IMAGE_URL_CACHE_MAX_ENTRIES)
+  );
   const storedState = storage.loadState();
   let state = normalizePersistedState(storedState, options.initialState || createInitialState());
   if (storedState) storage.saveState(state);
@@ -117,6 +144,115 @@ function createStore(options = {}) {
   let invite = null;
   let syncStatus = options.initialSyncStatus || (cloudSync ? 'connecting' : 'local');
   let syncMessage = options.initialSyncMessage || '';
+  let syncPromise = null;
+  let lastSuccessfulSyncAt = null;
+  let failedCloudSyncRevision = null;
+  let familyGeneration = 0;
+  let activeFamilyTransitionGeneration = null;
+  let artifactCleanupPromise = null;
+  const imageUrlCache = new Map();
+
+  function familyIdOf(value) {
+    return String(value && value.family && value.family.id || '').trim();
+  }
+
+  function captureFamilyContext() {
+    return { familyId: familyIdOf(state), generation: familyGeneration };
+  }
+
+  function isCurrentFamilyContext(context) {
+    return Boolean(context)
+      && context.generation === familyGeneration
+      && context.familyId === familyIdOf(state);
+  }
+
+  function assertStateFamily(value, expectedFamilyId) {
+    const actualFamilyId = familyIdOf(value);
+    if (!actualFamilyId || !expectedFamilyId || actualFamilyId !== expectedFamilyId) {
+      const error = new Error('家庭状态与当前家庭不一致');
+      error.code = 'FAMILY_MISMATCH';
+      throw error;
+    }
+  }
+
+  function familyContextStaleError() {
+    const error = new Error('家庭已切换，本次保存结果已失效');
+    error.code = 'FAMILY_CONTEXT_STALE';
+    return error;
+  }
+
+  function imageCacheKey(familyId, fileId) {
+    return `${familyId}\n${fileId}`;
+  }
+
+  function pruneImageUrlCache(now) {
+    imageUrlCache.forEach((entry, key) => {
+      if (!entry || entry.expiresAt <= now) imageUrlCache.delete(key);
+    });
+    while (imageUrlCache.size > imageCacheMaxEntries) {
+      const oldestKey = imageUrlCache.keys().next().value;
+      imageUrlCache.delete(oldestKey);
+    }
+  }
+
+  function beginFamilyTransition() {
+    familyGeneration += 1;
+    activeFamilyTransitionGeneration = familyGeneration;
+    syncPromise = null;
+    lastSuccessfulSyncAt = null;
+    failedCloudSyncRevision = null;
+    invite = null;
+    imageUrlCache.clear();
+    return captureFamilyContext();
+  }
+
+  async function resolveImageUrls(fileIds) {
+    const ids = [...new Set((Array.isArray(fileIds) ? fileIds : [fileIds])
+      .filter((fileId) => typeof fileId === 'string' && fileId.indexOf('cloud://') === 0))];
+    const urls = new Map();
+    const context = captureFamilyContext();
+    const now = clock();
+    pruneImageUrlCache(now);
+    const unresolved = ids.filter((fileId) => {
+      const key = imageCacheKey(context.familyId, fileId);
+      const cached = imageUrlCache.get(key);
+      if (cached && cached.expiresAt > now) {
+        urls.set(fileId, cached.url);
+        imageUrlCache.delete(key);
+        imageUrlCache.set(key, cached);
+        return false;
+      }
+      return true;
+    });
+    if (!unresolved.length || !cloudSync || typeof cloudSync.resolveFiles !== 'function') return urls;
+    const batches = [];
+    for (let index = 0; index < unresolved.length; index += MAX_RESOLVE_FILES) {
+      batches.push(unresolved.slice(index, index + MAX_RESOLVE_FILES));
+    }
+    await Promise.all(batches.map(async (batch) => {
+      try {
+        const files = await cloudSync.resolveFiles(context.familyId, batch);
+        if (!isCurrentFamilyContext(context)) return;
+        const requestedIds = new Set(batch);
+        (files || []).forEach((file) => {
+          const fileId = file && (file.fileID || file.fileId);
+          const url = file && (file.tempFileURL || file.tempFileUrl);
+          if (!requestedIds.has(fileId) || !/^https?:\/\//.test(String(url || ''))) return;
+          imageUrlCache.set(imageCacheKey(context.familyId, fileId), {
+            familyId: context.familyId,
+            fileId,
+            url,
+            expiresAt: clock() + IMAGE_URL_CACHE_MS,
+          });
+          pruneImageUrlCache(clock());
+          urls.set(fileId, url);
+        });
+      } catch (error) {
+        // Leave failed IDs uncached so the next screen refresh can retry them.
+      }
+    }));
+    return isCurrentFamilyContext(context) ? urls : new Map();
+  }
 
   function notify() {
     listeners.forEach((listener) => listener(state));
@@ -129,27 +265,67 @@ function createStore(options = {}) {
     if (changed) notify();
   }
 
-  function queueCloudSave(snapshot, revision) {
+  function queueCloudSave(snapshot, revision, context = captureFamilyContext()) {
     if (!cloudSync || typeof cloudSync.save !== 'function') return Promise.resolve(snapshot);
-    const operation = cloudSaveChain.then(() => cloudSync.save(snapshot));
+    let skipped = false;
+    const operation = cloudSaveChain.then(() => {
+      assertStateFamily(snapshot, context.familyId);
+      if (!isCurrentFamilyContext(context)
+        || activeFamilyTransitionGeneration === context.generation) {
+        skipped = true;
+        return snapshot;
+      }
+      return cloudSync.save(snapshot);
+    });
     cloudSaveChain = operation.catch(() => undefined);
     return operation
       .then((saved) => {
-        if (revision === localRevision) updateSyncStatus('ready');
+        if (!skipped
+          && isCurrentFamilyContext(context)
+          && revision === localRevision
+          && failedCloudSyncRevision !== revision) {
+          updateSyncStatus('ready');
+        }
         return saved;
       })
       .catch((error) => {
-        updateSyncStatus('error', cloudErrorMessage(error));
+        if (isCurrentFamilyContext(context)) {
+          updateSyncStatus('error', cloudErrorMessage(error));
+        }
         throw error;
       });
   }
 
-  function commit(nextState) {
+  function commitWithCloudSave(nextState) {
     state = nextState;
     localRevision += 1;
+    const snapshot = state;
+    const revision = localRevision;
+    const context = captureFamilyContext();
     storage.saveState(state);
     notify();
-    queueCloudSave(state, localRevision).catch(() => {});
+    return {
+      snapshot,
+      context,
+      save: queueCloudSave(snapshot, revision, context),
+    };
+  }
+
+  function commit(nextState) {
+    const operation = commitWithCloudSave(nextState);
+    operation.save.catch(() => {});
+    return operation.snapshot;
+  }
+
+  async function commitAndWait(nextState) {
+    const operation = commitWithCloudSave(nextState);
+    try {
+      await operation.save;
+    } catch (error) {
+      if (!isCurrentFamilyContext(operation.context)) throw familyContextStaleError();
+      throw error;
+    }
+    if (!isCurrentFamilyContext(operation.context)) throw familyContextStaleError();
     return state;
   }
 
@@ -157,62 +333,217 @@ function createStore(options = {}) {
     return state.members.find((member) => member.id === state.currentMemberId);
   }
 
+  function purgeMarker(dishId) {
+    return (state.purgedDishes || []).find((item) => item && item.dishId === dishId) || null;
+  }
+
+  function normalizeCleanupResult(value) {
+    return {
+      deletedDocuments: Math.max(0, Number(value && value.deletedDocuments) || 0),
+      deletedFiles: Math.max(0, Number(value && value.deletedFiles) || 0),
+      pendingFiles: Math.max(0, Number(value && value.pendingFiles) || 0),
+    };
+  }
+
+  function requireCleanupResult(value) {
+    const fields = ['deletedDocuments', 'deletedFiles', 'pendingFiles'];
+    const valid = value && fields.every((field) => Number.isInteger(value[field]) && value[field] >= 0);
+    if (!valid) {
+      const error = new Error('Invalid recipe cleanup result');
+      error.code = 'CLEANUP_RESULT_INVALID';
+      throw error;
+    }
+    return normalizeCleanupResult(value);
+  }
+
+  function withPurgeCleanupState(dishId, status, result, errorCode = '') {
+    const updatedAt = new Date(clock()).toISOString();
+    return {
+      ...state,
+      purgedDishes: (state.purgedDishes || []).map((item) => item && item.dishId === dishId
+        ? {
+          ...item,
+          artifactCleanupStatus: status,
+          artifactCleanupUpdatedAt: updatedAt,
+          artifactCleanupResult: result ? normalizeCleanupResult(result) : null,
+          artifactCleanupErrorCode: String(errorCode || '').slice(0, 100),
+        }
+        : item),
+    };
+  }
+
+  function pendingPurgeOutcome(dishId) {
+    return {
+      purged: true,
+      dishId,
+      cleanupPending: true,
+      message: PURGE_PENDING_MESSAGE,
+    };
+  }
+
+  async function attemptRecipeArtifactCleanup(dishId, context = captureFamilyContext()) {
+    const marker = purgeMarker(dishId);
+    if (!marker || !isCurrentFamilyContext(context)) return pendingPurgeOutcome(dishId);
+    if (!recipeArtifacts || typeof recipeArtifacts.purgeDish !== 'function') {
+      return pendingPurgeOutcome(dishId);
+    }
+    try {
+      const result = requireCleanupResult(await recipeArtifacts.purgeDish({
+        familyId: context.familyId,
+        dishId,
+      }));
+      if (!isCurrentFamilyContext(context) || !purgeMarker(dishId)) return pendingPurgeOutcome(dishId);
+      const complete = result.pendingFiles === 0;
+      commit(withPurgeCleanupState(dishId, complete ? 'complete' : 'pending', result));
+      return complete
+        ? { purged: true, dishId, cleanupPending: false, result }
+        : { ...pendingPurgeOutcome(dishId), result };
+    } catch (error) {
+      if (isCurrentFamilyContext(context) && purgeMarker(dishId)) {
+        commit(withPurgeCleanupState(dishId, 'pending', null, error && error.code));
+      }
+      return pendingPurgeOutcome(dishId);
+    }
+  }
+
+  function retryPendingRecipeArtifactCleanup() {
+    if (artifactCleanupPromise) return artifactCleanupPromise;
+    const context = captureFamilyContext();
+    const dishIds = (state.purgedDishes || [])
+      .filter((item) => item && item.dishId && item.artifactCleanupStatus !== 'complete')
+      .map((item) => item.dishId);
+    if (!dishIds.length || !recipeArtifacts || typeof recipeArtifacts.purgeDish !== 'function') {
+      return Promise.resolve([]);
+    }
+    let request = null;
+    request = (async () => {
+      const outcomes = [];
+      for (const dishId of dishIds) {
+        if (!isCurrentFamilyContext(context)) break;
+        outcomes.push(await attemptRecipeArtifactCleanup(dishId, context));
+      }
+      return outcomes;
+    })().finally(() => {
+      if (artifactCleanupPromise === request) artifactCleanupPromise = null;
+    });
+    artifactCleanupPromise = request;
+    return request;
+  }
+
+  async function performCloudSync(context) {
+    if (!cloudSync || typeof cloudSync.load !== 'function') {
+      if (isCurrentFamilyContext(context)) updateSyncStatus('local');
+      return { state, succeeded: true };
+    }
+    const localStateAtStart = state;
+    try {
+      await cloudSaveChain;
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      assertStateFamily(state, context.familyId);
+      if (typeof cloudSync.bootstrap === 'function') {
+        const bootstrapState = state;
+        const bootstrapMember = bootstrapState.members.find(
+          (member) => member.id === bootstrapState.currentMemberId
+        );
+        await cloudSync.bootstrap(bootstrapState, bootstrapMember);
+        if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      }
+      const remote = await cloudSync.load(context.familyId);
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      const latestLocalState = state;
+      assertStateFamily(latestLocalState, context.familyId);
+      if (remote) assertStateFamily(remote, context.familyId);
+      const merged = remote
+        ? mergeFamilyStates(remote, latestLocalState)
+        : latestLocalState;
+      assertStateFamily(merged, context.familyId);
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      state = normalizePersistedState(merged, latestLocalState);
+      state.currentMemberId = latestLocalState.currentMemberId;
+      storage.saveState(state);
+      notify();
+      if (!remote || !sharedStatesEqual(remote, merged)) {
+        await queueCloudSave(state, localRevision, context);
+        if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      }
+      failedCloudSyncRevision = null;
+      updateSyncStatus('ready');
+      await retryPendingRecipeArtifactCleanup();
+      return { state, succeeded: true };
+    } catch (error) {
+      if (!isCurrentFamilyContext(context)) return { state, succeeded: false, stale: true };
+      // Keep the newest local state, including edits made while the request was in flight.
+      state = state || localStateAtStart;
+      storage.saveState(state);
+      failedCloudSyncRevision = localRevision;
+      updateSyncStatus('error', cloudErrorMessage(error));
+      return { state, succeeded: false };
+    }
+  }
+
   return {
     getState() {
       return state;
     },
-    async hydrateFromCloud() {
-      if (!cloudSync || typeof cloudSync.load !== 'function') {
-        updateSyncStatus('local');
-        return state;
+    syncFromCloud({ force = false } = {}) {
+      if (syncPromise) return syncPromise;
+      if (activeFamilyTransitionGeneration === familyGeneration) return Promise.resolve(state);
+      if (!force && lastSuccessfulSyncAt !== null && clock() - lastSuccessfulSyncAt < syncIntervalMs) {
+        return Promise.resolve(state);
       }
-      const localStateAtStart = state;
-      try {
-        await cloudSaveChain;
-        if (typeof cloudSync.bootstrap === 'function') {
-          const member = currentMember();
-          await cloudSync.bootstrap(state, member);
-        }
-        const remote = await cloudSync.load(state.family.id);
-        const latestLocalState = state;
-        const merged = remote
-          ? mergeFamilyStates(remote, latestLocalState)
-          : latestLocalState;
-        state = normalizePersistedState(merged, latestLocalState);
-        state.currentMemberId = latestLocalState.currentMemberId;
-        storage.saveState(state);
-        notify();
-        await queueCloudSave(state, localRevision);
-        updateSyncStatus('ready');
-      } catch (error) {
-        // Keep the newest local state, including edits made while the request was in flight.
-        state = state || localStateAtStart;
-        storage.saveState(state);
-        updateSyncStatus('error', cloudErrorMessage(error));
-      }
-      return state;
+      const context = captureFamilyContext();
+      let request = null;
+      request = performCloudSync(context)
+        .then((result) => {
+          if (result.succeeded && !result.stale && isCurrentFamilyContext(context)) {
+            lastSuccessfulSyncAt = clock();
+          }
+          return result.state;
+        })
+        .finally(() => {
+          if (syncPromise === request) syncPromise = null;
+        });
+      syncPromise = request;
+      return request;
+    },
+    hydrateFromCloud() {
+      return this.syncFromCloud({ force: true });
     },
     async joinFamilyByInvite(code, member) {
       if (!cloudSync || typeof cloudSync.acceptInvite !== 'function') {
         throw new Error('当前还没有配置家庭云端同步');
       }
-      const result = await cloudSync.acceptInvite(code, member);
-      const remote = result && result.state ? result.state : null;
-      if (!remote) throw new Error('没有找到这个家庭空间');
-      const memberId = result.member && result.member.memberId
-        ? result.member.memberId
-        : member.id;
-      state = normalizePersistedState({ ...remote, currentMemberId: memberId }, state);
-      state.currentMemberId = memberId;
-      if (!state.members.some((item) => item.id === memberId)) {
-        state = addMember(state, { id: memberId, displayName: member.displayName });
+      const transition = beginFamilyTransition();
+      try {
+        await cloudSaveChain;
+        if (!isCurrentFamilyContext(transition)) return state;
+        const result = await cloudSync.acceptInvite(code, member);
+        if (!isCurrentFamilyContext(transition)) return state;
+        const remote = result && result.state ? result.state : null;
+        if (!remote) throw new Error('没有找到这个家庭空间');
+        const remoteFamilyId = familyIdOf(remote);
+        if (!remoteFamilyId) throw new Error('没有找到这个家庭空间');
+        const memberId = result.member && result.member.memberId
+          ? result.member.memberId
+          : member.id;
+        state = normalizePersistedState({ ...remote, currentMemberId: memberId }, state);
+        assertStateFamily(state, remoteFamilyId);
+        state.currentMemberId = memberId;
+        if (!state.members.some((item) => item.id === memberId)) {
+          state = addMember(state, { id: memberId, displayName: member.displayName });
+        }
+        localRevision += 1;
+        invite = null;
+        imageUrlCache.clear();
+        storage.saveState(state);
+        updateSyncStatus('ready');
+        notify();
+        return state;
+      } finally {
+        if (activeFamilyTransitionGeneration === transition.generation) {
+          activeFamilyTransitionGeneration = null;
+        }
       }
-      localRevision += 1;
-      invite = null;
-      storage.saveState(state);
-      updateSyncStatus('ready');
-      notify();
-      return state;
     },
     async getInvite() {
       if (!cloudSync || typeof cloudSync.getInvite !== 'function') return null;
@@ -247,14 +578,17 @@ function createStore(options = {}) {
     addCookingRecord(input, now) {
       return commit(addCookingRecord(state, input, now));
     },
-    updateFamily(input) {
-      return commit(updateFamilyProfile(state, input));
+    addCookingRecordAndWait(input, now) {
+      return commitAndWait(addCookingRecord(state, input, now));
     },
-    updateMember(input) {
+    updateFamily(input, now) {
+      return commit(updateFamilyProfile(state, input, now));
+    },
+    updateMember(input, now) {
       return commit(updateMemberProfile(state, {
         ...input,
         memberId: input.memberId || state.currentMemberId,
-      }));
+      }, now));
     },
     updateDish(input, now) {
       return commit(updateDishProfile(state, input, now));
@@ -277,9 +611,37 @@ function createStore(options = {}) {
     restoreDish(input, now) {
       return commit(restoreDish(state, input, now));
     },
-    purgeDish(input, now) {
-      return commit(purgeDish(state, input, now));
+    async purgeDish(input, now) {
+      const dishId = String(input && input.dishId || '').trim();
+      const nextState = purgeDish(state, input, now);
+      nextState.purgedDishes = (nextState.purgedDishes || []).map((item) => item.dishId === dishId
+        ? {
+          ...item,
+          artifactCleanupStatus: 'pending',
+          artifactCleanupUpdatedAt: new Date(clock()).toISOString(),
+          artifactCleanupResult: null,
+          artifactCleanupErrorCode: '',
+        }
+        : item);
+      const operation = commitWithCloudSave(nextState);
+      try {
+        await operation.save;
+      } catch (_) {
+        return pendingPurgeOutcome(dishId);
+      }
+      if (!isCurrentFamilyContext(operation.context)) return pendingPurgeOutcome(dishId);
+      return attemptRecipeArtifactCleanup(dishId, operation.context);
     },
+    getDishPurgeStatus(dishId) {
+      const marker = purgeMarker(String(dishId || '').trim());
+      if (!marker) return null;
+      return {
+        status: marker.artifactCleanupStatus || 'pending',
+        result: marker.artifactCleanupResult ? normalizeCleanupResult(marker.artifactCleanupResult) : null,
+        updatedAt: marker.artifactCleanupUpdatedAt || '',
+      };
+    },
+    retryPendingRecipeArtifactCleanup,
     getFamilySummary() {
       const summary = getFamilySummary(state);
       return {
@@ -342,6 +704,7 @@ function createStore(options = {}) {
     findSimilarDishes(name) {
       return findSimilarDishes(state, name);
     },
+    resolveImageUrls,
     async uploadImage(filePath) {
       if (!filePath || /^(cloud:\/\/|https?:\/\/)/.test(filePath)) return filePath || '';
       if (!cloudSync || typeof cloudSync.uploadImage !== 'function') {
@@ -354,4 +717,9 @@ function createStore(options = {}) {
   };
 }
 
-module.exports = { CLOUD_FALLBACK_MESSAGE, createStore, normalizePersistedState };
+module.exports = {
+  CLOUD_FALLBACK_MESSAGE,
+  PURGE_PENDING_MESSAGE,
+  createStore,
+  normalizePersistedState,
+};

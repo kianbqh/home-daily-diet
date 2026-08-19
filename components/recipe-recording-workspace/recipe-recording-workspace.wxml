@@ -1,0 +1,82 @@
+<view class="recording-workspace">
+  <view class="workspace-heading">
+    <view>
+      <text class="workspace-title">说说这次怎么做</text>
+      <text class="workspace-copy">可以分几段说，停下来后会自动上传并转成文字。</text>
+    </view>
+    <text wx:if="{{clips.length}}" class="workspace-count">{{clips.length}} / 10 段</text>
+  </view>
+
+  <view class="recording-panel {{recordingStatus === 'recording' ? 'active' : ''}}">
+    <view class="recording-time">
+      <text class="elapsed-time">{{elapsedLabel}}</text>
+      <text class="remaining-time">倒计时 {{remainingLabel}}</text>
+    </view>
+    <button wx:if="{{!recording}}" class="record-button primary-record-action" disabled="{{disabled}}" bindtap="startRecording">
+      <text class="record-icon">🎙</text>
+      <view class="record-button-copy">
+        <text class="record-button-label">开始录音</text>
+        <text class="record-button-helper">说完自动转文字</text>
+      </view>
+    </button>
+    <button wx:else class="record-button stop primary-record-action" disabled="{{disabled}}" bindtap="stopRecording">
+      <text class="record-icon">{{recordingStatus === 'interrupted' ? 'Ⅱ' : '■'}}</text>
+      <view class="record-button-copy">
+        <text class="record-button-label">{{recordingStatus === 'starting' ? '正在启动' : recordingStatus === 'interrupted' ? '录音已暂停' : '结束录音'}}</text>
+        <text class="record-button-helper">{{recordingStatus === 'starting' ? '正在启用麦克风' : recordingStatus === 'interrupted' ? '系统占用结束后会自动继续' : '录音中，点此结束'}}</text>
+      </view>
+    </button>
+  </view>
+
+  <text wx:if="{{workspaceError}}" class="workspace-message">{{workspaceError}}</text>
+  <button wx:if="{{microphoneDenied}}" class="secondary-action permission-action" bindtap="openMicrophoneSettings">打开麦克风设置</button>
+
+  <view wx:if="{{clips.length}}" class="clip-list">
+    <view wx:for="{{clips}}" wx:key="key" class="clip-card">
+      <view class="clip-head">
+        <view>
+          <text class="clip-title">{{item.sourceType === 'manual_text' ? '文字说明' : '录音片段'}} {{item.sequence || index + 1}}</text>
+          <text wx:if="{{item.durationMs}}" class="clip-duration">{{item.durationLabel}}</text>
+        </view>
+        <text class="status-pill status-{{item.displayStatus}}">{{item.statusLabel}}</text>
+      </view>
+
+      <view class="clip-actions top-actions">
+        <button class="mini-button" disabled="{{disabled || !item.canPlay}}" data-key="{{item.key}}" bindtap="playClip">{{playingClipKey === item.key ? '播放中' : '播放'}}</button>
+        <button wx:if="{{item.uploadFailed}}" class="mini-button accent" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="retryClip">重新上传</button>
+        <button wx:elif="{{item.canRetryTranscript}}" class="mini-button accent" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="retryClip">重新转写</button>
+        <button class="mini-button danger" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="deleteClip">删除</button>
+      </view>
+
+      <view wx:if="{{item.canEditTranscript}}" class="transcript-editor">
+        <textarea class="visible-native-textarea" disabled="{{disabled}}" value="{{item.editedTranscript}}" data-key="{{item.key}}" maxlength="30000" placeholder="校对或补充这段文字" bindinput="onTranscriptInput" />
+        <button class="save-transcript" disabled="{{disabled}}" data-key="{{item.key}}" bindtap="saveTranscript">保存修改</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="manual-text-panel">
+    <text class="manual-title">添加文字说明</text>
+    <text class="manual-copy">不录音也可以记录火候、用量和家里的经验。</text>
+    <textarea class="visible-native-textarea" disabled="{{disabled}}" value="{{manualTextDraft}}" maxlength="30000" placeholder="例如：最后放一点糖，鸡蛋刚凝固就盛出" bindinput="onManualTextInput" />
+    <button class="secondary-action" disabled="{{disabled || !manualTextDraft}}" bindtap="addManualText">保存文字说明</button>
+  </view>
+
+  <view wx:if="{{pendingCount}}" class="pending-summary">
+    <text>还有 {{pendingCount}} 段尚未就绪：</text>
+    <text wx:for="{{pendingLabels}}" wx:key="*this" class="pending-item">{{item}}</text>
+  </view>
+  <view wx:if="{{organizeMessage}}" class="organize-message status-{{draftStatus}}">
+    <text wx:if="{{draftStatus === 'organizing'}}">正在整理，可以离开页面</text>
+    <text wx:else>{{organizeMessage}}</text>
+  </view>
+
+  <view wx:if="{{draftStatus === 'failed'}}" class="draft-actions">
+    <button class="record-button organize-action" disabled="{{disabled || organizeRequestPending || !readyToOrganize}}" bindtap="organizeDraft">重试整理</button>
+    <button class="secondary-action draft-action" disabled="{{disabled}}" bindtap="openDraft">继续手动编辑</button>
+  </view>
+  <block wx:else>
+    <button wx:if="{{readyToOrganize && draftId && draftStatus !== 'ready' && draftStatus !== 'confirmed'}}" class="record-button organize-action" disabled="{{disabled || organizeRequestPending || draftStatus === 'organizing'}}" bindtap="organizeDraft">整理成菜谱</button>
+    <button wx:if="{{draftId && (draftStatus === 'organizing' || draftStatus === 'ready' || draftStatus === 'confirmed')}}" class="secondary-action draft-action" disabled="{{disabled}}" bindtap="openDraft">{{draftStatus === 'confirmed' ? '查看本次做法' : '打开菜谱草稿'}}</button>
+  </block>
+</view>

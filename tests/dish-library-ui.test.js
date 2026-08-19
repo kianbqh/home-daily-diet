@@ -22,12 +22,51 @@ function loadPage(relativePath) {
   return definition;
 }
 
+function loadComponent(relativePath) {
+  const modulePath = require.resolve(path.join(root, relativePath));
+  const originalComponent = global.Component;
+  let definition = null;
+  global.Component = (config) => {
+    definition = config;
+  };
+  delete require.cache[modulePath];
+  require(modulePath);
+  global.Component = originalComponent;
+  return definition;
+}
+
 function createPageInstance(definition, data = {}) {
   return {
     ...definition,
     data: { ...definition.data, ...data },
     setData(next) {
       this.data = { ...this.data, ...next };
+    },
+  };
+}
+
+function createComponentInstance(definition, data = {}) {
+  return {
+    ...definition.methods,
+    data: { ...definition.data, ...data },
+    setData(next) {
+      Object.entries(next).forEach(([key, value]) => {
+        const segments = key.split('.');
+        if (segments.length === 1) {
+          this.data[key] = value;
+          return;
+        }
+        const rootKey = segments.shift();
+        const target = { ...(this.data[rootKey] || {}) };
+        let cursor = target;
+        while (segments.length > 1) {
+          const segment = segments.shift();
+          cursor[segment] = { ...(cursor[segment] || {}) };
+          cursor = cursor[segment];
+        }
+        cursor[segments[0]] = value;
+        this.data[rootKey] = target;
+      });
     },
   };
 }
@@ -79,19 +118,64 @@ test('dish detail uses five complete visual stars and a modal profile editor', (
   assert.match(script, /editProfileVisible/);
   assert.match(script, /cancelProfileEdit\s*\(/);
   assert.match(styles, /\.detail-actions\s+button\s*\{[\s\S]*height:\s*84rpx/);
-  assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible\}\}" class="card-surface record-fields-card"/);
+  assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible && \(!isExisting \|\| recordFormVisible\)\}\}" class="card-surface record-fields-card"/);
+  assert.match(template, /wx:if="\{\{item\.displayImage\}\}"[^>]*src="\{\{item\.displayImage\}\}"/);
+  assert.match(template, /wx:if="\{\{item\.displayRecordImage\}\}"[^>]*[\s\S]*src="\{\{item\.displayRecordImage\}\}"/);
+  assert.doesNotMatch(template, /src="\{\{item\.(?:image|recordImage)\}\}"/);
 });
 
-test('cloud image helper resolves CloudBase file IDs without changing local URLs', async () => {
+test('dish detail display photos are wired to full-screen preview', () => {
+  const template = read('pages/dish-edit/dish-edit.wxml');
+
+  assert.match(template, /class="dish-hero-image"[^>]*data-src="\{\{dishCover\}\}"[^>]*bindtap="previewImage"/);
+  assert.match(template, /class="history-image"[^>]*data-src="\{\{item\.displayImage\}\}"[^>]*bindtap="previewImage"/);
+  assert.match(template, /class="review-detail-image"[^>]*data-src="\{\{item\.displayRecordImage\}\}"[^>]*bindtap="previewImage"/);
+});
+
+test('profile editor action buttons share a centered layout', () => {
+  const styles = read('pages/dish-edit/dish-edit.wxss');
+  const match = styles.match(/\.edit-profile-actions button\s*\{([^}]*)\}/);
+
+  assert.ok(match, 'profile editor action button rule should exist');
+  const rule = match[1];
+  assert.match(rule, /display:\s*flex/);
+  assert.match(rule, /align-items:\s*center/);
+  assert.match(rule, /justify-content:\s*center/);
+  assert.match(rule, /box-sizing:\s*border-box/);
+  assert.match(rule, /border-radius:\s*16rpx/);
+  assert.match(rule, /line-height:\s*1/);
+});
+
+test('existing dish details gate the append-record form behind one button', () => {
+  const template = read('pages/dish-edit/dish-edit.wxml');
+
+  assert.match(template, /wx:if="\{\{isExisting && !isArchived && !editProfileVisible && !recordFormVisible\}\}" class="card-surface record-entry-card"/);
+  assert.match(template, /class="primary-button" bindtap="startRecordEntry">追加新记录<\/button>/);
+  assert.match(template, /wx:if="\{\{!isArchived && !editProfileVisible && \(!isExisting \|\| recordFormVisible\)\}\}" class="card-surface record-fields-card"/);
+  assert.match(template, /wx:if="\{\{isExisting && recordFormVisible\}\}" class="secondary-button" disabled="\{\{recordWorkspaceBusy\}\}" bindtap="cancelRecordEntry">取消<\/button>/);
+  assert.match(template, /\{\{isExisting \? '保存这次记录' : '保存这道菜'\}\}/);
+});
+
+test('dish detail recipe card stays separate from reviews, photos, and cooking history', () => {
+  const template = read('pages/dish-edit/dish-edit.wxml');
+  const script = read('pages/dish-edit/dish-edit.js');
+
+  assert.match(template, /class="card-surface family-recipe-card"/);
+  assert.match(template, /recipeLoading/);
+  assert.match(template, /recipeError/);
+  assert.match(template, /bindtap="openFamilyRecipe"/);
+  assert.match(script, /refreshRecipeSummary\s*\(/);
+  assert.match(script, /recipeSummary/);
+  assert.match(script, /recipeLoading/);
+  assert.match(script, /recipeError/);
+});
+
+test('cloud image helper delegates CloudBase file IDs to the Store without changing local URLs', async () => {
   const { resolveCloudFileUrls } = require('../utils/cloud-image');
-  const cloudApi = {
-    getTempFileURL({ fileList, success }) {
-      success({
-        fileList: fileList.map((fileID) => ({
-          fileID,
-          tempFileURL: `https://cdn.example/${encodeURIComponent(fileID)}`,
-        })),
-      });
+  const store = {
+    async resolveImageUrls(fileIds) {
+      assert.deepEqual(fileIds, ['cloud://family/photo-1.jpg']);
+      return new Map([['cloud://family/photo-1.jpg', 'https://cdn.example/photo-1.jpg']]);
     },
   };
 
@@ -99,10 +183,36 @@ test('cloud image helper resolves CloudBase file IDs without changing local URLs
     'cloud://family/photo-1.jpg',
     'https://example.com/already-public.jpg',
     'cloud://family/photo-1.jpg',
-  ], cloudApi);
+  ], store);
 
-  assert.equal(urls.get('cloud://family/photo-1.jpg'), 'https://cdn.example/cloud%3A%2F%2Ffamily%2Fphoto-1.jpg');
+  assert.equal(urls.get('cloud://family/photo-1.jpg'), 'https://cdn.example/photo-1.jpg');
   assert.equal(urls.has('https://example.com/already-public.jpg'), false);
+});
+
+test('dish card receives a Store-resolved HTTPS image without a client cloud API', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const fileId = 'cloud://env/family-meals/family-1/photo.jpg';
+  global.getApp = () => ({
+    globalData: {
+      store: {
+        async resolveImageUrls(fileIds) {
+          assert.deepEqual(fileIds, [fileId]);
+          return new Map([[fileId, 'https://cdn.example/photo.jpg']]);
+        },
+      },
+    },
+  });
+  global.wx = undefined;
+  const card = createComponentInstance(loadComponent('components/dish-card/dish-card.js'));
+
+  card.updateDisplayDish({ id: 'dish-1', name: 'Tomato eggs', coverImage: fileId });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(card.data.displayDish.coverImage, 'https://cdn.example/photo.jpg');
+  assert.equal(card.data.displayDish.hasImage, true);
+  global.getApp = originalGetApp;
+  global.wx = originalWx;
 });
 
 test('profile edit opens as an overlay and saves without navigating away', async () => {

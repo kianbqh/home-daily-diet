@@ -1,0 +1,153 @@
+.recipe-editor {
+  display: block;
+}
+
+.editor-section {
+  margin-top: 24rpx;
+  padding: 28rpx;
+}
+
+.editor-section.is-empty {
+  padding: 24rpx 28rpx 22rpx;
+}
+
+.editor-heading,
+.item-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18rpx;
+}
+
+.section-title {
+  color: #30352f;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.section-note {
+  display: block;
+  margin-top: 8rpx;
+  color: #858a82;
+  font-size: 23rpx;
+  line-height: 1.5;
+}
+
+.editor-add {
+  flex: 0 0 auto;
+  padding: 18rpx 20rpx;
+  border-radius: 14rpx;
+  background: #e6f0ea;
+  color: #315b49;
+  font-size: 23rpx;
+  font-weight: 600;
+}
+
+.editor-empty {
+  padding: 18rpx 0 0;
+}
+
+.editor-empty-action {
+  display: block;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  margin: 0 auto;
+  padding: 0 22rpx;
+  border: 0;
+  border-radius: 999rpx;
+  background: #e6f0ea;
+  color: #315b49;
+  font-size: 23rpx;
+  font-weight: 600;
+  line-height: 52rpx;
+  text-align: center;
+}
+
+.editor-empty-action::after {
+  border: 0;
+}
+
+.editor-item,
+.compact-item {
+  margin-top: 24rpx;
+  padding-top: 24rpx;
+  border-top: 1rpx solid #eeeae2;
+}
+
+.item-number {
+  margin-bottom: 16rpx;
+  color: #535951;
+  font-size: 24rpx;
+  font-weight: 700;
+}
+
+.remove-action {
+  color: #b85c45;
+  font-size: 23rpx;
+}
+
+.visible-native-input,
+.visible-native-textarea {
+  display: block;
+  width: 100%;
+  padding: 22rpx 24rpx;
+  border: 2rpx solid #ebe7df;
+  border-radius: 18rpx;
+  background: #fbfaf7;
+  color: #2e302d;
+  font-size: 27rpx;
+  line-height: 1.5;
+}
+
+.visible-native-input {
+  min-height: 78rpx;
+}
+
+.visible-native-textarea {
+  min-height: 94rpx;
+}
+
+.visible-native-input::placeholder,
+.visible-native-textarea::placeholder {
+  color: #a4a79e;
+}
+
+.input-gap {
+  margin-top: 14rpx;
+}
+
+.two-column {
+  display: flex;
+  gap: 14rpx;
+  margin-top: 14rpx;
+}
+
+.two-column input {
+  flex: 1;
+}
+
+.compact-item {
+  position: relative;
+  padding-right: 70rpx;
+}
+
+.compact-remove {
+  position: absolute;
+  top: 42rpx;
+  right: 0;
+}
+
+.uncertainty-card {
+  border: 2rpx solid #ead8b8;
+  border-radius: 24rpx;
+  background: #fff8e9;
+}
+
+.uncertainty-item {
+  margin-top: 14rpx;
+  color: #7b6040;
+  font-size: 25rpx;
+  line-height: 1.6;
+}

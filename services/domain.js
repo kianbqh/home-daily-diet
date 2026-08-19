@@ -21,6 +21,18 @@ function makeId(prefix) {
   return `${prefix}-${Date.now()}-${idSequence}`;
 }
 
+function createCookingRecordId() {
+  return makeId('record');
+}
+
+function sameCookingRecord(existing, expected) {
+  return existing.familyId === expected.familyId
+    && existing.dishId === expected.dishId
+    && existing.recordedBy === expected.recordedBy
+    && existing.recordedAt === expected.recordedAt
+    && existing.mealType === expected.mealType;
+}
+
 function normalizeDishCategory(category) {
   const normalized = String(category || '').trim();
   return DISH_CATEGORIES.includes(normalized) ? normalized : '';
@@ -34,18 +46,21 @@ function normalizeDishTags(tags) {
 function createInitialState(options = {}) {
   const familyId = options.familyId || 'family-local';
   const memberId = options.memberId || 'member-local';
+  const createdAt = timestamp(options.createdAt);
   return {
     version: 1,
     family: {
       id: familyId,
       name: options.familyName || '我们的家',
-      createdAt: timestamp(options.createdAt),
+      createdAt,
+      updatedAt: createdAt,
     },
     currentMemberId: memberId,
     members: [{
       id: memberId,
       displayName: options.memberName || '我',
-      joinedAt: timestamp(options.createdAt),
+      joinedAt: createdAt,
+      updatedAt: createdAt,
     }],
     dishes: [],
     cookingRecords: [],
@@ -57,13 +72,14 @@ function createInitialState(options = {}) {
   };
 }
 
-function updateFamilyProfile(inputState, input = {}) {
+function updateFamilyProfile(inputState, input = {}, now) {
   const state = clone(inputState);
   const name = String(input.name || '').trim();
   if (!name) {
     throw new Error('家庭名称不能为空');
   }
   state.family.name = name;
+  state.family.updatedAt = timestamp(input.updatedAt || now);
   return state;
 }
 
@@ -75,12 +91,13 @@ function addMember(inputState, input = {}) {
     throw new Error('家庭成员信息不完整');
   }
   if (!state.members.some((member) => member.id === id)) {
-    state.members.push({ id, displayName, joinedAt: timestamp(input.joinedAt) });
+    const joinedAt = timestamp(input.joinedAt);
+    state.members.push({ id, displayName, joinedAt, updatedAt: joinedAt });
   }
   return state;
 }
 
-function updateMemberProfile(inputState, input = {}) {
+function updateMemberProfile(inputState, input = {}, now) {
   const state = clone(inputState);
   const member = state.members.find((item) => item.id === input.memberId);
   const displayName = String(input.displayName || '').trim();
@@ -88,6 +105,7 @@ function updateMemberProfile(inputState, input = {}) {
     throw new Error('成员称呼不能为空');
   }
   member.displayName = displayName;
+  member.updatedAt = timestamp(input.updatedAt || now);
   return state;
 }
 
@@ -174,8 +192,8 @@ function addCookingRecord(inputState, input = {}, now) {
   }
   const recordedAt = timestamp(input.recordedAt || now);
   const image = input.image || '';
-  state.cookingRecords.push({
-    id: makeId('record'),
+  const expected = {
+    id: input.id || createCookingRecordId(),
     familyId: state.family.id,
     dishId: dish.id,
     recordedBy: input.recordedBy || state.currentMemberId,
@@ -184,7 +202,13 @@ function addCookingRecord(inputState, input = {}, now) {
     image,
     rating: input.rating || '',
     note: input.note || '',
-  });
+  };
+  const existing = state.cookingRecords.find((record) => record.id === expected.id);
+  if (existing) {
+    if (sameCookingRecord(existing, expected)) return state;
+    throw new Error('制作记录编号已被占用');
+  }
+  state.cookingRecords.push(expected);
   dish.updatedAt = recordedAt;
   if (image) {
     dish.coverImage = image;
@@ -599,6 +623,7 @@ module.exports = {
   cancelMealSelection,
   confirmMealSession,
   createInitialState,
+  createCookingRecordId,
   createMealSession,
   deleteDish,
   getDishSummary,

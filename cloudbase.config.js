@@ -7,5 +7,7 @@ module.exports = {
   memberCollection: 'family_members',
   inviteCollection: 'family_invites',
   accessFunction: 'family-access',
+  recipeFunction: 'recipe-assistant',
+  recipeAudioPrefix: 'families/',
   fileStoragePrefix: 'family-meals/',
 };

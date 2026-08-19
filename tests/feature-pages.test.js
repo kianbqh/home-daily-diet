@@ -2,7 +2,13 @@ const fs = require('node:fs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { addDish, createInitialState } = require('../services/domain');
+const {
+  addCookingRecord,
+  addDish,
+  createInitialState,
+  updateDishProfile,
+  upsertRecordReview,
+} = require('../services/domain');
 
 function loadPage(relativePath) {
   const modulePath = require.resolve(`../${relativePath}`);
@@ -26,6 +32,706 @@ function createPageInstance(definition, data = {}) {
     },
   };
 }
+
+test('phase two recipe routes, components, and cloud function files are registered', () => {
+  const appConfig = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+  const recipeDraftConfig = JSON.parse(fs.readFileSync('pages/recipe-draft/recipe-draft.json', 'utf8'));
+  const dishDetailConfig = JSON.parse(fs.readFileSync('pages/dish-edit/dish-edit.json', 'utf8'));
+  const requiredFiles = [
+    'pages/recipe/recipe.js',
+    'pages/recipe/recipe.wxml',
+    'pages/recipe-draft/recipe-draft.js',
+    'pages/recipe-draft/recipe-draft.wxml',
+    'components/recipe-editor/recipe-editor.js',
+    'components/recipe-recording-workspace/recipe-recording-workspace.js',
+    'cloudfunctions/recipe-assistant/index.js',
+    'cloudfunctions/recipe-assistant/providers/tencent-asr.js',
+    'cloudfunctions/recipe-assistant/providers/tokenhub.js',
+    'cloudfunctions/recipe-assistant/package-lock.json',
+  ];
+
+  assert.equal(appConfig.pages.includes('pages/recipe/recipe'), true);
+  assert.equal(appConfig.pages.includes('pages/recipe-draft/recipe-draft'), true);
+  assert.equal(
+    recipeDraftConfig.usingComponents['recipe-editor'],
+    '/components/recipe-editor/recipe-editor'
+  );
+  assert.equal(
+    dishDetailConfig.usingComponents['recipe-recording-workspace'],
+    '/components/recipe-recording-workspace/recipe-recording-workspace'
+  );
+  requiredFiles.forEach((file) => assert.equal(fs.existsSync(file), true, file));
+});
+
+test('refreshable pages expose pull-down lifecycle methods and enable native refresh globally', () => {
+  const appConfig = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+  const pagePaths = [
+    'pages/index/index.js',
+    'pages/dishes/dishes.js',
+    'pages/dish-edit/dish-edit.js',
+    'pages/meal/meal.js',
+    'pages/family/family.js',
+    'pages/trash/trash.js',
+  ];
+
+  assert.equal(appConfig.window.enablePullDownRefresh, true);
+  pagePaths.forEach((pagePath) => {
+    const definition = loadPage(pagePath);
+    assert.equal(typeof definition.onPullDownRefresh, 'function', `${pagePath} should refresh on pull-down`);
+  });
+});
+
+test('refreshable page onShow handlers run their automatic sync paths', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const state = createInitialState({ memberId: 'member-1' });
+  const summary = {
+    id: 'family-1',
+    name: '我们家',
+    memberCount: 1,
+    members: [{ id: 'member-1', displayName: '我' }],
+    inviteCode: '',
+    syncStatus: 'ready',
+  };
+  let syncCalls = 0;
+  const store = {
+    async syncFromCloud() { syncCalls += 1; },
+    getState() { return state; },
+    getFamilySummary() { return summary; },
+    async getInvite() { return null; },
+    getMeal() { return null; },
+    ensureMeal() {},
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const pagePaths = [
+    'pages/index/index.js',
+    'pages/dishes/dishes.js',
+    'pages/dish-edit/dish-edit.js',
+    'pages/meal/meal.js',
+    'pages/family/family.js',
+    'pages/trash/trash.js',
+  ];
+
+  try {
+    pagePaths.forEach((pagePath) => {
+      const page = createPageInstance(loadPage(pagePath));
+      assert.doesNotThrow(() => page.onShow(), `${pagePath} should start automatic sync`);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(syncCalls, pagePaths.length);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail previews the tapped photo with all resolved detail photos', () => {
+  const originalWx = global.wx;
+  let previewOptions = null;
+  global.wx = {
+    previewImage(options) {
+      previewOptions = options;
+    },
+  };
+  const coverUrl = 'https://cdn.example/cover.jpg';
+  const recordUrl = 'https://cdn.example/record.jpg';
+  const reviewUrl = 'https://cdn.example/review.jpg';
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'), {
+    dishCover: coverUrl,
+    history: [
+      { id: 'record-1', displayImage: recordUrl },
+      { id: 'record-2', displayImage: '' },
+    ],
+    reviews: [
+      { id: 'review-1', displayRecordImage: reviewUrl },
+      { id: 'review-2', displayRecordImage: recordUrl },
+      { id: 'review-3', displayRecordImage: 'cloud://env/unresolved.jpg' },
+    ],
+  });
+
+  try {
+    page.previewImage({ currentTarget: { dataset: { src: recordUrl } } });
+
+    assert.deepEqual(previewOptions, {
+      current: recordUrl,
+      urls: [coverUrl, recordUrl, reviewUrl],
+    });
+  } finally {
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail lifecycle refreshes server fields without clearing review or record-photo drafts', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  let state = addDish(createInitialState({ memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: '初始菜名',
+    image: 'cloud://family-meals/family-1/initial.jpg',
+  }, '2026-08-09T10:00:00.000Z');
+  const recordId = state.cookingRecords[0].id;
+  let syncCalls = 0;
+  let stopCalls = 0;
+  const store = {
+    async syncFromCloud() {
+      syncCalls += 1;
+      const suffix = syncCalls === 1 ? 'automatic' : 'manual';
+      state = {
+        ...state,
+        dishes: state.dishes.map((dish) => ({
+          ...dish,
+          name: `${suffix} server dish`,
+          coverImage: `cloud://family-meals/family-1/${suffix}-cover.jpg`,
+        })),
+        cookingRecords: state.cookingRecords.map((record) => ({
+          ...record,
+          image: `cloud://family-meals/family-1/${suffix}-record.jpg`,
+        })),
+      };
+    },
+    getState() { return state; },
+    resolveImageUrls(ids) {
+      return Promise.resolve(new Map(ids.map((id) => [id, `https://cdn.example/${id.slice('cloud://'.length)}`])));
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {
+    showToast() {},
+    stopPullDownRefresh() { stopCalls += 1; },
+  };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    await new Promise((resolve) => setImmediate(resolve));
+    page.setData({
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '草稿评价',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+    });
+
+    page.onShow();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual({
+      name: page.data.name,
+      dishCover: page.data.dishCover,
+      recordImage: page.data.history[0].displayImage,
+      reviewingRecordId: page.data.reviewingRecordId,
+      reviewStars: page.data.reviewStars,
+      reviewText: page.data.reviewText,
+      image: page.data.image,
+      displayImage: page.data.displayImage,
+    }, {
+      name: 'automatic server dish',
+      dishCover: 'https://cdn.example/family-meals/family-1/automatic-cover.jpg',
+      recordImage: 'https://cdn.example/family-meals/family-1/automatic-record.jpg',
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '草稿评价',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+    });
+
+    await page.onPullDownRefresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual({
+      name: page.data.name,
+      dishCover: page.data.dishCover,
+      recordImage: page.data.history[0].displayImage,
+      reviewingRecordId: page.data.reviewingRecordId,
+      reviewStars: page.data.reviewStars,
+      reviewText: page.data.reviewText,
+      image: page.data.image,
+      displayImage: page.data.displayImage,
+      syncCalls,
+      stopCalls,
+    }, {
+      name: 'manual server dish',
+      dishCover: 'https://cdn.example/family-meals/family-1/manual-cover.jpg',
+      recordImage: 'https://cdn.example/family-meals/family-1/manual-record.jpg',
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '草稿评价',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+      syncCalls: 2,
+      stopCalls: 1,
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail ignores late image resolutions from an older snapshot', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  let state = addDish(createInitialState({ memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: '旧菜名',
+    image: 'cloud://family-meals/family-1/old-cover.jpg',
+  }, '2026-08-09T10:00:00.000Z');
+  const recordId = state.cookingRecords[0].id;
+  const requests = [];
+  const newCoverId = 'cloud://family-meals/family-1/new-cover.jpg';
+  const newRecordId = 'cloud://family-meals/family-1/new-record.jpg';
+  const store = {
+    async syncFromCloud() {
+      state = {
+        ...state,
+        dishes: state.dishes.map((dish) => ({
+          ...dish,
+          name: '新菜名',
+          coverImage: newCoverId,
+        })),
+        cookingRecords: state.cookingRecords.map((record) => ({
+          ...record,
+          image: newRecordId,
+        })),
+      };
+    },
+    getState() { return state; },
+    resolveImageUrls(ids) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      requests.push({ ids, resolve });
+      return promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = { showToast() {} };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    assert.deepEqual(requests.map((request) => request.ids), [
+      ['cloud://family-meals/family-1/old-cover.jpg'],
+      ['cloud://family-meals/family-1/old-cover.jpg'],
+    ]);
+    page.setData({
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '保留草稿',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+    });
+
+    page.onShow();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests.slice(-2).map((request) => request.ids), [
+      [newCoverId],
+      [newRecordId],
+    ]);
+
+    requests[requests.length - 2].resolve(new Map([[newCoverId, 'https://cdn/new/new-cover.jpg']]));
+    requests[requests.length - 1].resolve(new Map([[newRecordId, 'https://cdn/new/new-record.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual({
+      name: page.data.name,
+      dishCover: page.data.dishCover,
+      recordImage: page.data.history[0].displayImage,
+    }, {
+      name: '新菜名',
+      dishCover: 'https://cdn/new/new-cover.jpg',
+      recordImage: 'https://cdn/new/new-record.jpg',
+    });
+
+    requests.slice(0, -2).forEach((request, index) => {
+      request.resolve(new Map([[
+        'cloud://family-meals/family-1/old-cover.jpg',
+        index % 2 === 0 ? 'https://cdn/old/old-cover.jpg' : 'https://cdn/old/old-record.jpg',
+      ]]));
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual({
+      name: page.data.name,
+      dishCover: page.data.dishCover,
+      recordImage: page.data.history[0].displayImage,
+      reviewingRecordId: page.data.reviewingRecordId,
+      reviewStars: page.data.reviewStars,
+      reviewText: page.data.reviewText,
+      image: page.data.image,
+      displayImage: page.data.displayImage,
+    }, {
+      name: '新菜名',
+      dishCover: 'https://cdn/new/new-cover.jpg',
+      recordImage: 'https://cdn/new/new-record.jpg',
+      reviewingRecordId: recordId,
+      reviewStars: 4.5,
+      reviewText: '保留草稿',
+      image: 'wxfile://pending-record-photo.jpg',
+      displayImage: 'wxfile://pending-record-photo.jpg',
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('profile edit transitions do not stale an in-flight history image resolution', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://family-meals/family-1/history.jpg';
+  const authorizedImageUrl = 'https://cdn.example/family-meals/family-1/history.jpg';
+  const state = addDish(createInitialState({ memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Deferred history dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    resolveImageUrls(ids) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      requests.push({ ids, resolve });
+      return promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    page.startProfileEdit();
+    page.cancelProfileEdit();
+
+    assert.ok(requests.length >= 2, 'onLoad should start deferred history resolution');
+    requests.forEach((request) => {
+      request.resolve(new Map(request.ids.map((id) => [id, authorizedImageUrl])));
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.data.history[0].image, cloudImageId);
+    assert.equal(page.data.history[0].displayImage, authorizedImageUrl);
+    assert.match(page.data.history[0].displayImage, /^https:\/\//);
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail keeps durable history image ids and empty display URLs when initial resolution fails', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/history-failure.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Resolution failure dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  const recordId = state.cookingRecords[0].id;
+  state = upsertRecordReview(state, {
+    dishId: 'dish-1',
+    recordId,
+    memberId: 'member-1',
+    stars: 4.5,
+    text: 'Still private',
+  }, '2026-08-09T11:00:00.000Z');
+  const store = {
+    getState() { return state; },
+    async resolveImageUrls() { throw new Error('temporary URL unavailable'); },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual({
+      historyFileId: page.data.history[0].image,
+      historyDisplayUrl: page.data.history[0].displayImage,
+      reviewFileId: page.data.reviews[0].recordImage,
+      reviewDisplayUrl: page.data.reviews[0].displayRecordImage,
+    }, {
+      historyFileId: cloudImageId,
+      historyDisplayUrl: '',
+      reviewFileId: cloudImageId,
+      reviewDisplayUrl: '',
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail partial history resolution never falls back to unresolved cloud ids', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const firstImageId = 'cloud://env/family-meals/family-1/first.jpg';
+  const secondImageId = 'cloud://env/family-meals/family-1/second.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Partial resolution dish',
+    image: firstImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  state = addCookingRecord(state, {
+    dishId: 'dish-1',
+    image: secondImageId,
+    recordedAt: '2026-08-10T10:00:00.000Z',
+  }, '2026-08-10T10:00:00.000Z');
+  state = state.cookingRecords.reduce((nextState, record, index) => upsertRecordReview(nextState, {
+    dishId: 'dish-1',
+    recordId: record.id,
+    memberId: 'member-1',
+    stars: index ? 4 : 5,
+    text: `Review ${index + 1}`,
+  }, `2026-08-${11 + index}T10:00:00.000Z`), state);
+  const store = {
+    getState() { return state; },
+    async resolveImageUrls() {
+      return new Map([[firstImageId, 'https://cdn.example/first.jpg']]);
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {};
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const expectedHistoryIds = state.cookingRecords
+      .map((record) => ({ id: record.id, image: record.image }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const actualHistoryIds = page.data.history
+      .map((record) => ({ id: record.id, image: record.image }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    assert.deepEqual(actualHistoryIds, expectedHistoryIds);
+    const historyByFileId = new Map(page.data.history.map((record) => [record.image, record]));
+    const reviewsByFileId = new Map(page.data.reviews.map((review) => [review.recordImage, review]));
+
+    assert.equal(historyByFileId.get(firstImageId).displayImage, 'https://cdn.example/first.jpg');
+    assert.equal(historyByFileId.get(secondImageId).displayImage, '');
+    assert.equal(reviewsByFileId.get(firstImageId).displayRecordImage, 'https://cdn.example/first.jpg');
+    assert.equal(reviewsByFileId.get(secondImageId).displayRecordImage, '');
+    assert.deepEqual([...historyByFileId.keys()].sort(), [firstImageId, secondImageId].sort());
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('submitting a review restarts history resolution and ignores the older request', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/review-history.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Review mutation dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  state = {
+    ...state,
+    dishes: state.dishes.map((dish) => ({ ...dish, coverImage: '' })),
+  };
+  const recordId = state.cookingRecords[0].id;
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    rateRecord(input) {
+      state = upsertRecordReview(state, {
+        ...input,
+        memberId: state.currentMemberId,
+      }, '2026-08-09T12:00:00.000Z');
+    },
+    resolveImageUrls(ids) {
+      let resolve;
+      const request = { ids, settled: false };
+      request.promise = new Promise((done) => {
+        resolve = (value) => {
+          request.settled = true;
+          done(value);
+        };
+      });
+      request.resolve = resolve;
+      requests.push(request);
+      return request.promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = { showToast() {} };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1' });
+    page.setData({ reviewingRecordId: recordId, reviewStars: 4.5, reviewText: 'Fresh review' });
+    page.submitReview();
+
+    assert.equal(requests.length, 2);
+    requests[1].resolve(new Map([[cloudImageId, 'https://cdn.example/new-review-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    requests[0].resolve(new Map([[cloudImageId, 'https://cdn.example/stale-review-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.data.history[0].image, cloudImageId);
+    assert.equal(page.data.history[0].displayImage, 'https://cdn.example/new-review-history.jpg');
+    assert.equal(page.data.reviews[0].recordImage, cloudImageId);
+    assert.equal(page.data.reviews[0].displayRecordImage, 'https://cdn.example/new-review-history.jpg');
+  } finally {
+    requests.filter((request) => !request.settled).forEach((request) => request.resolve(new Map()));
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('saving a dish profile restarts history resolution and ignores the older request', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const cloudImageId = 'cloud://env/family-meals/family-1/profile-history.jpg';
+  let state = addDish(createInitialState({ familyId: 'family-1', memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: 'Profile mutation dish',
+    image: cloudImageId,
+  }, '2026-08-09T10:00:00.000Z');
+  state = {
+    ...state,
+    dishes: state.dishes.map((dish) => ({ ...dish, coverImage: '' })),
+  };
+  const requests = [];
+  const store = {
+    getState() { return state; },
+    updateDish(input) {
+      state = updateDishProfile(state, input);
+    },
+    resolveImageUrls(ids) {
+      let resolve;
+      const request = { ids, settled: false };
+      request.promise = new Promise((done) => {
+        resolve = (value) => {
+          request.settled = true;
+          done(value);
+        };
+      });
+      request.resolve = resolve;
+      requests.push(request);
+      return request.promise;
+    },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = { showToast() {} };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1', mode: 'edit' });
+    page.setData({ nameDraft: 'Updated profile mutation dish' });
+    await page.save();
+
+    assert.equal(requests.length, 2);
+    requests[1].resolve(new Map([[cloudImageId, 'https://cdn.example/new-profile-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+    requests[0].resolve(new Map([[cloudImageId, 'https://cdn.example/stale-profile-history.jpg']]));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.data.history[0].image, cloudImageId);
+    assert.equal(page.data.history[0].displayImage, 'https://cdn.example/new-profile-history.jpg');
+  } finally {
+    requests.filter((request) => !request.settled).forEach((request) => request.resolve(new Map()));
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('dish detail lifecycle does not overwrite an active profile edit draft', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const state = addDish(createInitialState({ memberId: 'member-1' }), {
+    id: 'dish-1',
+    name: '服务器菜名',
+    image: 'cloud://family-meals/family-1/server-cover.jpg',
+  }, '2026-08-09T10:00:00.000Z');
+  let syncCalls = 0;
+  let stopCalls = 0;
+  const store = {
+    async syncFromCloud() { syncCalls += 1; },
+    getState() { return state; },
+    resolveImageUrls() { return Promise.resolve(new Map()); },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {
+    showToast() {},
+    stopPullDownRefresh() { stopCalls += 1; },
+  };
+  const page = createPageInstance(loadPage('pages/dish-edit/dish-edit.js'));
+
+  try {
+    page.onLoad({ dishId: 'dish-1', mode: 'edit' });
+    await new Promise((resolve) => setImmediate(resolve));
+    page.setData({
+      nameDraft: '本地资料草稿',
+      image: 'wxfile://pending-profile-photo.jpg',
+      displayImage: 'wxfile://pending-profile-photo.jpg',
+      selectedTags: ['家常'],
+    });
+
+    page.onShow();
+    await new Promise((resolve) => setImmediate(resolve));
+    await page.onPullDownRefresh();
+
+    assert.deepEqual({
+      nameDraft: page.data.nameDraft,
+      image: page.data.image,
+      displayImage: page.data.displayImage,
+      selectedTags: page.data.selectedTags,
+      syncCalls,
+      stopCalls,
+    }, {
+      nameDraft: '本地资料草稿',
+      image: 'wxfile://pending-profile-photo.jpg',
+      displayImage: 'wxfile://pending-profile-photo.jpg',
+      selectedTags: ['家常'],
+      syncCalls: 2,
+      stopCalls: 1,
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
+
+test('meal pull-down during invite joining stops native refresh without syncing or creating a meal', async () => {
+  const originalGetApp = global.getApp;
+  const originalWx = global.wx;
+  const state = addDish(
+    createInitialState({ memberId: 'member-1' }),
+    { name: '番茄炒蛋' },
+    '2026-08-09T10:00:00.000Z'
+  );
+  let syncCalls = 0;
+  let ensuredMeals = 0;
+  let stopCalls = 0;
+  const store = {
+    async syncFromCloud() { syncCalls += 1; },
+    getState() { return state; },
+    getMeal() { return null; },
+    ensureMeal() { ensuredMeals += 1; },
+  };
+  global.getApp = () => ({ globalData: { store } });
+  global.wx = {
+    stopPullDownRefresh() { stopCalls += 1; },
+  };
+  const page = createPageInstance(loadPage('pages/meal/meal.js'), {
+    date: '2026-08-09',
+    joining: true,
+  });
+
+  try {
+    await page.onPullDownRefresh();
+    assert.deepEqual({ syncCalls, ensuredMeals, stopCalls }, {
+      syncCalls: 0,
+      ensuredMeals: 0,
+      stopCalls: 1,
+    });
+  } finally {
+    global.getApp = originalGetApp;
+    global.wx = originalWx;
+  }
+});
 
 test('existing dish page saves a member rating and exposes removal separately from recording', async () => {
   const originalGetApp = global.getApp;

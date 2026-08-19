@@ -1,0 +1,288 @@
+.recording-workspace {
+  color: #2e302d;
+}
+
+.workspace-heading,
+.clip-head,
+.recording-time {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20rpx;
+}
+
+.workspace-title,
+.manual-title {
+  display: block;
+  font-size: 32rpx;
+  font-weight: 700;
+}
+
+.workspace-copy,
+.manual-copy {
+  display: block;
+  margin-top: 8rpx;
+  color: #777d75;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.workspace-count {
+  flex: none;
+  color: #8a6c58;
+  font-size: 24rpx;
+}
+
+.recording-panel {
+  margin-top: 28rpx;
+  padding: 28rpx;
+  border-radius: 24rpx;
+  background: #f6f1e9;
+}
+
+.recording-panel.active {
+  background: #f8e9e3;
+}
+
+.recording-time {
+  align-items: baseline;
+}
+
+.elapsed-time {
+  font-size: 42rpx;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.remaining-time {
+  color: #777d75;
+  font-size: 24rpx;
+}
+
+.record-button,
+.secondary-action,
+.save-transcript {
+  margin: 20rpx 0 0;
+  border: 0;
+  border-radius: 999rpx;
+  background: #678267;
+  color: #fff;
+  font-size: 26rpx;
+  line-height: 72rpx;
+}
+
+.primary-record-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 128rpx;
+  padding: 18rpx 32rpx;
+  text-align: left;
+  line-height: 1.2;
+  box-shadow: 0 12rpx 24rpx rgba(70, 102, 70, 0.2);
+}
+
+.record-icon {
+  width: 58rpx;
+  height: 58rpx;
+  margin-right: 18rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-size: 34rpx;
+  line-height: 58rpx;
+  text-align: center;
+}
+
+.record-button-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.record-button-label {
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.record-button-helper {
+  margin-top: 6rpx;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 22rpx;
+}
+
+.record-button.stop {
+  background: #b85c45;
+  box-shadow: 0 12rpx 24rpx rgba(184, 92, 69, 0.22);
+}
+
+.record-button::after,
+.secondary-action::after,
+.save-transcript::after,
+.mini-button::after {
+  border: 0;
+}
+
+.record-button[disabled],
+.secondary-action[disabled],
+.save-transcript[disabled],
+.mini-button[disabled] {
+  opacity: 0.45;
+}
+
+.workspace-message,
+.pending-summary,
+.organize-message {
+  display: block;
+  margin-top: 18rpx;
+  padding: 18rpx 20rpx;
+  border-radius: 18rpx;
+  background: #fff4dd;
+  color: #7c5f2d;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.pending-item {
+  display: block;
+  margin-top: 6rpx;
+}
+
+.organize-message {
+  background: #eaf2ed;
+  color: #315b49;
+}
+
+.organize-message.status-failed {
+  background: #fff0eb;
+  color: #934735;
+}
+
+.draft-actions {
+  display: flex;
+  gap: 16rpx;
+}
+
+.draft-actions button {
+  flex: 1;
+}
+
+.organize-action {
+  margin-top: 20rpx;
+}
+
+.clip-list {
+  margin-top: 24rpx;
+}
+
+.clip-card {
+  margin-top: 18rpx;
+  padding: 22rpx;
+  border: 1rpx solid #e5ded3;
+  border-radius: 22rpx;
+  background: #fff;
+}
+
+.clip-title {
+  font-size: 28rpx;
+  font-weight: 650;
+}
+
+.clip-duration {
+  margin-left: 12rpx;
+  color: #858b83;
+  font-size: 22rpx;
+}
+
+.status-pill {
+  flex: none;
+  padding: 6rpx 14rpx;
+  border-radius: 999rpx;
+  background: #eeeae4;
+  color: #686d66;
+  font-size: 22rpx;
+}
+
+.status-ready {
+  background: #e5f0e4;
+  color: #4d704f;
+}
+
+.status-failed {
+  background: #f7e6e1;
+  color: #a04d3a;
+}
+
+.status-transcribing {
+  background: #e8edf5;
+  color: #536b8e;
+}
+
+.clip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+
+.top-actions {
+  margin-top: 18rpx;
+}
+
+.mini-button {
+  margin: 0;
+  padding: 0 22rpx;
+  border: 0;
+  border-radius: 999rpx;
+  background: #f0eee9;
+  color: #535850;
+  font-size: 23rpx;
+  line-height: 56rpx;
+}
+
+.mini-button.accent {
+  background: #e4ede2;
+  color: #4e714f;
+}
+
+.mini-button.danger {
+  background: #f7e9e5;
+  color: #a5503d;
+}
+
+.transcript-editor,
+.manual-text-panel {
+  margin-top: 22rpx;
+}
+
+.visible-native-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 150rpx;
+  padding: 20rpx;
+  border: 1rpx solid #ddd6ca;
+  border-radius: 18rpx;
+  background: #fffdf9;
+  color: #2e302d;
+  font-size: 26rpx;
+  line-height: 1.6;
+}
+
+.save-transcript,
+.secondary-action {
+  background: #eef2eb;
+  color: #4f6d50;
+  line-height: 64rpx;
+}
+
+.manual-text-panel {
+  padding-top: 24rpx;
+  border-top: 1rpx solid #ece6dc;
+}
+
+.manual-text-panel .visible-native-textarea {
+  margin-top: 18rpx;
+}
+
+.draft-action {
+  margin-top: 20rpx;
+}

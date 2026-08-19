@@ -133,6 +133,68 @@ test('cloud function merge also keeps deletion tombstones and explicit restores 
   assert.equal(restored.dishes[0].restoredAt, '2026-08-08T13:00:00.000Z');
 });
 
+test('cloud function merge keeps newer remote family and member profiles', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile',
+    familyName: '新的家庭名',
+    memberId: 'member-1',
+    memberName: '妈妈',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile',
+    familyName: '我的家庭',
+    memberId: 'member-1',
+    memberName: '我',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-01T00:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-01T00:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '新的家庭名');
+  assert.equal(merged.members[0].displayName, '妈妈');
+});
+
+test('cloud function merge keeps remote family and member profiles on equal timestamps', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '云端家庭',
+    memberId: 'member-1',
+    memberName: '云端成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '本地家庭',
+    memberId: 'member-1',
+    memberName: '本地成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '云端家庭');
+  assert.equal(merged.members[0].displayName, '云端成员');
+});
+
+test('cloud function merge rejects snapshots from different families', () => {
+  const familyA = createInitialState({ familyId: 'family-a' });
+  const familyB = createInitialState({ familyId: 'family-b' });
+
+  assert.throws(
+    () => mergeFamilyStates(familyA, familyB),
+    (error) => error && error.code === 'FAMILY_MISMATCH'
+  );
+});
+
 async function invoke(db, event, openid, options = {}) {
   return handleAction(event, { OPENID: openid }, db, {
     now: '2026-08-04T10:00:00.000Z',
@@ -237,6 +299,99 @@ test('createInvite and acceptInvite create a shared member', async () => {
   assert.equal(joined.data.member.openid, undefined);
 });
 
+test('acceptInvite versions a joined member and preserves a later rename through merge', async () => {
+  const state = createInitialState({
+    familyId: 'family-1',
+    familyName: 'Test Family',
+    memberId: 'member-1',
+    memberName: 'Dad',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': state },
+  });
+
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1', { now: '2026-08-02T00:00:00.000Z' });
+  const invite = await invoke(db, {
+    action: 'createInvite',
+    familyId: 'family-1',
+  }, 'openid-1', { now: '2026-08-02T01:00:00.000Z' });
+
+  const joined = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-2',
+    displayName: 'Xiaoming',
+  }, 'openid-2', { now: '2026-08-03T00:00:00.000Z' });
+  const joinedMember = joined.data.state.members.find((member) => member.id === 'member-2');
+  assert.equal(joinedMember.joinedAt, '2026-08-03T00:00:00.000Z');
+  assert.equal(joinedMember.updatedAt, '2026-08-03T00:00:00.000Z');
+
+  const renamed = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-2',
+    displayName: 'Little Ming',
+  }, 'openid-2', { now: '2026-08-04T00:00:00.000Z' });
+  const renamedMember = renamed.data.state.members.find((member) => member.id === 'member-2');
+  assert.equal(renamedMember.displayName, 'Little Ming');
+  assert.equal(renamedMember.updatedAt, '2026-08-04T00:00:00.000Z');
+});
+
+test('repeat invite acceptance uses the existing OPENID membership id instead of a new device id', async () => {
+  const state = createInitialState({
+    familyId: 'family-1',
+    memberId: 'member-owner',
+    memberName: 'Owner',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': state },
+  });
+
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-owner',
+    displayName: 'Owner',
+  }, 'openid-owner', { now: '2026-08-02T00:00:00.000Z' });
+  const invite = await invoke(db, {
+    action: 'createInvite',
+    familyId: 'family-1',
+  }, 'openid-owner', { now: '2026-08-02T01:00:00.000Z' });
+
+  const first = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-canonical',
+    displayName: 'First device name',
+  }, 'openid-repeat', { now: '2026-08-03T00:00:00.000Z' });
+  const repeated = await invoke(db, {
+    action: 'acceptInvite',
+    code: invite.data.invite.code,
+    memberId: 'member-new-device',
+    displayName: 'Second device name',
+  }, 'openid-repeat', { now: '2026-08-04T00:00:00.000Z' });
+
+  assert.equal(first.data.member.memberId, 'member-canonical');
+  assert.equal(repeated.data.member.memberId, 'member-canonical');
+  assert.deepEqual(
+    repeated.data.state.members
+      .filter((member) => ['member-canonical', 'member-new-device'].includes(member.id))
+      .map((member) => ({ id: member.id, displayName: member.displayName })),
+    [{ id: 'member-canonical', displayName: 'Second device name' }]
+  );
+  const authenticatedMemberships = [...db.records('family_members').values()]
+    .filter((member) => member.familyId === 'family-1' && member.openid === 'openid-repeat');
+  assert.equal(authenticatedMemberships.length, 1);
+  assert.equal(authenticatedMemberships[0].memberId, 'member-canonical');
+});
+
 test('non-members cannot load a family state', async () => {
   const db = createMemoryDatabase({
     family_states: { 'family-1': familyState('family-1') },
@@ -244,6 +399,220 @@ test('non-members cannot load a family state', async () => {
   await assert.rejects(
     () => invoke(db, { action: 'load', familyId: 'family-1' }, 'openid-outsider'),
     (error) => error.code === 'NOT_MEMBER'
+  );
+});
+
+test('resolves only a member family image path and denies other requested files', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [
+      'cloud://env/family-meals/family-1/photo.jpg',
+      'cloud://env/family-meals/family-2/private.jpg',
+    ],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL({ fileList }) {
+        return {
+          fileList: fileList.map((fileID) => ({
+            fileID,
+            tempFileURL: `https://cdn/${fileID.split('/').pop()}`,
+          })),
+        };
+      },
+    },
+  });
+
+  assert.equal(resolved.data.files[0].tempFileURL, 'https://cdn/photo.jpg');
+  assert.equal(resolved.data.files[1].code, 'FILE_ACCESS_DENIED');
+});
+
+test('rejects prefixed and nested family roots without calling the file SDK', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  let fileApiCalls = 0;
+  const fileIds = [
+    'cloud://env/other/family-meals/family-1/photo.jpg',
+    'cloud://env/family-meals/family-2/nested/family-meals/family-1/private.jpg',
+  ];
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds,
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL() {
+        fileApiCalls += 1;
+        return { fileList: [] };
+      },
+    },
+  });
+
+  assert.equal(fileApiCalls, 0);
+  assert.deepEqual(resolved.data.files, fileIds.map((fileID) => ({
+    fileID,
+    tempFileURL: '',
+    code: 'FILE_ACCESS_DENIED',
+  })));
+});
+
+test('preserves duplicate resolveFiles results in original request order', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const first = 'cloud://env/family-meals/family-1/first.jpg';
+  const second = 'cloud://env/family-meals/family-1/second.jpg';
+  let requestedFromSdk = [];
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [first, second, first],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL({ fileList }) {
+        requestedFromSdk = fileList;
+        return {
+          fileList: fileList.map((fileID) => ({
+            fileID,
+            tempFileURL: `https://cdn/${fileID.split('/').pop()}`,
+          })),
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(requestedFromSdk, [first, second]);
+  assert.deepEqual(resolved.data.files.map((file) => file.fileID), [first, second, first]);
+  assert.deepEqual(resolved.data.files.map((file) => file.tempFileURL), [
+    'https://cdn/first.jpg',
+    'https://cdn/second.jpg',
+    'https://cdn/first.jpg',
+  ]);
+});
+
+test('keeps denied files denied when the SDK returns only partial file results', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const successful = 'cloud://env/family-meals/family-1/photo.jpg';
+  const failed = 'cloud://env/family-meals/family-1/missing.jpg';
+  const denied = 'cloud://env/family-meals/family-2/private.jpg';
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [successful, failed, denied],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL() {
+        return {
+          fileList: [
+            { fileID: successful, tempFileURL: 'https://cdn/photo.jpg' },
+            { fileID: failed, code: 'FILE_NOT_FOUND', tempFileURL: '' },
+          ],
+        };
+      },
+    },
+  });
+
+  assert.equal(resolved.data.files[0].tempFileURL, 'https://cdn/photo.jpg');
+  assert.equal(resolved.data.files[1].code, 'FILE_RESOLVE_FAILED');
+  assert.equal(resolved.data.files[2].code, 'FILE_ACCESS_DENIED');
+});
+
+test('converts rejected SDK lookups into per-file failures without overriding denial', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+  const allowed = 'cloud://env/family-meals/family-1/photo.jpg';
+  const denied = 'cloud://env/family-meals/family-2/private.jpg';
+
+  const resolved = await invoke(db, {
+    action: 'resolveFiles',
+    familyId: 'family-1',
+    fileIds: [allowed, denied],
+  }, 'openid-1', {
+    fileApi: {
+      async getTempFileURL() {
+        throw new Error('storage unavailable');
+      },
+    },
+  });
+
+  assert.equal(resolved.data.files[0].code, 'FILE_RESOLVE_FAILED');
+  assert.equal(resolved.data.files[1].code, 'FILE_ACCESS_DENIED');
+});
+
+test('non-members cannot resolve family image URLs', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+
+  await assert.rejects(
+    () => invoke(db, {
+      action: 'resolveFiles',
+      familyId: 'family-1',
+      fileIds: ['cloud://env/family-meals/family-1/photo.jpg'],
+    }, 'openid-outsider'),
+    (error) => error.code === 'NOT_MEMBER'
+  );
+});
+
+test('rejects resolveFiles requests with more than fifty unique cloud file IDs', async () => {
+  const db = createMemoryDatabase({
+    family_states: { 'family-1': familyState('family-1') },
+  });
+  await invoke(db, {
+    action: 'bootstrap',
+    familyId: 'family-1',
+    memberId: 'member-1',
+    displayName: 'Dad',
+  }, 'openid-1');
+
+  await assert.rejects(
+    () => invoke(db, {
+      action: 'resolveFiles',
+      familyId: 'family-1',
+      fileIds: Array.from({ length: 51 }, (_, index) => `cloud://env/family-meals/family-1/${index}.jpg`),
+    }, 'openid-1'),
+    (error) => error.code === 'FILE_LIMIT_EXCEEDED'
   );
 });
 

@@ -4,7 +4,7 @@
   <view class="page-subtitle">{{isArchived ? '这道菜已在回收站，历史制作记录和评价仍可查看。' : (isExisting ? '每次制作都单独留一条记录，评价也对应这一次。' : '先记下菜名，照片、分类和餐次都可以按需要补充。')}}</view>
 
   <view wx:if="{{isExisting}}" class="card-surface dish-hero-card">
-    <image wx:if="{{dishCover}}" class="dish-hero-image" src="{{dishCover}}" mode="aspectFill" />
+    <image wx:if="{{dishCover}}" class="dish-hero-image" data-src="{{dishCover}}" bindtap="previewImage" src="{{dishCover}}" mode="aspectFill" />
     <view wx:else class="dish-hero-placeholder">
       <text class="dish-hero-icon">🥢</text>
       <text>还没有封面照片</text>
@@ -16,6 +16,32 @@
       <text wx:for="{{selectedTags}}" wx:key="*this" class="dish-badge">{{item}}</text>
     </view>
     <view wx:if="{{isArchived}}" class="archived-label">已移入回收站</view>
+  </view>
+
+  <view wx:if="{{isExisting}}" class="card-surface family-recipe-card">
+    <view class="section-heading compact-heading recipe-card-heading">
+      <view class="section-title">家庭菜谱</view>
+      <text wx:if="{{recipeSummary.hasRecipe}}" class="section-count">第 {{recipeSummary.versionNumber}} 版</text>
+    </view>
+    <view wx:if="{{recipeLoading}}" class="recipe-card-state">正在读取菜谱…</view>
+    <view wx:elif="{{recipeError}}" class="recipe-card-state recipe-card-error">
+      <text>{{recipeError}}</text>
+      <text wx:if="{{recipeUnavailable}}" class="recipe-card-support">菜品、照片、评价和制作记录仍可正常使用。</text>
+      <button class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">进入家庭菜谱</button>
+    </view>
+    <block wx:elif="{{recipeSummary.hasRecipe}}">
+      <view class="recipe-summary-counts">
+        <text>{{recipeSummary.ingredientCount}} 种食材</text>
+        <text>{{recipeSummary.stepCount}} 个步骤</text>
+      </view>
+      <text class="recipe-confirmed-meta">{{recipeSummary.confirmedByLabel}} · {{recipeSummary.confirmedAtLabel}}</text>
+      <button class="secondary-button recipe-card-button" bindtap="openFamilyRecipe">进入家庭菜谱</button>
+    </block>
+    <block wx:else>
+      <text class="recipe-empty-title">还没有记录做法</text>
+      <text class="recipe-empty-copy">进入后可以选择语音记录或手动填写。</text>
+      <button class="primary-button recipe-card-button" bindtap="openFamilyRecipe">进入家庭菜谱</button>
+    </block>
   </view>
 
   <view wx:if="{{isExisting}}" class="card-surface rating-section">
@@ -31,9 +57,13 @@
     </view>
   </view>
 
-  <view wx:if="{{isExisting && !isArchived}}" class="detail-actions">
+  <view wx:if="{{isExisting && !isArchived && !recordFormVisible}}" class="detail-actions">
     <button class="secondary-button" bindtap="startProfileEdit">编辑菜品信息</button>
     <button class="danger-button" bindtap="deleteCurrentDish">移入回收站</button>
+  </view>
+
+  <view wx:if="{{isExisting && !isArchived && !editProfileVisible && !recordFormVisible}}" class="card-surface record-entry-card">
+    <button class="primary-button" bindtap="startRecordEntry">追加新记录</button>
   </view>
 
   <view wx:if="{{isExisting && history.length}}" class="card-surface history-section">
@@ -43,7 +73,7 @@
     </view>
     <view wx:for="{{history}}" wx:key="id" class="history-card">
       <view class="history-media">
-        <image wx:if="{{item.image}}" class="history-image" src="{{item.image}}" mode="aspectFill" />
+        <image wx:if="{{item.displayImage}}" class="history-image" data-src="{{item.displayImage}}" bindtap="previewImage" src="{{item.displayImage}}" mode="aspectFill" />
         <view wx:else class="history-placeholder">🍽</view>
       </view>
       <view class="history-content">
@@ -53,6 +83,17 @@
         </view>
         <text class="history-meta">{{item.reviewLabel}}</text>
         <text wx:if="{{item.myReview}}" class="history-own-review">我给了 {{item.myReview.stars}} 星</text>
+        <view class="history-recipe-state state-{{item.recipeState || 'none'}}">
+          <text wx:if="{{item.recipeStateLoading}}">做法状态读取中…</text>
+          <block wx:elif="{{item.recipeStateError}}">
+            <text>{{item.recipeStateError}}</text>
+            <button class="history-recipe-retry" data-record-id="{{item.id}}" bindtap="retryRecordRecipeState">重试</button>
+          </block>
+          <block wx:else>
+            <text>{{item.recipeLabel || '暂无做法'}}</text>
+            <button wx:if="{{item.recipeActionLabel}}" class="history-recipe-action" data-record-id="{{item.id}}" bindtap="openRecordRecipe">{{item.recipeActionLabel}}</button>
+          </block>
+        </view>
         <button wx:if="{{item.canReview}}" class="history-review-button" data-record-id="{{item.id}}" bindtap="startReview">{{item.myReview ? '修改这次评价' : '评价这次制作'}}</button>
       </view>
     </view>
@@ -93,8 +134,8 @@
           <text class="review-stars-label">{{item.starsLabel}}</text>
         </view>
         <text wx:if="{{item.text}}" class="review-text">{{item.text}}</text>
-        <view wx:if="{{item.recordImage}}" class="review-record-photo">
-          <image src="{{item.recordImage}}" mode="aspectFill" />
+        <view wx:if="{{item.displayRecordImage}}" class="review-record-photo">
+          <image class="review-detail-image" data-src="{{item.displayRecordImage}}" bindtap="previewImage" src="{{item.displayRecordImage}}" mode="aspectFill" />
           <text>这次制作</text>
         </view>
       </view>
@@ -145,12 +186,33 @@
     </scroll-view>
   </view>
 
-  <view wx:if="{{!isArchived && !editProfileVisible}}" class="card-surface record-fields-card">
+  <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible)}}" class="card-surface record-fields-card">
+    <view class="section-heading compact-heading record-section-heading">
+      <view class="section-title">本次记录</view>
+    </view>
     <view class="record-field">
       <text class="form-label">菜名 <text class="required">*</text></text>
       <input class="visible-native-input {{isExisting && !isEditingProfile ? 'readonly' : ''}}" value="{{nameDraft}}" disabled="{{isExisting && !isEditingProfile}}" placeholder="例如：番茄炒蛋" bindinput="onNameInput" />
     </view>
+  </view>
 
+  <view wx:if="{{isExisting && !isArchived}}" hidden="{{!recordFormVisible || editProfileVisible}}" id="recordingWorkspaceAnchor" class="card-surface recording-workspace-card">
+    <recipe-recording-workspace
+      id="recipeRecordingWorkspace"
+      family-id="{{recordingFamilyKey}}"
+      dish-id="{{dishId}}"
+      record-id="{{recordIdDraft}}"
+      disabled="{{recordWorkspaceBusy}}"
+      bindworkspacechange="onRecordingWorkspaceChange"
+      bindopendraft="onOpenRecordingDraft"
+    />
+  </view>
+
+  <view wx:if="{{isExisting && !isEditingProfile && recordFormVisible}}" class="record-extras-toggle">
+    <button class="secondary-button" disabled="{{recordWorkspaceBusy}}" bindtap="toggleRecordExtras">{{recordExtrasExpanded ? '收起补充信息' : '补充这次信息'}}</button>
+  </view>
+
+  <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible) && (!isExisting || isEditingProfile || recordExtrasExpanded)}}" class="card-surface record-fields-card record-extras-card">
     <view wx:if="{{!isExisting || isEditingProfile}}" class="record-field choice-field">
       <text class="form-label">菜品分类 <text class="optional">可选</text></text>
       <view class="chip-wrap">
@@ -191,7 +253,10 @@
     </view>
   </view>
 
-  <view wx:if="{{!isArchived && !editProfileVisible}}" class="card-surface dish-actions-card sticky-action">
-    <button class="primary-button" bindtap="save">{{isEditingProfile ? '保存菜品信息' : (isExisting ? '追加这次记录' : '保存这道菜')}}</button>
+  <view wx:if="{{!isArchived && !editProfileVisible && (!isExisting || recordFormVisible)}}" class="card-surface dish-actions-card sticky-action">
+    <view class="record-form-actions">
+      <button wx:if="{{isExisting && recordFormVisible}}" class="secondary-button" disabled="{{recordWorkspaceBusy}}" bindtap="cancelRecordEntry">取消</button>
+      <button class="primary-button" disabled="{{recordWorkspaceBusy}}" bindtap="save">{{isExisting ? '保存这次记录' : '保存这道菜'}}</button>
+    </view>
   </view>
 </view>

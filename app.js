@@ -4,6 +4,7 @@ const cloudbaseConfig = require('./cloudbase.config.js');
 App({
   globalData: {
     store: null,
+    recipeAssistant: null,
     cloudInitError: null,
   },
   onLaunch() {
@@ -12,6 +13,7 @@ App({
       config: cloudbaseConfig,
     });
     this.globalData.store = result.store;
+    this.globalData.recipeAssistant = result.recipeAssistant;
     this.globalData.cloudInitError = result.cloudInitError;
     result.store.hydrateFromCloud();
   },

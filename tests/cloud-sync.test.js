@@ -188,6 +188,68 @@ test('cloudbase sync merges append-only family changes before saving', async () 
   assert.equal(merged.cookingRecords.length, 2);
 });
 
+test('family-state merge rejects snapshots from different families', () => {
+  const familyA = createInitialState({ familyId: 'family-a' });
+  const familyB = createInitialState({ familyId: 'family-b' });
+
+  assert.throws(
+    () => mergeFamilyStates(familyA, familyB),
+    (error) => error && error.code === 'FAMILY_MISMATCH'
+  );
+});
+
+test('newer remote family and member profiles beat stale local defaults', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile',
+    familyName: '新的家庭名',
+    memberId: 'member-1',
+    memberName: '妈妈',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile',
+    familyName: '我的家庭',
+    memberId: 'member-1',
+    memberName: '我',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-01T00:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-01T00:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '新的家庭名');
+  assert.equal(merged.members[0].displayName, '妈妈');
+});
+
+test('equal family and member profile timestamps keep remote values', () => {
+  const remote = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '云端家庭',
+    memberId: 'member-1',
+    memberName: '云端成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  remote.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  remote.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const local = createInitialState({
+    familyId: 'family-profile-tie',
+    familyName: '本地家庭',
+    memberId: 'member-1',
+    memberName: '本地成员',
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  local.family.updatedAt = '2026-08-09T10:00:00.000Z';
+  local.members[0].updatedAt = '2026-08-09T10:00:00.000Z';
+
+  const merged = mergeFamilyStates(remote, local);
+  assert.equal(merged.family.name, '云端家庭');
+  assert.equal(merged.members[0].displayName, '云端成员');
+});
+
 test('cloudbase sync uses family-access for load and never reads the state collection directly', async () => {
   const fake = createFakeCloudApi();
   const sync = createCloudBaseSync(fake.api, { envId: 'env-test', accessFunction: 'family-access' });
@@ -199,6 +261,27 @@ test('cloudbase sync uses family-access for load and never reads the state colle
     data: { action: 'load', familyId: 'family-1' },
   });
   assert.equal((fake.calls.collections || []).length, 0);
+});
+
+test('cloudbase sync resolves only unique cloud file IDs through family-access', async () => {
+  const fake = createFakeCloudApi();
+  const sync = createCloudBaseSync(fake.api, { envId: 'env-test', accessFunction: 'family-access' });
+
+  const files = await sync.resolveFiles('family-1', [
+    'cloud://env/family-meals/family-1/photo.jpg',
+    'https://cdn.example/already-public.jpg',
+    'cloud://env/family-meals/family-1/photo.jpg',
+  ]);
+
+  assert.deepEqual(files, []);
+  assert.deepEqual(fake.calls.functions[0], {
+    name: 'family-access',
+    data: {
+      action: 'resolveFiles',
+      familyId: 'family-1',
+      fileIds: ['cloud://env/family-meals/family-1/photo.jpg'],
+    },
+  });
 });
 
 test('cloudbase sync labels transport failures with the action that failed', async () => {

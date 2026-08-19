@@ -1,0 +1,54 @@
+[
+  {
+    "id": "fictional-tomato-eggs",
+    "transcript": "鸡蛋两个打散，番茄两个切块。锅里放少许油，先用中火炒鸡蛋，盛出来后再炒番茄，最后合在一起加少许盐。",
+    "expectedFacts": [
+      "ingredient.name=鸡蛋",
+      "ingredient=鸡蛋|2个",
+      "ingredient.name=番茄",
+      "ingredient=番茄|2个",
+      "ingredient.name=油",
+      "ingredient=油|少许",
+      "ingredient.name=盐",
+      "ingredient=盐|少许",
+      "step.instruction=鸡蛋打散",
+      "step.instruction=番茄切块",
+      "step.instruction=锅里放少许油",
+      "step.instruction=炒鸡蛋",
+      "step.heat=中火",
+      "step.instruction=盛出鸡蛋",
+      "step.instruction=炒番茄",
+      "step.instruction=鸡蛋和番茄合炒",
+      "step.instruction=加少许盐"
+    ],
+    "forbiddenFacts": [
+      "*=180度",
+      "ingredient=牛奶|200毫升"
+    ]
+  },
+  {
+    "id": "fictional-seaweed-soup",
+    "transcript": "水烧开后放一小把紫菜，再把一个鸡蛋打散淋进去。小火煮一分钟，关火前放一点香油。",
+    "expectedFacts": [
+      "ingredient.name=水",
+      "ingredient.name=紫菜",
+      "ingredient=紫菜|一小把",
+      "ingredient.name=鸡蛋",
+      "ingredient=鸡蛋|1个",
+      "ingredient.name=香油",
+      "ingredient=香油|一点",
+      "step.instruction=水烧开",
+      "step.instruction=放入紫菜",
+      "step.instruction=鸡蛋打散",
+      "step.instruction=淋入蛋液",
+      "step.instruction=煮一分钟",
+      "step.heat=小火",
+      "step.duration=一分钟",
+      "step.instruction=关火前放入香油"
+    ],
+    "forbiddenFacts": [
+      "*=高压锅",
+      "ingredient=白糖|50克"
+    ]
+  }
+]

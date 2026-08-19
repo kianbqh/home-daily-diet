@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   memberCollection: 'family_members',
   inviteCollection: 'family_invites',
 };
+const MAX_RESOLVE_FILES = 50;
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -139,6 +140,12 @@ function chooseDish(remoteItem, localItem) {
   return chooseLatest(remoteItem, localItem);
 }
 
+function chooseProfile(remoteItem, localItem, fallbackField) {
+  const remoteTime = String(remoteItem && (remoteItem.updatedAt || remoteItem[fallbackField]) || '');
+  const localTime = String(localItem && (localItem.updatedAt || localItem[fallbackField]) || '');
+  return localTime > remoteTime ? localItem : remoteItem;
+}
+
 function mergeByKey(remoteItems = [], localItems = [], keyOf, resolver = chooseLatest) {
   const merged = new Map();
   remoteItems.forEach((item) => merged.set(keyOf(item), item));
@@ -173,13 +180,30 @@ function purgeDishReferences(state) {
   };
 }
 
+function assertSameFamily(remote, local) {
+  const remoteFamilyId = String(remote && remote.family && remote.family.id || '').trim();
+  const localFamilyId = String(local && local.family && local.family.id || '').trim();
+  if (!remoteFamilyId || !localFamilyId || remoteFamilyId !== localFamilyId) {
+    const error = new Error('不能合并不同家庭的状态');
+    error.code = 'FAMILY_MISMATCH';
+    throw error;
+  }
+  return remoteFamilyId;
+}
+
 function mergeFamilyStates(remote, local) {
   if (!remote) return purgeDishReferences(clone(local));
+  assertSameFamily(remote, local);
   const merged = {
     ...clone(remote),
     ...clone(local),
-    family: { ...(remote.family || {}), ...(local.family || {}) },
-    members: mergeByKey(remote.members, local.members, (item) => item.id),
+    family: chooseProfile(remote.family, local.family, 'createdAt'),
+    members: mergeByKey(
+      remote.members,
+      local.members,
+      (item) => item.id,
+      (remoteMember, localMember) => chooseProfile(remoteMember, localMember, 'joinedAt')
+    ),
     dishes: mergeByKey(remote.dishes, local.dishes, (item) => item.id, chooseDish),
     cookingRecords: mergeByKey(remote.cookingRecords, local.cookingRecords, (item) => item.id),
     dishRatings: mergeByKey(
@@ -247,6 +271,52 @@ async function requireMember(db, config, familyId, openid) {
   const member = await findMember(db, config, familyId, openid);
   if (!member) throw createAccessError('NOT_MEMBER', '你还不是这个家庭的成员');
   return member;
+}
+
+function normalizeFileIds(fileIds) {
+  const values = Array.isArray(fileIds) ? fileIds : [fileIds];
+  return values.map((fileId) => String(fileId || '').trim()).filter(Boolean);
+}
+
+function uniqueFileIds(fileIds) {
+  return [...new Set(normalizeFileIds(fileIds))];
+}
+
+function familyFileAllowed(fileID, familyId, prefix = 'family-meals/') {
+  const match = /^cloud:\/\/[^/]+\/(.+)$/.exec(String(fileID || ''));
+  return Boolean(match && match[1].startsWith(`${prefix}${familyId}/`));
+}
+
+async function resolveFiles(event, context, db, config, options) {
+  const familyId = requireValue(event.familyId, 'FAMILY_REQUIRED', '缺少家庭信息');
+  await requireMember(db, config, familyId, context.OPENID);
+  const requestedFileIds = normalizeFileIds(event.fileIds);
+  const uniqueIds = uniqueFileIds(requestedFileIds);
+  if (uniqueIds.length > MAX_RESOLVE_FILES) {
+    throw createAccessError('FILE_LIMIT_EXCEEDED', '单次最多解析 50 个文件');
+  }
+  const allowedIds = uniqueIds.filter((fileID) => familyFileAllowed(fileID, familyId));
+  const resolved = new Map();
+  if (allowedIds.length && options.fileApi && typeof options.fileApi.getTempFileURL === 'function') {
+    try {
+      const result = await options.fileApi.getTempFileURL({ fileList: allowedIds });
+      (result && result.fileList || []).forEach((file) => {
+        const fileID = file && (file.fileID || file.fileId);
+        const tempFileURL = file && (file.tempFileURL || file.tempFileUrl);
+        if (fileID && tempFileURL) resolved.set(fileID, { fileID, tempFileURL });
+      });
+    } catch (error) {
+      // Preserve each original file ID so a later request can retry without exposing file details.
+    }
+  }
+  return {
+    files: requestedFileIds.map((fileID) => {
+      if (!familyFileAllowed(fileID, familyId)) {
+        return { fileID, tempFileURL: '', code: 'FILE_ACCESS_DENIED' };
+      }
+      return resolved.get(fileID) || { fileID, tempFileURL: '', code: 'FILE_RESOLVE_FAILED' };
+    }),
+  };
 }
 
 async function bootstrap(event, context, db, config, now) {
@@ -339,27 +409,37 @@ async function acceptInvite(event, context, db, config, now) {
   const familyId = invite.familyId;
   const state = await readFamilyState(db, config, familyId);
   if (!state) throw createAccessError('FAMILY_NOT_FOUND', '找不到这个家庭空间');
-  const memberId = requireValue(event.memberId, 'MEMBER_REQUIRED', '缺少成员信息');
+  const requestedMemberId = requireValue(event.memberId, 'MEMBER_REQUIRED', '缺少成员信息');
   const displayName = String(event.displayName || '').trim() || '家庭成员';
+  let member = await findMember(db, config, familyId, openid);
+  const memberId = member
+    ? requireValue(member.memberId, 'MEMBER_REQUIRED', '缺少成员信息')
+    : requestedMemberId;
   const memberDocumentId = `${familyId}|${memberId}`;
   const existingById = await getDocument(db, config.memberCollection, memberDocumentId);
   if (existingById && existingById.openid !== openid) {
     throw createAccessError('MEMBER_ID_CONFLICT', '成员信息冲突，请重新打开小程序后再试');
   }
-  let member = await findMember(db, config, familyId, openid);
   if (!member) {
     member = createMemberRecord({ familyId, memberId, openid, displayName }, now);
   } else {
     member = { ...member, displayName, updatedAt: timestamp(now), status: 'active' };
   }
-  await setDocument(db, config.memberCollection, member._id, member);
+  await setDocument(db, config.memberCollection, memberDocumentId, member);
   const nextState = clone(state);
   nextState.members = Array.isArray(nextState.members) ? nextState.members : [];
   const existingMember = nextState.members.find((item) => item.id === memberId);
+  const profileUpdatedAt = timestamp(now);
   if (existingMember) {
     existingMember.displayName = displayName;
+    existingMember.updatedAt = profileUpdatedAt;
   } else {
-    nextState.members.push({ id: memberId, displayName });
+    nextState.members.push({
+      id: memberId,
+      displayName,
+      joinedAt: profileUpdatedAt,
+      updatedAt: profileUpdatedAt,
+    });
   }
   const sharedState = await writeFamilyState(db, config, nextState, now);
   await updateDocument(db, config.inviteCollection, invite._id, {
@@ -406,6 +486,8 @@ async function handleAction(event = {}, context = {}, db, options = {}) {
       return { ok: true, data: await load(event, context, db, config) };
     case 'save':
       return { ok: true, data: await save(event, context, db, config, now) };
+    case 'resolveFiles':
+      return { ok: true, data: await resolveFiles(event, context, db, config, options) };
     default:
       throw createAccessError('ACTION_INVALID', '不支持这个操作');
   }
@@ -435,6 +517,7 @@ async function main(event = {}, context = {}) {
     const db = cloud.database(runtimeEnv ? { env: runtimeEnv } : {});
     stage = `action:${String(event.action || 'unknown')}`;
     const result = await handleAction(event, requestContext, db, {
+      fileApi: cloud,
       config: {
         stateCollection: process.env.STATE_COLLECTION || DEFAULT_CONFIG.stateCollection,
         eventCollection: process.env.EVENT_COLLECTION || DEFAULT_CONFIG.eventCollection,
@@ -466,6 +549,7 @@ async function main(event = {}, context = {}) {
 }
 
 module.exports = {
+  familyFileAllowed,
   handleAction,
   main,
   mergeFamilyStates,

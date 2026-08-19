@@ -1,5 +1,6 @@
 const { buildTrashViewModel } = require('../../utils/view-model');
 const { isCloudFileId, resolveCloudFileUrls } = require('../../utils/cloud-image');
+const { syncPageFromCloud } = require('../../utils/page-refresh');
 
 Page({
   data: {
@@ -16,10 +17,24 @@ Page({
   },
 
   onShow() {
-    this.refresh();
+    syncPageFromCloud(this).catch(() => {});
+  },
+
+  onPullDownRefresh() {
+    return syncPageFromCloud(this, { force: true, manual: true });
+  },
+
+  beginImageResolution() {
+    this.imageResolutionGeneration = Number(this.imageResolutionGeneration || 0) + 1;
+    return this.imageResolutionGeneration;
+  },
+
+  onUnload() {
+    this.beginImageResolution();
   },
 
   refresh() {
+    const generation = this.beginImageResolution();
     const store = this.getStore();
     if (!store) return;
     const model = buildTrashViewModel(store.getState());
@@ -29,9 +44,10 @@ Page({
     }));
     this.setData({ ...model, dishes });
     const cloudImages = dishes.filter((dish) => isCloudFileId(dish.coverImage));
-    if (!cloudImages.length || typeof wx === 'undefined' || !wx.cloud) return;
-    resolveCloudFileUrls(cloudImages.map((dish) => dish.coverImage), wx.cloud)
+    if (!cloudImages.length) return;
+    resolveCloudFileUrls(cloudImages.map((dish) => dish.coverImage), store)
       .then((urls) => {
+        if (generation !== this.imageResolutionGeneration) return;
         this.setData({
           dishes: dishes.map((dish) => ({
             ...dish,
@@ -79,14 +95,22 @@ Page({
       content: '会同时删除它的制作记录和评价，删除后无法恢复。',
       confirmText: '彻底删除',
       confirmColor: '#b85c45',
-      success: (result) => {
+      success: async (result) => {
         if (!result.confirm) return;
         const store = this.getStore();
         if (!store || typeof store.purgeDish !== 'function') return;
         try {
-          store.purgeDish({ dishId });
+          const outcome = await store.purgeDish({ dishId });
           this.refresh();
-          wx.showToast({ title: '已彻底删除', icon: 'success' });
+          if (outcome && outcome.cleanupPending) {
+            wx.showToast({
+              title: outcome.message || '菜品已删除，云端附件将在联网后继续清理',
+              icon: 'none',
+              duration: 3500,
+            });
+          } else {
+            wx.showToast({ title: '已彻底删除', icon: 'success' });
+          }
         } catch (error) {
           wx.showToast({ title: error.message || '删除失败', icon: 'none' });
         }

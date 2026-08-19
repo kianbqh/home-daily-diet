@@ -1,0 +1,6 @@
+{
+  "navigationBarTitleText": "整理家庭菜谱",
+  "usingComponents": {
+    "recipe-editor": "/components/recipe-editor/recipe-editor"
+  }
+}
